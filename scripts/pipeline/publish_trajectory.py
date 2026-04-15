@@ -5,8 +5,8 @@
 plan_motion.py가 생성한 trajectory.csv를 읽어서 로봇에 전송한다.
 
 사용법:
-    uv run scripts/publish_trajectory.py --object sample --num-viewpoints 124
-    uv run scripts/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
+    uv run scripts/pipeline/publish_trajectory.py --object sample --num-viewpoints 124
+    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
 """
 
 import argparse
@@ -24,7 +24,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from common import config
 
 JOINT_NAMES = [

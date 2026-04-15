@@ -6,18 +6,18 @@ CoACD Convex Decomposition 시각화
 
 사용법:
     # 기본 (source mesh)
-    uv run scripts/visualize_coacd.py --object sample
+    uv run scripts/viz/visualize_coacd.py --object sample
 
     # threshold 조절
-    uv run scripts/visualize_coacd.py --object sample --threshold 0.05
+    uv run scripts/viz/visualize_coacd.py --object sample --threshold 0.05
 
     # 재질 필터 (target mesh)
-    uv run scripts/visualize_coacd.py --object sample --material-rgb "170,163,158"
+    uv run scripts/viz/visualize_coacd.py --object sample --material-rgb "170,163,158"
 
     # threshold 비교
-    uv run scripts/visualize_coacd.py --object sample --material-rgb "170,163,158" --compare
+    uv run scripts/viz/visualize_coacd.py --object sample --material-rgb "170,163,158" --compare
 
-    uv run scripts/visualize_coacd.py --object glass --compare
+    uv run scripts/viz/visualize_coacd.py --object glass --compare
 
 """
 
@@ -31,7 +31,7 @@ import trimesh
 import coacd
 import plotly.graph_objects as go
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from common import config
 
 
@@ -148,7 +148,7 @@ def build_html(mesh, all_results: dict, output_html: str):
 def load_mesh(args):
     """메시 로드 (재질 필터 지원)."""
     # generate_viewpoints.py의 로직 재사용
-    from scripts.generate_viewpoints import (
+    from scripts.pipeline.generate_viewpoints import (
         parse_mtl_file, parse_obj_material_usage,
         match_material_by_color, extract_target_mesh, kd_to_rgb,
     )

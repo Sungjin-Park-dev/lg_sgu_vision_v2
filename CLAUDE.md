@@ -5,14 +5,15 @@ UR5e 로봇을 이용한 비전 검사 궤적 생성 시스템. cuRobo(IK/충돌
 ## 디렉토리 구조
 
 ```
-scripts/           현재 사용 중인 스크립트
-scripts/prev/      이전 버전 (2_generate_trajectory.py 등 full pipeline)
-common/config.py   전역 설정 (카메라, 로봇, 월드, 경로 헬퍼)
-common/math_utils.py  공용 수학 유틸리티
-common/viz_utils.py   공용 시각화 유틸리티
-data/{object}/     mesh/ viewpoint/ trajectory/ 구조
-curobo/            NVIDIA cuRobo 라이브러리 (수정된 포크)
-cuopt/             cuOpt TSP/GTSP 예제
+scripts/
+  pipeline/        핵심 3단계: generate_viewpoints, plan_motion, publish_trajectory
+  ros2/            ROS2 유틸: move_to_start, publish_workcell_markers
+  viz/             시각화/디버그: visualize_viewpoints (내부 헬퍼), visualize_coacd
+  isaac/           Isaac Sim 전용 (./python.sh로 실행): ur_ros2_joint_control
+  prev/            이전 버전 (full pipeline 스크립트)
+common/            config, math_utils, viz_utils
+data/{object}/     mesh/ viewpoint/ trajectory/ 구조 (gitignore)
+curobo/            NVIDIA cuRobo 라이브러리 수정 포크 (gitignore)
 ```
 
 ## 파이프라인

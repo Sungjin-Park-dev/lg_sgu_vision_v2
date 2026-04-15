@@ -4,17 +4,17 @@
 
 ```bash
 # 기본 (dbscan 클러스터링)
-uv run scripts/generate_viewpoints.py --object sample
+uv run scripts/pipeline/generate_viewpoints.py --object sample
 
 # 재질 RGB 필터 + 옵션
-uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" \
+uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" \
   --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25
 
 # 파라미터 비교 HTML (여러 변형을 드롭다운으로)
-uv run scripts/generate_viewpoints.py --object sample --cluster-method dbscan --compare
+uv run scripts/pipeline/generate_viewpoints.py --object sample --cluster-method dbscan --compare
 
 # 통계만 확인 (HDF5 저장 안 함)
-uv run scripts/generate_viewpoints.py --object sample --dry-run
+uv run scripts/pipeline/generate_viewpoints.py --object sample --dry-run
 ```
 
 출력:
@@ -26,10 +26,10 @@ uv run scripts/generate_viewpoints.py --object sample --dry-run
 ## 2. 궤적 생성
 
 ```bash
-uv run scripts/plan_motion.py --object sample --num-viewpoints 124
+uv run scripts/pipeline/plan_motion.py --object sample --num-viewpoints 124
 
 # 보간 간격 변경 (기본 2mm)
-uv run scripts/plan_motion.py --object sample --num-viewpoints 124 --interp-spacing 5.0
+uv run scripts/pipeline/plan_motion.py --object sample --num-viewpoints 124 --interp-spacing 5.0
 ```
 
 | 옵션 | 기본값 | 설명 |
@@ -72,22 +72,22 @@ ros2 launch ur_robot_driver ur_control.launch.py \
 
 ```bash
 # 저장된 trajectory.csv를 로봇으로 전송
-uv run scripts/publish_trajectory.py --object sample --num-viewpoints 124
+uv run scripts/pipeline/publish_trajectory.py --object sample --num-viewpoints 124
 
 # CSV 경로 직접 지정
-uv run scripts/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
+uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
 ```
 
 ### 시작 자세 복귀
 
 ```bash
-uv run scripts/move_to_start.py
+uv run scripts/ros2/move_to_start.py
 ```
 
 ### RViz 마커 (작업 환경 시각화)
 
 ```bash
-uv run scripts/publish_workcell_markers.py --object sample
+uv run scripts/ros2/publish_workcell_markers.py --object sample
 ```
 
 ## ROS2 인터페이스

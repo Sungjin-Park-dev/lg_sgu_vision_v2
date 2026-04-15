@@ -4,7 +4,7 @@
 
 ```
 Stage 1: 뷰포인트 생성 + 클러스터링 + 클러스터 순서 최적화
-  scripts/generate_viewpoints.py
+  scripts/pipeline/generate_viewpoints.py
   Input:  data/{object}/mesh/target.{ply,obj} (+ optional material RGB 필터)
   Output: data/{object}/viewpoint/{num}/viewpoints_{method}.h5 + .html
   Process: PCA 주축 → 그리드 샘플링 → 표면 투영/법선 계산
@@ -13,7 +13,7 @@ Stage 1: 뷰포인트 생성 + 클러스터링 + 클러스터 순서 최적화
            → 클러스터 간: GTSP (Noon-Bean + OR-Tools ATSP)
 
 Stage 2: 궤적 생성
-  scripts/plan_motion.py
+  scripts/pipeline/plan_motion.py
   Input:  viewpoints.h5 (클러스터 데이터 필수)
   Output: data/{object}/trajectory/{num}/trajectory.csv + trajectory.html
   Process:
@@ -22,7 +22,7 @@ Stage 2: 궤적 생성
     - 충돌 검사 (SDF: 메시 + 큐보이드)
 
 Stage 3: 로봇 실행 (ROS2)
-  scripts/publish_trajectory.py
+  scripts/pipeline/publish_trajectory.py
   Input:  trajectory.csv
   Output: FollowJointTrajectory action → ur_robot_driver
 ```

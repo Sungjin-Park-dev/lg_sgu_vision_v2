@@ -20,8 +20,8 @@ Loads a UR robot (ur5e or ur20) and creates an Action Graph that subscribes to
 /joint_states topic and drives the robot via ArticulationController.
 
 Usage:
-    ./python.sh scripts/ur_ros2_joint_control.py
-    ./python.sh scripts/ur_ros2_joint_control.py --robot ur20
+    ./python.sh scripts/isaac/ur_ros2_joint_control.py
+    ./python.sh scripts/isaac/ur_ros2_joint_control.py --robot ur20
 
 Test with:
     ros2 topic pub /joint_states sensor_msgs/msg/JointState \
@@ -65,7 +65,7 @@ from isaacsim.core.api import SimulationContext
 from isaacsim.core.utils import extensions, prims, viewports
 from isaacsim.storage.native import get_assets_root_path
 from isaacsim.core.api.objects import VisualCuboid
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "common"))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent / "common"))
 import config
 
 # Enable ROS2 bridge extension

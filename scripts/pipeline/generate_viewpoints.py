@@ -10,32 +10,32 @@
 
 사용법:
     # 기본: FOV 기반 자동 간격
-    uv run scripts/generate_viewpoints.py --object sample
+    uv run scripts/pipeline/generate_viewpoints.py --object sample
 
     # 재질 필터
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158"
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158"
 
     # 간격 수동 오버라이드 (mm)
-    uv run scripts/generate_viewpoints.py --object sample --row-spacing 5.0 --col-spacing 5.0
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --row-spacing 5.0 --col-spacing 5.0
 
     # 파라미터 변형 비교 (드롭다운 HTML)
-    uv run scripts/generate_viewpoints.py --object sample --cluster-method coacd --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --cluster-method coacd --compare
 
     # CoACD 기반 클러스터링 (메시 convex decomposition)
-    uv run scripts/generate_viewpoints.py --object sample --cluster-method coacd
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --cluster-method coacd
 
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd
 
     # Sample
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan --normal-weight 0.05 --compare
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd --normal-weight 0.05 --compare
-    uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan --normal-weight 0.05 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd --normal-weight 0.05 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --compare
 
     # Glass
-    uv run scripts/generate_viewpoints.py --object glass --cluster-method dbscan --normal-weight 0.05 --compare
-    uv run scripts/generate_viewpoints.py --object glass --cluster-method coacd --normal-weight 0.05 --compare
-    uv run scripts/generate_viewpoints.py --object glass --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object glass --cluster-method dbscan --normal-weight 0.05 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object glass --cluster-method coacd --normal-weight 0.05 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object glass --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --compare
 """
 
 import os
@@ -51,10 +51,10 @@ import trimesh
 import h5py
 from sklearn.cluster import DBSCAN
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix
-from scripts.visualize_viewpoints import visualize_clusters_html
+from scripts.viz.visualize_viewpoints import visualize_clusters_html
 
 
 # ============================================================================
@@ -1013,16 +1013,16 @@ def parse_arguments() -> argparse.Namespace:
         epilog="""
 Examples:
   # 기본: FOV 기반 자동 간격
-  uv run scripts/generate_viewpoints.py --object sample
+  uv run scripts/pipeline/generate_viewpoints.py --object sample
 
   # 재질 필터
-  uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158"
+  uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158"
 
   # DBSCAN 클러스터링
-  uv run scripts/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan
+  uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan
 
   # CoACD 클러스터링 (메시 convex decomposition)
-  uv run scripts/generate_viewpoints.py --object sample --cluster-method coacd --coacd-threshold 0.05
+  uv run scripts/pipeline/generate_viewpoints.py --object sample --cluster-method coacd --coacd-threshold 0.05
         """,
     )
 
