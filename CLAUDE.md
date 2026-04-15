@@ -18,9 +18,11 @@ cuopt/             cuOpt TSP/GTSP 예제
 ## 파이프라인
 
 ```
-generate_viewpoints.py [--cluster] → viewpoints.h5
+generate_viewpoints.py → viewpoints.h5        (클러스터링 + GTSP 순서)
     ↓
-plan_motion.py --publish → ROS2 FollowJointTrajectory action
+plan_motion.py        → trajectory.csv       (IK + 충돌검사 + 재계획)
+    ↓
+publish_trajectory.py → ROS2 FollowJointTrajectory action
 ```
 
 ## 핵심 규칙
@@ -36,4 +38,5 @@ plan_motion.py --publish → ROS2 FollowJointTrajectory action
 - [docs/architecture.md](docs/architecture.md) — 파이프라인 상세, 데이터 흐름
 - [docs/running.md](docs/running.md) — 실행 방법 (UR 드라이버, 파이프라인, ROS2)
 - [docs/config.md](docs/config.md) — config.py 파라미터 설명
-- [docs/clustering.md](docs/clustering.md) — 뷰포인트 클러스터링 (경로 순서 최적화)
+- [docs/generate_viewpoints.md](docs/generate_viewpoints.md) — 뷰포인트 생성 + 클러스터링 + GTSP 상세
+- [docs/logs/](docs/logs/) — 날짜별 작업 로그
