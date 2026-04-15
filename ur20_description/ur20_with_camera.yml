@@ -1,0 +1,131 @@
+##
+## Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+##
+## NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+## property and proprietary rights in and to this material, related
+## documentation and any modifications thereto. Any use, reproduction,
+## disclosure or distribution of this material and related documentation
+## without an express license agreement from NVIDIA CORPORATION or
+## its affiliates is strictly prohibited.
+##
+
+robot_cfg:
+  kinematics:
+    usd_path: "robot/ur_description/ur20_with_camera.usd"
+    usd_robot_root: "/robot"
+    isaac_usd_path: ""
+    usd_flip_joints: {}
+    usd_flip_joint_limits: []
+
+    urdf_path: "robot/ur_description/ur20_with_camera.urdf"
+    asset_root_path: "robot/ur_description"
+    
+    base_link: "base_link"
+    ee_link: "camera_optical_frame"
+    link_names: null
+    lock_joints: null
+    extra_links: null
+
+    
+    collision_link_names: ['shoulder_link','upper_arm_link', 'forearm_link', 'wrist_1_link', 'wrist_2_link' ,'wrist_3_link', 'tool0'] # List[str]
+    collision_spheres:
+      shoulder_link:
+        - "center": [0.001, -0.025, -0.022]
+          "radius": 0.1397
+      upper_arm_link:
+        - "center": [-0.013, 0.0, 0.23]
+          "radius": 0.14876
+        - "center": [-0.245, -0.001, 0.258]
+          "radius": 0.13518
+        - "center": [-0.587, -0.0, 0.258]
+          "radius": 0.13466
+        - "center": [-0.42, -0.0, 0.258]
+          "radius": 0.13466
+        - "center": [-0.858, -0.002, 0.216]
+          "radius": 0.13309
+        - "center": [-0.677, -0.0, 0.258]
+          "radius": 0.13414
+        - "center": [-0.205, 0.0, 0.259]
+          "radius": 0.13518
+        - "center": [-0.359, -0.001, 0.257]
+          "radius": 0.13414
+        - "center": [-0.018, 0.002, 0.258]
+          "radius": 0.14511
+      forearm_link:
+        - "center": [-0.017, -0.003, 0.058]
+          "radius": 0.11128
+        - "center": [-0.156, -0.004, 0.046]
+          "radius": 0.10261
+        - "center": [-0.31, 0.001, 0.043]
+          "radius": 0.09653
+        - "center": [-0.457, -0.0, 0.043]
+          "radius": 0.09393
+        - "center": [-0.565, -0.0, 0.044]
+          "radius": 0.09133
+        - "center": [-0.722, -0.0, 0.053]
+          "radius": 0.08959
+        - "center": [-0.223, -0.001, 0.044]
+          "radius": 0.09914
+        - "center": [-0.662, -0.0, 0.044]
+          "radius": 0.08872
+      wrist_1_link:
+        - "center": [-0.0, -0.007, -0.01]
+          "radius": 0.0797
+        - "center": [-0.0, -0.0, -0.046]
+          "radius": 0.0797
+      wrist_2_link:
+        - "center": [0.0, 0.022, 0.0]
+          "radius": 0.07931
+        - "center": [0.0, 0.0, -0.046]
+          "radius": 0.07931
+      wrist_3_link:
+        - "center": [0.00, 0.00, -0.02]
+          "radius": 0.07
+        - "center": [0.011, -0.008, 0.05]
+          "radius": 0.05
+        - "center": [0.011, -0.008, 0.1]
+          "radius": 0.05
+        - "center": [0.011, -0.008, 0.15]
+          "radius": 0.05
+        - "center": [0.011, -0.008, 0.2]
+          "radius": 0.05
+      
+      tool0:
+        - "center": [0, -0.065, -0.03]
+          "radius": 0.035
+        - "center": [0, -0.12, -0.03]
+          "radius": 0.035
+
+
+
+
+    collision_sphere_buffer: 0.0
+    extra_collision_spheres: {}
+    self_collision_ignore: {
+      "shoulder_link": ["tool0"],
+      "upper_arm_link": ["forearm_link", "shoulder_link", "tool0"],
+      "forearm_link": ["wrist_1_link", "wrist_2_link", "wrist_3_link"],
+      "wrist_1_link": ["wrist_2_link","wrist_3_link","tool0"],
+      "wrist_2_link": ["wrist_3_link", "tool0"],
+      "wrist_3_link": ["tool0"],
+      }
+    self_collision_buffer: {'upper_arm_link': 0, 
+      'forearm_link': 0, 
+      'wrist_1_link': 0, 
+      'wrist_2_link': 0,
+      'wrist_3_link' : 0,
+      'tool0': 0.025,
+      } 
+      
+    use_global_cumul: True
+    mesh_link_names:  ['shoulder_link','upper_arm_link', 'forearm_link', 'wrist_1_link', 'wrist_2_link' ,'wrist_3_link'] # List[str]
+
+    cspace:
+      joint_names: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+     
+      retract_config:  [0.0, -2.2, 1.9, -1.383, -1.57, 0.00]
+      null_space_weight:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      max_jerk: 500.0
+      max_acceleration: 12.0
+      position_limit_clip: 0.1

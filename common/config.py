@@ -1,0 +1,246 @@
+ #!/usr/bin/env python3
+import numpy as np
+from pathlib import Path
+
+# ============================================================================
+# 프로젝트 경로
+# ============================================================================
+PROJECT_ROOT = Path(__file__).parent.parent
+DATA_ROOT = PROJECT_ROOT / "data"
+
+# ============================================================================
+# 카메라 사양
+# ============================================================================
+
+# 카메라 시야각 (mm)
+CAMERA_FOV_WIDTH_MM = 41.0
+CAMERA_FOV_HEIGHT_MM = 30.0
+
+# 작업 거리 (mm) - 카메라에서 표면까지의 거리
+CAMERA_WORKING_DISTANCE_MM = 110.0
+
+# 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
+CAMERA_OVERLAP_RATIO = 0.5
+
+# 로봇 제약 여부
+ROBOT_HAS_CONSTRAINT = True
+
+# 로봇 시작 자세 (UR 시뮬레이터 기본 자세, radian)
+# ROBOT_START_STATE = np.array([-1.67422354221344, -1.216842532157898, 1.6096495389938354, -2.0281713008880615, -1.5707969665527344, -0.031])
+# ROBOT_START_STATE = np.array([-1.6007, -1.7271, -2.203, -0.808, 1.5951, -0.031])
+
+ROBOT_START_STATE = np.array([-2.0, -1.6, -1.8, -0.7, 1.8, -0.031])
+ROBOT_START_STATE = np.array([
+                            np.deg2rad(-270), 
+                            np.deg2rad(-90), 
+                            np.deg2rad(60),
+                            np.deg2rad(-90),
+                            np.deg2rad(-90),
+                            np.deg2rad(0),
+                            ])
+
+# ROBOT_START_STATE = np.deg2rad([-90, -120, -60, -90, 90, 0])
+
+# 조인트 최대 움직임
+MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
+
+
+# ============================================================================
+# 월드 설정 (Isaac Sim 좌표계, 미터 단위)
+# ============================================================================
+
+# 대상 객체 설정
+TARGET_OBJECT = {
+    "name": "target_object",
+    # "position": np.array([0.0, 1.1, 0.095], dtype=np.float64),
+    # "position": np.array([-0.2, 1.1, 0.095], dtype=np.float64),
+    "position": np.array([-0.1, 1.1, 0.095], dtype=np.float64),
+    "rotation": np.array([0.7071, 0.0, 0.0, 0.7071], dtype=np.float64),  # 쿼터니언: w, x, y, z
+}
+
+# 테이블 직육면체 설정
+TABLE = {
+    "name": "table",
+    # "position": np.array([0.0, 1.09 + 0.25, 0.365 - 0.8], dtype=np.float64),
+    "position": np.array([-0.2, 1.1, 0.365 - 0.8], dtype=np.float64),
+    "dimensions": np.array([1.0, 0.6, 0.73], dtype=np.float64),
+}
+
+# 벽(펜스) 직육면체 설정 - 작업 공간을 둘러싼 4개의 벽
+WALLS = [
+    {
+        "name": "wall_front",
+        "position": np.array([0.0, 1.6, 0.5], dtype=np.float64),
+        "dimensions": np.array([2.2, 0.1, 3.0], dtype=np.float64),
+    },
+    {
+        "name": "wall_back",
+        "position": np.array([0.0, -1.0, 0.5], dtype=np.float64),
+        "dimensions": np.array([2.2, 0.1, 3.0], dtype=np.float64),
+    },
+    {
+        "name": "wall_left",
+        "position": np.array([-1.0, 0.25, 0.5], dtype=np.float64),
+        "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
+    },
+    {
+        "name": "wall_right",
+        "position": np.array([1.0, 0.25, 0.5], dtype=np.float64),
+        "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
+    },
+    {
+        "name": "support",
+        # "position": np.array([0.0, 1.22, -0.0525], dtype=np.float64),
+        "position": np.array([-0.1, 1.1, -0.0525], dtype=np.float64),
+        "dimensions": np.array([0.1, 0.1, 0.265], dtype=np.float64),
+    },
+]
+
+# 로봇 마운트(베이스) 설정
+ROBOT_MOUNT = {
+    "name": "robot_mount",
+    "position": np.array([0.0, 0.0, -0.25], dtype=np.float64),
+    "dimensions": np.array([0.3, 0.3, 0.5], dtype=np.float64),
+}
+
+
+# ============================================================================
+# 로봇 설정
+# ============================================================================
+
+# cuRobo와 EAIK에서 사용되는 로봇 설정 파일
+DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
+DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20_with_camera.urdf"
+
+# 툴 오프셋: tool0/wrist3에서 camera_optical_frame까지의 거리 (미터)
+# End-Effector로부터 카메라 초점까지의 실제 거리로 변경해야 합니다.
+TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.234
+
+
+# ============================================================================
+# GTSP 최적화 기본값
+# ============================================================================
+DEFAULT_KNN = 30
+DEFAULT_LAMBDA_ROT = 1.0
+
+# ============================================================================
+# 충돌 검사 파라미터
+# ============================================================================
+
+COLLISION_MARGIN = 0.0
+COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG = 0.05  # 1 step 당 최대 joint 변화량
+COLLISION_INTERP_EXCLUDE_LAST_JOINT = True # End-Effector 회전 무시
+
+
+# ============================================================================
+# 재계획 파라미터
+# ============================================================================
+
+REPLAN_ENABLED = True
+REPLAN_MAX_ATTEMPTS = 60
+REPLAN_TIMEOUT = 10.0  # 초
+REPLAN_INTERP_DT = 0.005
+REPLAN_TRAJOPT_TSTEPS = 32
+
+
+# ============================================================================
+# 객체 기반 데이터 경로 헬퍼 함수
+# ============================================================================
+
+def get_mesh_path(object_name: str, filename: str = None, mesh_type: str = "target") -> Path:
+    """
+    객체 메시 파일 경로 반환
+
+    Args:
+        object_name: 객체 이름 (예: "glass", "phone")
+        filename: 명시적 메시 파일명 (지정 시 mesh_type 무시)
+        mesh_type: 메시 파일 유형 (기본값: "target")
+            - "source": source.obj (충돌 검사용 전체 멀티 머티리얼 메시)
+            - "target": target.ply (뷰포인트 샘플링용 검사 표면)
+
+    Returns:
+        메시 파일 경로: data/{object_name}/mesh/{filename}
+
+    Examples:
+        >>> get_mesh_path("glass")  # 기본값: 타겟 메시
+        PosixPath('data/glass/mesh/target.ply')  # .ply가 없으면 target.obj
+
+        >>> get_mesh_path("glass", mesh_type="source")  # 충돌용 전체 메시
+        PosixPath('data/glass/mesh/source.obj')
+
+        >>> get_mesh_path("glass", filename="custom.obj")  # 명시적 파일명
+        PosixPath('data/glass/mesh/custom.obj')
+    """
+    if filename is None:
+        # mesh_type에 따라 파일명 자동 결정
+        if mesh_type == "source":
+            filename = "source.obj"
+        elif mesh_type == "target":
+            # target.ply 우선 시도 (검사용 선호), target.obj로 폴백
+            target_ply = DATA_ROOT / object_name / "mesh" / "target.ply"
+            if target_ply.exists():
+                return target_ply
+            filename = "target.obj"
+        else:
+            raise ValueError(f"잘못된 mesh_type: '{mesh_type}'. 'source' 또는 'target'이어야 합니다")
+
+    return DATA_ROOT / object_name / "mesh" / filename
+
+
+def get_viewpoint_path(object_name: str, num_viewpoints: int, filename: str = "viewpoints.h5") -> Path:
+    """
+    뷰포인트 파일 경로 반환
+
+    Args:
+        object_name: 객체 이름 (예: "glass")
+        num_viewpoints: 뷰포인트 개수
+        filename: 파일명 (기본값: "viewpoints.h5")
+
+    Returns:
+        뷰포인트 경로: data/{object_name}/viewpoint/{num_viewpoints}/{filename}
+
+    Example:
+        >>> get_viewpoint_path("glass", 500)
+        PosixPath('data/glass/viewpoint/500/viewpoints.h5')
+    """
+    return DATA_ROOT / object_name / "viewpoint" / str(num_viewpoints) / filename
+
+
+def get_ik_path(object_name: str, num_viewpoints: int, filename: str = "ik_solutions.h5") -> Path:
+    """
+    IK 솔루션 파일 경로 반환
+
+    Args:
+        object_name: 객체 이름 (예: "glass")
+        num_viewpoints: 뷰포인트 개수
+        filename: 파일명 (기본값: "ik_solutions.h5")
+
+    Returns:
+        IK 솔루션 경로: data/{object_name}/ik/{num_viewpoints}/{filename}
+
+    Example:
+        >>> get_ik_path("glass", 500)
+        PosixPath('data/glass/ik/500/ik_solutions.h5')
+    """
+    return DATA_ROOT / object_name / "ik" / str(num_viewpoints) / filename
+
+
+def get_trajectory_path(object_name: str, num_viewpoints: int, filename: str = "gtsp.csv") -> Path:
+    """
+    궤적 파일 경로 반환
+
+    Args:
+        object_name: 객체 이름 (예: "glass")
+        num_viewpoints: 뷰포인트 개수
+        filename: 파일명 (기본값: "gtsp.csv", "gtsp_final.csv"도 가능)
+
+    Returns:
+        궤적 경로: data/{object_name}/trajectory/{num_viewpoints}/{filename}
+
+    Example:
+        >>> get_trajectory_path("glass", 500)
+        PosixPath('data/glass/trajectory/500/gtsp.csv')
+        >>> get_trajectory_path("glass", 500, "gtsp_final.csv")
+        PosixPath('data/glass/trajectory/500/gtsp_final.csv')
+    """
+    return DATA_ROOT / object_name / "trajectory" / str(num_viewpoints) / filename
