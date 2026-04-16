@@ -19,27 +19,163 @@ import sys
 import time
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 from sklearn.cluster import DBSCAN
 
 from curobo.types.base import TensorDeviceType
 from curobo.types.math import Pose
-from curobo.geom.types import WorldConfig
+from curobo.geom.types import Cuboid, Mesh as CuRoboMesh, WorldConfig
 from curobo.util_file import get_robot_configs_path, join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
+from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 from curobo.types.robot import JointState as CuRoboJointState
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
-from pipeline.plan_motion import (
-    load_viewpoints,
-    build_camera_poses,
-    rot_to_quat_batch,
-    build_collision_world,
-    compute_fk,
-)
+from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
+
+
+# =========================================================================
+# Data loading & geometry
+# =========================================================================
+
+def load_viewpoints(object_name: str, num_viewpoints: int):
+    """Load positions, normals, path_order, row_index, cluster data from HDF5."""
+    h5_path = config.get_viewpoint_path(object_name, num_viewpoints)
+    if not h5_path.exists():
+        raise FileNotFoundError(f"Viewpoints file not found: {h5_path}")
+
+    with h5py.File(h5_path, "r") as f:
+        grp = f["viewpoints"]
+        positions = np.array(grp["positions"], dtype=np.float64)
+        normals = np.array(grp["normals"], dtype=np.float64)
+        path_order = np.array(grp["path_order"], dtype=np.int32) if "path_order" in grp else None
+        row_index = np.array(grp["row_index"], dtype=np.int32) if "row_index" in grp else None
+        cluster_id = np.array(grp["cluster_id"], dtype=np.int32) if "cluster_id" in grp else None
+        cluster_order = np.array(grp["cluster_order"], dtype=np.int32) if "cluster_order" in grp else None
+
+        wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
+        if "metadata" in f and "camera_spec" in f["metadata"]:
+            cs = f["metadata"]["camera_spec"]
+            if "working_distance_mm" in cs.attrs:
+                wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
+
+    return positions, normals, path_order, row_index, wd_m, cluster_id, cluster_order
+
+
+def rot_to_quat_batch(R_batch: np.ndarray) -> np.ndarray:
+    """Rotation matrices (N,3,3) → quaternions (N,4) as (w,x,y,z)."""
+    batch_size = R_batch.shape[0]
+    quats = np.zeros((batch_size, 4), dtype=np.float64)
+    for i in range(batch_size):
+        r = Rotation.from_matrix(R_batch[i])
+        q_xyzw = r.as_quat()
+        quats[i] = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
+    return quats
+
+
+def build_camera_poses(positions, normals, working_distance_m):
+    """Surface position + normal → camera 4x4 poses in world frame."""
+    safe_normals = normalize_vectors(normals)
+    camera_positions = positions + safe_normals * working_distance_m
+    approach = -safe_normals
+
+    helper_z = np.array([0.0, 0.0, 1.0])
+    helper_y = np.array([0.0, 1.0, 0.0])
+
+    N = len(positions)
+    local_poses = np.zeros((N, 4, 4), dtype=np.float64)
+
+    for i in range(N):
+        z_axis = approach[i] / np.linalg.norm(approach[i])
+        helper = helper_z if abs(np.dot(z_axis, helper_z)) <= 0.99 else helper_y
+        x_axis = np.cross(helper, z_axis)
+        x_axis /= np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+
+        local_poses[i, :3, :3] = np.stack([x_axis, y_axis, z_axis], axis=1)
+        local_poses[i, :3, 3] = camera_positions[i]
+        local_poses[i, 3, 3] = 1.0
+
+    target_world = np.eye(4, dtype=np.float64)
+    target_world[:3, :3] = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
+    target_world[:3, 3] = config.TARGET_OBJECT["position"]
+
+    world_poses = np.einsum("ij,njk->nik", target_world, local_poses)
+    camera_positions_world = world_poses[:, :3, 3]
+
+    return world_poses, camera_positions_world
+
+
+def build_collision_world(object_name: str):
+    """Build cuRobo WorldConfig from config.py obstacles + target object mesh."""
+    import trimesh
+
+    cuboids = []
+    for obj in [config.TABLE, config.ROBOT_MOUNT] + config.WALLS:
+        cuboids.append(Cuboid(
+            name=obj["name"],
+            pose=[*obj["position"].tolist(), 1, 0, 0, 0],
+            dims=obj["dimensions"].tolist(),
+        ))
+
+    meshes = []
+    mesh_path = config.get_mesh_path(object_name, mesh_type="source")
+    if mesh_path.exists():
+        loaded = trimesh.load(str(mesh_path))
+        if isinstance(loaded, trimesh.Scene):
+            mesh = trimesh.util.concatenate(list(loaded.geometry.values()))
+        else:
+            mesh = loaded
+        pos = config.TARGET_OBJECT["position"]
+        rot = config.TARGET_OBJECT["rotation"]
+        meshes.append(CuRoboMesh(
+            name="target_object",
+            pose=[pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]],
+            vertices=mesh.vertices.tolist(),
+            faces=mesh.faces.flatten().tolist(),
+        ))
+        print(f"  Collision world: {len(cuboids)} cuboids + target mesh ({len(mesh.faces)} faces)")
+    else:
+        print(f"  Warning: Target mesh not found at {mesh_path}, skipping mesh collision")
+
+    return WorldConfig(cuboid=cuboids, mesh=meshes if meshes else None)
+
+
+def compute_fk(solutions, success, robot_cfg_file):
+    """Compute FK for successful IK solutions.
+
+    Returns:
+        ee_positions: (N, 3), ee_quaternions: (N, 4) as (x,y,z,w). NaN for failures.
+    """
+    robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_cfg_file))["robot_cfg"]
+    world_config = WorldConfig()
+    ta = TensorDeviceType(device=torch.device("cuda:0"), dtype=torch.float32)
+
+    rw_config = RobotWorldConfig.load_from_config(robot_cfg, world_config, tensor_args=ta)
+    robot_world = RobotWorld(rw_config)
+
+    N = solutions.shape[0]
+    ee_positions = np.full((N, 3), np.nan, dtype=np.float64)
+    ee_quaternions = np.full((N, 4), np.nan, dtype=np.float64)
+
+    mask = np.where(success)[0]
+    if len(mask) == 0:
+        return ee_positions, ee_quaternions
+
+    q_batch = torch.tensor(solutions[mask], device="cuda:0", dtype=torch.float32)
+    state = robot_world.get_kinematics(q_batch)
+    ee_pos = state.ee_position.cpu().numpy()
+    ee_quat_wxyz = state.ee_quaternion.cpu().numpy()
+
+    ee_positions[mask] = ee_pos
+    ee_quaternions[mask] = ee_quat_wxyz[:, [1, 2, 3, 0]]
+
+    return ee_positions, ee_quaternions
 
 
 # =========================================================================
