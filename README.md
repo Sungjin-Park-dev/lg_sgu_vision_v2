@@ -18,6 +18,21 @@ scripts/
 data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 ```
 
+## 환경 설정
+
+```bash
+# 1. cuRobo 클론
+git clone https://github.com/NVlabs/curobo.git
+
+# 2. Python 의존성 설치
+uv sync
+
+# 3. cuRobo 로컬 설치 (CUDA 빌드 필요)
+cd curobo
+uv pip install -e . --no-build-isolation
+cd ..
+```
+
 ## 실행 방법
 
 ### 1. 뷰포인트 생성
@@ -29,7 +44,7 @@ uv run scripts/pipeline/generate_viewpoints.py \
     --cluster-method coacd+dbscan \
     --normal-weight 0.05 \
     --coacd-threshold 0.25 \
-    --eps 31
+    --eps 25
 ```
 
 `data/sample/viewpoint/124/viewpoints.h5` 생성.

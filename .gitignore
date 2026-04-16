@@ -18,7 +18,6 @@ IsaacLab/
 MotionComparator/
 arm_coverage/
 curobo/
-data/
 
 # Local tool state
 .claude/
