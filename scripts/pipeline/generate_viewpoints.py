@@ -821,11 +821,17 @@ def compute_cluster_internal_order(
     normals: np.ndarray,
     row_spacing_m: float,
     grid_row_index: Optional[np.ndarray] = None,
+    global_axis1: Optional[np.ndarray] = None,
     global_axis2: Optional[np.ndarray] = None,
 ) -> dict:
     """각 클러스터의 내부 zigzag 순서를 사전 계산.
 
     TSP 전에 호출하여 클러스터별 start/end point를 확보한다.
+
+    grid_row_index가 주어지면 전역 축(global_axis1/axis2)을 사용하여
+    클러스터별 PCA를 생략한다. row_index_override가 행 구분을 담당하므로
+    로컬 PCA의 axis1은 불필요하고, axis2는 클러스터 간 열 방향 일관성을
+    위해 이미 전역 값을 사용해야 하기 때문이다.
 
     Args:
         cluster_ids: (N,) 클러스터 ID
@@ -833,6 +839,7 @@ def compute_cluster_internal_order(
         normals: (N, 3) 법선
         row_spacing_m: 행 간격 (미터)
         grid_row_index: (N,) 그리드 생성 시 할당된 원본 행 인덱스. None이면 양자화로 추정.
+        global_axis1: (3,) 전역 행 방향 축. grid_row_index 사용 시 전달 (proj1 계산용, 행 구분에는 미사용).
         global_axis2: (3,) 전역 열 방향 축. grid_row_index 사용 시 행 내 정렬에 사용.
 
     Returns:
@@ -858,9 +865,8 @@ def compute_cluster_internal_order(
 
             if grid_row_index is not None:
                 cluster_row_idx = grid_row_index[indices]
-                _, axis1, axis2 = compute_pca_axes(cluster_cam.astype(np.float64))
-                if global_axis2 is not None:
-                    axis2 = global_axis2 / np.linalg.norm(global_axis2)
+                axis1 = global_axis1 / np.linalg.norm(global_axis1)
+                axis2 = global_axis2 / np.linalg.norm(global_axis2)
                 local_order, _, _ = reorder_zigzag(
                     cluster_cam, axis1, axis2, row_spacing_m,
                     row_index_override=cluster_row_idx,
@@ -1250,7 +1256,7 @@ def main():
         t0 = time.perf_counter()
         c_internal = compute_cluster_internal_order(
             cids, camera_positions, normals, row_spacing_m,
-            grid_row_index=grid_row_index, global_axis2=cam_axis2,
+            grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
         )
         c_order, c_direction = order_clusters_gtsp(cids, camera_positions, c_internal, nw)
         t_gtsp = time.perf_counter() - t0
