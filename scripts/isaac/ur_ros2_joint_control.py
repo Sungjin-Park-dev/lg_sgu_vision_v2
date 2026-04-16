@@ -65,7 +65,7 @@ from isaacsim.core.api import SimulationContext
 from isaacsim.core.utils import extensions, prims, viewports
 from isaacsim.storage.native import get_assets_root_path
 from isaacsim.core.api.objects import VisualCuboid
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent / "common"))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "common"))
 import config
 
 # Enable ROS2 bridge extension

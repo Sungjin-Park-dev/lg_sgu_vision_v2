@@ -40,7 +40,7 @@ from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
 

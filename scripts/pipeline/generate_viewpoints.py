@@ -51,7 +51,7 @@ import trimesh
 import h5py
 from sklearn.cluster import DBSCAN
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix
 from scripts.viz.visualize_viewpoints import visualize_clusters_html

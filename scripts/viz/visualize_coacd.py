@@ -31,7 +31,7 @@ import trimesh
 import coacd
 import plotly.graph_objects as go
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 
 

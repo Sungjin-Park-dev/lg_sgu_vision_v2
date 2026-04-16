@@ -31,9 +31,9 @@ from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
 from curobo.types.robot import JointState as CuRoboJointState
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
-from scripts.pipeline.plan_motion import (
+from pipeline.plan_motion import (
     load_viewpoints,
     build_camera_poses,
     rot_to_quat_batch,
