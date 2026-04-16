@@ -21,13 +21,11 @@ data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 ## 환경 설정
 
 ```bash
-# 1. cuRobo 클론
-git clone https://github.com/NVlabs/curobo.git
-
-# 2. Python 의존성 설치
+# 1. Python 의존성 설치
 uv sync
 
-# 3. cuRobo 로컬 설치 (CUDA 빌드 필요)
+# 2. cuRobo 클론 및 설치 (CUDA 빌드 필요)
+git clone https://github.com/NVlabs/curobo.git
 cd curobo
 uv pip install -e . --no-build-isolation
 cd ..
