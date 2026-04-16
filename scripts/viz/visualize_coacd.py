@@ -148,7 +148,7 @@ def build_html(mesh, all_results: dict, output_html: str):
 def load_mesh(args):
     """메시 로드 (재질 필터 지원)."""
     # generate_viewpoints.py의 로직 재사용
-    from scripts.pipeline.generate_viewpoints import (
+    from pipeline.generate_viewpoints import (
         parse_mtl_file, parse_obj_material_usage,
         match_material_by_color, extract_target_mesh, kd_to_rgb,
     )
