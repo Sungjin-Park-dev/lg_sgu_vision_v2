@@ -1,16 +1,25 @@
 [project]
 name = "curobo-ws"
 version = "0.1.0"
-description = "cuRobo + cuOpt workspace"
+description = "cuRobo workspace"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.10.0",
     "torchvision",
     "torchaudio",
-    "cuopt-server-cu13==26.2.*",
-    "cuopt-sh-client==26.2.*",
     "ortools>=9.15.6755",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "h5py",
+    "trimesh",
+    "plotly",
+    "pyyaml",
+    "warp-lang",
+    "yourdfpy",
+    "open3d",
+    "coacd",
 ]
 
 [tool.uv]
@@ -19,10 +28,6 @@ index-strategy = "unsafe-best-match"
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu130"
-
-[[tool.uv.index]]
-name = "nvidia"
-url = "https://pypi.nvidia.com"
 
 [[tool.uv.index]]
 name = "pypi"

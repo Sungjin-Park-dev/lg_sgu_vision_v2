@@ -26,11 +26,11 @@
 
     uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan
     uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd
-
     # Sample
     uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method dbscan --normal-weight 0.05 --compare
     uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd --normal-weight 0.05 --compare
     uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --compare
+    uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25 --eps 31
 
     # Glass
     uv run scripts/pipeline/generate_viewpoints.py --object glass --cluster-method dbscan --normal-weight 0.05 --compare
