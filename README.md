@@ -47,14 +47,15 @@ uv run scripts/pipeline/generate_viewpoints.py \
     --eps 25
 ```
 
-`data/sample/viewpoint/124/viewpoints.h5` 생성.
+`data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5` 생성.
 
 ### 2. IK 선택 + 궤적 생성
 
 ```bash
 uv run scripts/pipeline/select_ik_dp.py \
     --object sample \
-    --num-viewpoints 124
+    --num-viewpoints 124 \
+    --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
 ```
 
 출력:

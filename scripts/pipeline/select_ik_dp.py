@@ -11,7 +11,7 @@ DBSCAN으로 대표 해를 추출하고, DP로 전역 최적 경로를 선택한
     3. DP              — 최소 joint-space 비용 경로 선택
 
 사용법:
-    uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124
+    uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
 """
 
 import argparse
@@ -911,8 +911,8 @@ def main():
                         help="DBSCAN eps in radians (default: 0.3)")
     parser.add_argument("--reconfig-threshold", type=float, default=29.0,
                         help="Reconfig threshold in degrees (default: 29.0)")
-    parser.add_argument("--spacing", type=float, default=0.05,
-                        help="Uniform resample spacing in radians (default: 0.05)")
+    parser.add_argument("--spacing", type=float, default=0.1,
+                        help="Uniform resample spacing in radians (default: 0.1)")
     parser.add_argument("--output-suffix", type=str, default="dp",
                         help="Output file suffix (default: dp)")
     args = parser.parse_args()
