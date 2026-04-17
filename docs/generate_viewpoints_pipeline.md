@@ -20,10 +20,10 @@ flowchart TD
         B5 --> B6["출력: positions, normals<br>path_order, row_index<br>★ row_index 확정"]
     end
 
-    subgraph Stage3["3. 카메라 위치 + PCA 재정렬"]
-        C1["camera_pos =<br>position + normal × 110mm"] --> C2["카메라 위치 기준<br>PCA 재계산<br>cam_axis1, cam_axis2"]
-        C2 --> C3["reorder_zigzag<br>카메라 좌표 기준"]
-        C3 --> C4["★ grid_row_index =<br>row_index.copy<br>원본 행 인덱스 보존"]
+    subgraph Stage3["3. 카메라 위치 + 전역 축 계산"]
+        C1["camera_pos =<br>position + normal × 110mm"] --> C2["카메라 위치 기준 PCA<br>→ cam_axis1, cam_axis2<br>★ Stage 6의 전역 축으로 사용"]
+        C2 --> C3["★ grid_row_index =<br>row_index.copy<br>원본 행 인덱스 보존"]
+        C3 --> C4["baseline path_order<br>클러스터링 전 경로 길이<br>비교 메트릭용"]
     end
 
     subgraph Stage4["4. 바닥향 필터"]
