@@ -1,0 +1,2263 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "URDF USD Converter v0.1.0"
+    }
+    defaultPrim = "ur"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "ur"
+{
+    def Scope "Geometry"
+    {
+        def Xform "world"
+        {
+            def Xform "base_link"
+            {
+                quatf xformOp:orient = (1, 0, 0, 0)
+                float3 xformOp:scale = (1, 1, 1)
+                double3 xformOp:translate = (0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                def Xform "base_link_inertia"
+                {
+                    quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                    float3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                    def Xform "base" (
+                        prepend references = @./GeometryLibrary.usdc@</Geometry/base>
+                    )
+                    {
+                        quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                        float3 xformOp:scale = (1, 1, 1)
+                        double3 xformOp:translate = (0, 0, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                    }
+
+                    def Mesh "base_1" (
+                        displayName = "base"
+                        prepend references = @./GeometryLibrary.usdc@</Geometry/base_1>
+                    )
+                    {
+                        uniform token purpose = "guide"
+                        quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                        float3 xformOp:scale = (1, 1, 1)
+                        double3 xformOp:translate = (0, 0, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                    }
+
+                    def Xform "shoulder_link"
+                    {
+                        quatf xformOp:orient = (1, 0, 0, 0)
+                        float3 xformOp:scale = (1, 1, 1)
+                        double3 xformOp:translate = (0, 0, 0.2363)
+                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                        def Xform "shoulder" (
+                            prepend references = @./GeometryLibrary.usdc@</Geometry/shoulder>
+                        )
+                        {
+                            quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                            float3 xformOp:scale = (1, 1, 1)
+                            double3 xformOp:translate = (0, 0, 0)
+                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                        }
+
+                        def Mesh "shoulder_1" (
+                            displayName = "shoulder"
+                            prepend references = @./GeometryLibrary.usdc@</Geometry/shoulder_1>
+                        )
+                        {
+                            uniform token purpose = "guide"
+                            quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                            float3 xformOp:scale = (1, 1, 1)
+                            double3 xformOp:translate = (0, 0, 0)
+                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                        }
+
+                        def Xform "upper_arm_link"
+                        {
+                            quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                            float3 xformOp:scale = (1, 1, 1)
+                            double3 xformOp:translate = (0, 0, 0)
+                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                            def Xform "upperarm" (
+                                prepend references = @./GeometryLibrary.usdc@</Geometry/upperarm>
+                            )
+                            {
+                                quatf xformOp:orient = (-0.5, -0.5, 0.5, 0.5)
+                                float3 xformOp:scale = (1, 1, 1)
+                                double3 xformOp:translate = (0, 0, 0.26)
+                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                            }
+
+                            def Mesh "upperarm_1" (
+                                displayName = "upperarm"
+                                prepend references = @./GeometryLibrary.usdc@</Geometry/upperarm_1>
+                            )
+                            {
+                                uniform token purpose = "guide"
+                                quatf xformOp:orient = (-0.5, -0.5, 0.5, 0.5)
+                                float3 xformOp:scale = (1, 1, 1)
+                                double3 xformOp:translate = (0, 0, 0.26)
+                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                            }
+
+                            def Xform "forearm_link"
+                            {
+                                quatf xformOp:orient = (1, 0, 0, 0)
+                                float3 xformOp:scale = (1, 1, 1)
+                                double3 xformOp:translate = (-0.862, 0, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                def Xform "forearm" (
+                                    prepend references = @./GeometryLibrary.usdc@</Geometry/forearm>
+                                )
+                                {
+                                    quatf xformOp:orient = (-0.5, -0.5, 0.5, 0.5)
+                                    float3 xformOp:scale = (1, 1, 1)
+                                    double3 xformOp:translate = (0, 0, 0.043)
+                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                }
+
+                                def Mesh "forearm_1" (
+                                    displayName = "forearm"
+                                    prepend references = @./GeometryLibrary.usdc@</Geometry/forearm_1>
+                                )
+                                {
+                                    uniform token purpose = "guide"
+                                    quatf xformOp:orient = (-0.5, -0.5, 0.5, 0.5)
+                                    float3 xformOp:scale = (1, 1, 1)
+                                    double3 xformOp:translate = (0, 0, 0.043)
+                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                }
+
+                                def Xform "wrist_1_link"
+                                {
+                                    quatf xformOp:orient = (1, 0, 0, 0)
+                                    float3 xformOp:scale = (1, 1, 1)
+                                    double3 xformOp:translate = (-0.7287, 0, 0.201)
+                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                    def Xform "wrist1" (
+                                        prepend references = @./GeometryLibrary.usdc@</Geometry/wrist1>
+                                    )
+                                    {
+                                        quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                                        float3 xformOp:scale = (1, 1, 1)
+                                        double3 xformOp:translate = (0, 0, -0.0775)
+                                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                    }
+
+                                    def Mesh "wrist1_1" (
+                                        displayName = "wrist1"
+                                        prepend references = @./GeometryLibrary.usdc@</Geometry/wrist1_1>
+                                    )
+                                    {
+                                        uniform token purpose = "guide"
+                                        quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                                        float3 xformOp:scale = (1, 1, 1)
+                                        double3 xformOp:translate = (0, 0, -0.0775)
+                                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                    }
+
+                                    def Xform "wrist_2_link"
+                                    {
+                                        quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                                        float3 xformOp:scale = (1, 1, 1)
+                                        double3 xformOp:translate = (0, -0.1593, -3.267297616249225e-11)
+                                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                        def Xform "wrist2" (
+                                            prepend references = @./GeometryLibrary.usdc@</Geometry/wrist2>
+                                        )
+                                        {
+                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                            float3 xformOp:scale = (1, 1, 1)
+                                            double3 xformOp:translate = (0, 0, -0.0749)
+                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                        }
+
+                                        def Mesh "wrist2_1" (
+                                            displayName = "wrist2"
+                                            prepend references = @./GeometryLibrary.usdc@</Geometry/wrist2_1>
+                                        )
+                                        {
+                                            uniform token purpose = "guide"
+                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                            float3 xformOp:scale = (1, 1, 1)
+                                            double3 xformOp:translate = (0, 0, -0.0749)
+                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                        }
+
+                                        def Xform "wrist_3_link"
+                                        {
+                                            quatf xformOp:orient = (-0.70710677, 0.70710677, -8.6595606e-17, -1.7934538e-17)
+                                            float3 xformOp:scale = (1, 1, 1)
+                                            double3 xformOp:translate = (0, 0.1543, -3.1647459019915597e-11)
+                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                            def Xform "wrist3" (
+                                                prepend references = @./GeometryLibrary.usdc@</Geometry/wrist3>
+                                            )
+                                            {
+                                                quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                                                float3 xformOp:scale = (1, 1, 1)
+                                                double3 xformOp:translate = (0, 0, -0.07)
+                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                            }
+
+                                            def Mesh "wrist3_1" (
+                                                displayName = "wrist3"
+                                                prepend references = @./GeometryLibrary.usdc@</Geometry/wrist3_1>
+                                            )
+                                            {
+                                                uniform token purpose = "guide"
+                                                quatf xformOp:orient = (0.70710677, 0.70710677, 0, 0)
+                                                float3 xformOp:scale = (1, 1, 1)
+                                                double3 xformOp:translate = (0, 0, -0.07)
+                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                            }
+
+                                            def Xform "ft_frame"
+                                            {
+                                                quatf xformOp:orient = (6.123234e-17, 1, 0, 0)
+                                                float3 xformOp:scale = (1, 1, 1)
+                                                double3 xformOp:translate = (0, 0, 0)
+                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                            }
+
+                                            def Xform "flange"
+                                            {
+                                                quatf xformOp:orient = (-0.5, 0.5, 0.5, 0.5)
+                                                float3 xformOp:scale = (1, 1, 1)
+                                                double3 xformOp:translate = (0, 0, 0)
+                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                def Xform "tool0"
+                                                {
+                                                    quatf xformOp:orient = (0.5, 0.5, 0.5, 0.5)
+                                                    float3 xformOp:scale = (1, 1, 1)
+                                                    double3 xformOp:translate = (0, 0, 0)
+                                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                    def Xform "camera_cable_frame"
+                                                    {
+                                                        quatf xformOp:orient = (1, 0, 0, 0)
+                                                        float3 xformOp:scale = (1, 1, 1)
+                                                        double3 xformOp:translate = (0, -0.1, -0.03)
+                                                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                        def Cube "box"
+                                                        {
+                                                            float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                                                            double size = 1
+                                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                                            float3 xformOp:scale = (0.06, 0.1, 0.06)
+                                                            double3 xformOp:translate = (0, 0, 0)
+                                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                        }
+
+                                                        def Cube "box_1" (
+                                                            displayName = "box"
+                                                        )
+                                                        {
+                                                            float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                                                            uniform token purpose = "guide"
+                                                            double size = 1
+                                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                                            float3 xformOp:scale = (0.06, 0.1, 0.06)
+                                                            double3 xformOp:translate = (0, 0, 0)
+                                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                        }
+                                                    }
+
+                                                    def Xform "camera_frame_1"
+                                                    {
+                                                        quatf xformOp:orient = (1, 0, 0, 0)
+                                                        float3 xformOp:scale = (1, 1, 1)
+                                                        double3 xformOp:translate = (0, 0, 0.0055)
+                                                        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                        def Cylinder "cylinder"
+                                                        {
+                                                            uniform token axis = "Z"
+                                                            float3[] extent = [(-0.05, -0.05, -0.0055), (0.05, 0.05, 0.0055)]
+                                                            double height = 0.011
+                                                            double radius = 0.05
+                                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                                            float3 xformOp:scale = (1, 1, 1)
+                                                            double3 xformOp:translate = (0, 0, 0)
+                                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                        }
+
+                                                        def Cylinder "cylinder_1" (
+                                                            displayName = "cylinder"
+                                                        )
+                                                        {
+                                                            uniform token axis = "Z"
+                                                            float3[] extent = [(-0.05, -0.05, -0.0055), (0.05, 0.05, 0.0055)]
+                                                            double height = 0.011
+                                                            uniform token purpose = "guide"
+                                                            double radius = 0.05
+                                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                                            float3 xformOp:scale = (1, 1, 1)
+                                                            double3 xformOp:translate = (0, 0, 0)
+                                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                        }
+
+                                                        def Xform "camera_frame_2"
+                                                        {
+                                                            quatf xformOp:orient = (1, 0, 0, 0)
+                                                            float3 xformOp:scale = (1, 1, 1)
+                                                            double3 xformOp:translate = (0, 0, 0.0285)
+                                                            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                            def Cylinder "cylinder"
+                                                            {
+                                                                uniform token axis = "Z"
+                                                                float3[] extent = [(-0.015, -0.015, -0.023), (0.015, 0.015, 0.023)]
+                                                                double height = 0.046
+                                                                double radius = 0.015
+                                                                quatf xformOp:orient = (1, 0, 0, 0)
+                                                                float3 xformOp:scale = (1, 1, 1)
+                                                                double3 xformOp:translate = (0, 0, 0)
+                                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                            }
+
+                                                            def Cylinder "cylinder_1" (
+                                                                displayName = "cylinder"
+                                                            )
+                                                            {
+                                                                uniform token axis = "Z"
+                                                                float3[] extent = [(-0.015, -0.015, -0.023), (0.015, 0.015, 0.023)]
+                                                                double height = 0.046
+                                                                uniform token purpose = "guide"
+                                                                double radius = 0.015
+                                                                quatf xformOp:orient = (1, 0, 0, 0)
+                                                                float3 xformOp:scale = (1, 1, 1)
+                                                                double3 xformOp:translate = (0, 0, 0)
+                                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                            }
+
+                                                            def Xform "camera_link"
+                                                            {
+                                                                quatf xformOp:orient = (0.7073883, 0, 0.7068252, 0)
+                                                                float3 xformOp:scale = (1, 1, 1)
+                                                                double3 xformOp:translate = (0, -0.03, 0.1)
+                                                                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+                                                                def Mesh "camera" (
+                                                                    prepend references = @./GeometryLibrary.usdc@</Geometry/camera>
+                                                                )
+                                                                {
+                                                                    quatf xformOp:orient = (1, 0, 0, 0)
+                                                                    float3 xformOp:scale = (1, 1, 1)
+                                                                    double3 xformOp:translate = (0, 0, 0)
+                                                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                                }
+
+                                                                def Mesh "camera_1" (
+                                                                    displayName = "camera"
+                                                                    prepend references = @./GeometryLibrary.usdc@</Geometry/camera>
+                                                                )
+                                                                {
+                                                                    uniform token purpose = "guide"
+                                                                    quatf xformOp:orient = (1, 0, 0, 0)
+                                                                    float3 xformOp:scale = (1, 1, 1)
+                                                                    double3 xformOp:translate = (0, 0, 0)
+                                                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                                }
+
+                                                                def Xform "camera_optical_frame"
+                                                                {
+                                                                    quatf xformOp:orient = (0.7073883, 0, -0.7068252, 0)
+                                                                    float3 xformOp:scale = (1, 1, 1)
+                                                                    double3 xformOp:translate = (-0.1, 0.03, 0)
+                                                                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                def Xform "base"
+                {
+                    quatf xformOp:orient = (6.123234e-17, 0, 0, 1)
+                    float3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+        }
+
+        def Scope "custom"
+        {
+            def Scope "ros2_control"
+            {
+                custom string urdf:name = "ur"
+                custom string urdf:type = "system"
+
+                def Scope "hardware"
+                {
+                    def Scope "plugin"
+                    {
+                        custom string urdf:text = "ur_robot_driver/URPositionHardwareInterface"
+                    }
+
+                    def Scope "param"
+                    {
+                        custom string urdf:name = "robot_ip"
+                        custom string urdf:text = "0.0.0.0"
+                    }
+
+                    def Scope "param_1" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "script_filename"
+                    }
+
+                    def Scope "param_2" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "output_recipe_filename"
+                    }
+
+                    def Scope "param_3" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "input_recipe_filename"
+                    }
+
+                    def Scope "param_4" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "headless_mode"
+                        custom string urdf:text = "False"
+                    }
+
+                    def Scope "param_5" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "reverse_port"
+                        custom string urdf:text = "50001"
+                    }
+
+                    def Scope "param_6" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "script_sender_port"
+                        custom string urdf:text = "50002"
+                    }
+
+                    def Scope "param_7" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "reverse_ip"
+                        custom string urdf:text = "0.0.0.0"
+                    }
+
+                    def Scope "param_8" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "script_command_port"
+                        custom string urdf:text = "50004"
+                    }
+
+                    def Scope "param_9" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "trajectory_port"
+                        custom string urdf:text = "50003"
+                    }
+
+                    def Scope "param_10" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tf_prefix"
+                    }
+
+                    def Scope "param_11" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "non_blocking_read"
+                        custom string urdf:text = "True"
+                    }
+
+                    def Scope "param_12" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "servoj_gain"
+                        custom string urdf:text = "2000"
+                    }
+
+                    def Scope "param_13" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "servoj_lookahead_time"
+                        custom string urdf:text = "0.03"
+                    }
+
+                    def Scope "param_14" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "use_tool_communication"
+                        custom string urdf:text = "False"
+                    }
+
+                    def Scope "param_15" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "kinematics/hash"
+                        custom string urdf:text = "calib_4890363623803256388"
+                    }
+
+                    def Scope "param_16" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_voltage"
+                        custom string urdf:text = "0"
+                    }
+
+                    def Scope "param_17" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_parity"
+                        custom string urdf:text = "0"
+                    }
+
+                    def Scope "param_18" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_baud_rate"
+                        custom string urdf:text = "115200"
+                    }
+
+                    def Scope "param_19" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_stop_bits"
+                        custom string urdf:text = "1"
+                    }
+
+                    def Scope "param_20" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_rx_idle_chars"
+                        custom string urdf:text = "1.5"
+                    }
+
+                    def Scope "param_21" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_tx_idle_chars"
+                        custom string urdf:text = "3.5"
+                    }
+
+                    def Scope "param_22" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_device_name"
+                        custom string urdf:text = "/tmp/ttyUR"
+                    }
+
+                    def Scope "param_23" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "tool_tcp_port"
+                        custom string urdf:text = "54321"
+                    }
+
+                    def Scope "param_24" (
+                        displayName = "param"
+                    )
+                    {
+                        custom string urdf:name = "keep_alive_count"
+                        custom string urdf:text = "2"
+                    }
+                }
+
+                def Scope "joint"
+                {
+                    custom string urdf:name = "shoulder_pan_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "0.0"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "joint_1" (
+                    displayName = "joint"
+                )
+                {
+                    custom string urdf:name = "shoulder_lift_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "-1.57"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "joint_2" (
+                    displayName = "joint"
+                )
+                {
+                    custom string urdf:name = "elbow_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "0.0"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "joint_3" (
+                    displayName = "joint"
+                )
+                {
+                    custom string urdf:name = "wrist_1_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "-1.57"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "joint_4" (
+                    displayName = "joint"
+                )
+                {
+                    custom string urdf:name = "wrist_2_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "0.0"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "joint_5" (
+                    displayName = "joint"
+                )
+                {
+                    custom string urdf:name = "wrist_3_joint"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "position"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "0.0"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "velocity"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "effort"
+                    }
+                }
+
+                def Scope "sensor"
+                {
+                    custom string urdf:name = "tcp_fts_sensor"
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "force.x"
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "force.y"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "force.z"
+                    }
+
+                    def Scope "state_interface_3" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "torque.x"
+                    }
+
+                    def Scope "state_interface_4" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "torque.y"
+                    }
+
+                    def Scope "state_interface_5" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "torque.z"
+                    }
+                }
+
+                def Scope "sensor_1" (
+                    displayName = "sensor"
+                )
+                {
+                    custom string urdf:name = "tcp_pose"
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "position.x"
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "position.y"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "position.z"
+                    }
+
+                    def Scope "state_interface_3" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "orientation.x"
+                    }
+
+                    def Scope "state_interface_4" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "orientation.y"
+                    }
+
+                    def Scope "state_interface_5" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "orientation.z"
+                    }
+
+                    def Scope "state_interface_6" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "orientation.w"
+                    }
+                }
+
+                def Scope "gpio"
+                {
+                    custom string urdf:name = "speed_scaling"
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "speed_scaling_factor"
+                    }
+
+                    def Scope "param"
+                    {
+                        custom string urdf:name = "initial_speed_scaling_factor"
+                        custom string urdf:text = "1"
+                    }
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "target_speed_fraction_cmd"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "target_speed_fraction_async_success"
+                    }
+                }
+
+                def Scope "gpio_1" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "gpio"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_0"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_1"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_2"
+                    }
+
+                    def Scope "command_interface_3" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_3"
+                    }
+
+                    def Scope "command_interface_4" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_4"
+                    }
+
+                    def Scope "command_interface_5" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_5"
+                    }
+
+                    def Scope "command_interface_6" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_6"
+                    }
+
+                    def Scope "command_interface_7" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_7"
+                    }
+
+                    def Scope "command_interface_8" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_8"
+                    }
+
+                    def Scope "command_interface_9" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_9"
+                    }
+
+                    def Scope "command_interface_10" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_10"
+                    }
+
+                    def Scope "command_interface_11" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_11"
+                    }
+
+                    def Scope "command_interface_12" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_12"
+                    }
+
+                    def Scope "command_interface_13" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_13"
+                    }
+
+                    def Scope "command_interface_14" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_14"
+                    }
+
+                    def Scope "command_interface_15" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_15"
+                    }
+
+                    def Scope "command_interface_16" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_16"
+                    }
+
+                    def Scope "command_interface_17" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_digital_output_cmd_17"
+                    }
+
+                    def Scope "command_interface_18" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_output_cmd_0"
+                    }
+
+                    def Scope "command_interface_19" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_output_cmd_1"
+                    }
+
+                    def Scope "command_interface_20" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "analog_output_domain_cmd"
+                    }
+
+                    def Scope "command_interface_21" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_voltage_cmd"
+                    }
+
+                    def Scope "command_interface_22" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "io_async_success"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "digital_output_0"
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_1"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_2"
+                    }
+
+                    def Scope "state_interface_3" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_3"
+                    }
+
+                    def Scope "state_interface_4" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_4"
+                    }
+
+                    def Scope "state_interface_5" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_5"
+                    }
+
+                    def Scope "state_interface_6" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_6"
+                    }
+
+                    def Scope "state_interface_7" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_7"
+                    }
+
+                    def Scope "state_interface_8" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_8"
+                    }
+
+                    def Scope "state_interface_9" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_9"
+                    }
+
+                    def Scope "state_interface_10" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_10"
+                    }
+
+                    def Scope "state_interface_11" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_11"
+                    }
+
+                    def Scope "state_interface_12" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_12"
+                    }
+
+                    def Scope "state_interface_13" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_13"
+                    }
+
+                    def Scope "state_interface_14" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_14"
+                    }
+
+                    def Scope "state_interface_15" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_15"
+                    }
+
+                    def Scope "state_interface_16" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_16"
+                    }
+
+                    def Scope "state_interface_17" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_output_17"
+                    }
+
+                    def Scope "state_interface_18" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_0"
+                    }
+
+                    def Scope "state_interface_19" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_1"
+                    }
+
+                    def Scope "state_interface_20" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_2"
+                    }
+
+                    def Scope "state_interface_21" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_3"
+                    }
+
+                    def Scope "state_interface_22" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_4"
+                    }
+
+                    def Scope "state_interface_23" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_5"
+                    }
+
+                    def Scope "state_interface_24" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_6"
+                    }
+
+                    def Scope "state_interface_25" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_7"
+                    }
+
+                    def Scope "state_interface_26" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_8"
+                    }
+
+                    def Scope "state_interface_27" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_9"
+                    }
+
+                    def Scope "state_interface_28" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_10"
+                    }
+
+                    def Scope "state_interface_29" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_11"
+                    }
+
+                    def Scope "state_interface_30" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_12"
+                    }
+
+                    def Scope "state_interface_31" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_13"
+                    }
+
+                    def Scope "state_interface_32" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_14"
+                    }
+
+                    def Scope "state_interface_33" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_15"
+                    }
+
+                    def Scope "state_interface_34" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_16"
+                    }
+
+                    def Scope "state_interface_35" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "digital_input_17"
+                    }
+
+                    def Scope "state_interface_36" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_output_0"
+                    }
+
+                    def Scope "state_interface_37" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_output_1"
+                    }
+
+                    def Scope "state_interface_38" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_input_0"
+                    }
+
+                    def Scope "state_interface_39" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "standard_analog_input_1"
+                    }
+
+                    def Scope "state_interface_40" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "analog_io_type_0"
+                    }
+
+                    def Scope "state_interface_41" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "analog_io_type_1"
+                    }
+
+                    def Scope "state_interface_42" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "analog_io_type_2"
+                    }
+
+                    def Scope "state_interface_43" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "analog_io_type_3"
+                    }
+
+                    def Scope "state_interface_44" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_mode"
+                    }
+
+                    def Scope "state_interface_45" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_output_voltage"
+                    }
+
+                    def Scope "state_interface_46" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_output_current"
+                    }
+
+                    def Scope "state_interface_47" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_temperature"
+                    }
+
+                    def Scope "state_interface_48" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_analog_input_0"
+                    }
+
+                    def Scope "state_interface_49" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_analog_input_1"
+                    }
+
+                    def Scope "state_interface_50" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_analog_input_type_0"
+                    }
+
+                    def Scope "state_interface_51" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_analog_input_type_1"
+                    }
+
+                    def Scope "state_interface_52" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "robot_mode"
+                    }
+
+                    def Scope "state_interface_53" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "robot_status_bit_0"
+                    }
+
+                    def Scope "state_interface_54" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "robot_status_bit_1"
+                    }
+
+                    def Scope "state_interface_55" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "robot_status_bit_2"
+                    }
+
+                    def Scope "state_interface_56" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "robot_status_bit_3"
+                    }
+
+                    def Scope "state_interface_57" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_mode"
+                    }
+
+                    def Scope "state_interface_58" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_0"
+                    }
+
+                    def Scope "state_interface_59" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_1"
+                    }
+
+                    def Scope "state_interface_60" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_2"
+                    }
+
+                    def Scope "state_interface_61" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_3"
+                    }
+
+                    def Scope "state_interface_62" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_4"
+                    }
+
+                    def Scope "state_interface_63" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_5"
+                    }
+
+                    def Scope "state_interface_64" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_6"
+                    }
+
+                    def Scope "state_interface_65" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_7"
+                    }
+
+                    def Scope "state_interface_66" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_8"
+                    }
+
+                    def Scope "state_interface_67" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_9"
+                    }
+
+                    def Scope "state_interface_68" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "safety_status_bit_10"
+                    }
+
+                    def Scope "state_interface_69" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "program_running"
+                    }
+                }
+
+                def Scope "gpio_2" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "payload"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "mass"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "cog.x"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "cog.y"
+                    }
+
+                    def Scope "command_interface_3" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "cog.z"
+                    }
+
+                    def Scope "command_interface_4" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "payload_async_success"
+                    }
+                }
+
+                def Scope "gpio_3" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "resend_robot_program"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "resend_robot_program_cmd"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "resend_robot_program_async_success"
+                    }
+                }
+
+                def Scope "gpio_4" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "hand_back_control"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "hand_back_control_cmd"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "hand_back_control_async_success"
+                    }
+                }
+
+                def Scope "gpio_5" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "zero_ftsensor"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "zero_ftsensor_cmd"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "zero_ftsensor_async_success"
+                    }
+                }
+
+                def Scope "gpio_6" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "freedrive_mode"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "async_success"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "enable"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "abort"
+                    }
+                }
+
+                def Scope "gpio_7" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "tool_contact"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "tool_contact_set_state"
+                    }
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "tool_contact_result"
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "tool_contact_state"
+                    }
+                }
+
+                def Scope "gpio_8" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "system_interface"
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "initialized"
+                    }
+                }
+
+                def Scope "gpio_9" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "force_mode"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "task_frame_x"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "task_frame_y"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "task_frame_z"
+                    }
+
+                    def Scope "command_interface_3" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "task_frame_rx"
+                    }
+
+                    def Scope "command_interface_4" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "task_frame_ry"
+                    }
+
+                    def Scope "command_interface_5" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "task_frame_rz"
+                    }
+
+                    def Scope "command_interface_6" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_x"
+                    }
+
+                    def Scope "command_interface_7" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_y"
+                    }
+
+                    def Scope "command_interface_8" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_z"
+                    }
+
+                    def Scope "command_interface_9" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_rx"
+                    }
+
+                    def Scope "command_interface_10" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_ry"
+                    }
+
+                    def Scope "command_interface_11" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "selection_vector_rz"
+                    }
+
+                    def Scope "command_interface_12" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_x"
+                    }
+
+                    def Scope "command_interface_13" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_y"
+                    }
+
+                    def Scope "command_interface_14" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_z"
+                    }
+
+                    def Scope "command_interface_15" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_rx"
+                    }
+
+                    def Scope "command_interface_16" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_ry"
+                    }
+
+                    def Scope "command_interface_17" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "wrench_rz"
+                    }
+
+                    def Scope "command_interface_18" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_x"
+                    }
+
+                    def Scope "command_interface_19" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_y"
+                    }
+
+                    def Scope "command_interface_20" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_z"
+                    }
+
+                    def Scope "command_interface_21" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_rx"
+                    }
+
+                    def Scope "command_interface_22" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_ry"
+                    }
+
+                    def Scope "command_interface_23" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "limits_rz"
+                    }
+
+                    def Scope "command_interface_24" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "type"
+                    }
+
+                    def Scope "command_interface_25" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "damping"
+                    }
+
+                    def Scope "command_interface_26" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "gain_scaling"
+                    }
+
+                    def Scope "command_interface_27" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "disable_cmd"
+                    }
+
+                    def Scope "command_interface_28" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "force_mode_async_success"
+                    }
+                }
+
+                def Scope "gpio_10" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "trajectory_passthrough"
+
+                    def Scope "command_interface"
+                    {
+                        custom string urdf:name = "setpoint_positions_0"
+                    }
+
+                    def Scope "command_interface_1" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_positions_1"
+                    }
+
+                    def Scope "command_interface_2" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_positions_2"
+                    }
+
+                    def Scope "command_interface_3" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_positions_3"
+                    }
+
+                    def Scope "command_interface_4" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_positions_4"
+                    }
+
+                    def Scope "command_interface_5" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_positions_5"
+                    }
+
+                    def Scope "command_interface_6" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_0"
+                    }
+
+                    def Scope "command_interface_7" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_1"
+                    }
+
+                    def Scope "command_interface_8" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_2"
+                    }
+
+                    def Scope "command_interface_9" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_3"
+                    }
+
+                    def Scope "command_interface_10" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_4"
+                    }
+
+                    def Scope "command_interface_11" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_velocities_5"
+                    }
+
+                    def Scope "command_interface_12" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_0"
+                    }
+
+                    def Scope "command_interface_13" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_1"
+                    }
+
+                    def Scope "command_interface_14" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_2"
+                    }
+
+                    def Scope "command_interface_15" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_3"
+                    }
+
+                    def Scope "command_interface_16" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_4"
+                    }
+
+                    def Scope "command_interface_17" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "setpoint_accelerations_5"
+                    }
+
+                    def Scope "command_interface_18" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "transfer_state"
+                    }
+
+                    def Scope "command_interface_19" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "time_from_start"
+                    }
+
+                    def Scope "command_interface_20" (
+                        displayName = "command_interface"
+                    )
+                    {
+                        custom string urdf:name = "abort"
+                    }
+                }
+
+                def Scope "gpio_11" (
+                    displayName = "gpio"
+                )
+                {
+                    custom string urdf:name = "get_robot_software_version"
+
+                    def Scope "state_interface"
+                    {
+                        custom string urdf:name = "get_version_major"
+
+                        def Scope "param"
+                        {
+                            custom string urdf:name = "initial_value"
+                            custom string urdf:text = "1"
+                        }
+                    }
+
+                    def Scope "state_interface_1" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "get_version_minor"
+                    }
+
+                    def Scope "state_interface_2" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "get_version_build"
+                    }
+
+                    def Scope "state_interface_3" (
+                        displayName = "state_interface"
+                    )
+                    {
+                        custom string urdf:name = "get_version_bugfix"
+                    }
+                }
+            }
+        }
+    }
+}
+

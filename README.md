@@ -72,3 +72,18 @@ uv run scripts/pipeline/select_ik_dp.py \
 - `--dbscan-eps 0.3` — DBSCAN eps (radians)
 - `--reconfig-threshold 29.0` — reconfig 판정 임계값 (degrees)
 - `--spacing 0.05` — uniform resample 간격 (radians)
+
+### 3. Isaac Sim 시뮬레이션 (선택)
+
+```bash
+# (1회성) URDF → USD 변환
+uv run --no-sync python -m urdf_usd_converter \
+    --package "ur_description=$(realpath ur20_description)" \
+    ur20_description/ur20_with_camera.urdf ur20_description/
+
+# 시뮬레이션 + ROS2 bridge
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
+    scripts/isaac/ur_ros2_joint_control.py --object sample
+```
+
+자세한 절차·트러블슈팅: [docs/running.md](docs/running.md#isaac-sim-시뮬레이션).

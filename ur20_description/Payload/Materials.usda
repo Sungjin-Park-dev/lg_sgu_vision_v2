@@ -1,0 +1,302 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "URDF USD Converter v0.1.0"
+    }
+    defaultPrim = "ur"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "ur"
+{
+    def Scope "Materials"
+    {
+        def Material "UR20_DIFF_8bit_2K_png" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_1" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_1>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_2" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_2>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_3" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_3>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_4" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_4>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_5" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_5>
+        )
+        {
+        }
+
+        def Material "UR20_DIFF_8bit_2K_png_6" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/UR20_DIFF_8bit_2K_png_6>
+        )
+        {
+        }
+
+        def Material "dark_grey" (
+            prepend references = @./MaterialsLibrary.usdc@</Materials/dark_grey>
+        )
+        {
+        }
+    }
+
+    over "Geometry"
+    {
+        over "world"
+        {
+            over "base_link"
+            {
+                over "base_link_inertia"
+                {
+                    over "base"
+                    {
+                        over "tn__Cylinder013_XH" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png>
+                        }
+
+                        over "tn__Cylinder014_XH" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png>
+                        }
+
+                        over "tn__Cylinder015_XH" (
+                            prepend apiSchemas = ["MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png>
+                        }
+                    }
+
+                    over "shoulder_link"
+                    {
+                        over "shoulder"
+                        {
+                            over "tn__Cylinder011_XH" (
+                                prepend apiSchemas = ["MaterialBindingAPI"]
+                            )
+                            {
+                                rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_1>
+                            }
+
+                            over "tn__Cylinder012_XH" (
+                                prepend apiSchemas = ["MaterialBindingAPI"]
+                            )
+                            {
+                                rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_1>
+                            }
+                        }
+
+                        over "upper_arm_link"
+                        {
+                            over "upperarm"
+                            {
+                                over "tn__Cylinder021_XH" (
+                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                )
+                                {
+                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_2>
+                                }
+
+                                over "tn__Cylinder020_XH" (
+                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                )
+                                {
+                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_2>
+                                }
+
+                                over "tn__Cylinder019_XH" (
+                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                )
+                                {
+                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_2>
+                                }
+
+                                over "tn__Cylinder018_XH" (
+                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                )
+                                {
+                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_2>
+                                }
+                            }
+
+                            over "forearm_link"
+                            {
+                                over "forearm"
+                                {
+                                    over "tn__Cylinder035_XH" (
+                                        prepend apiSchemas = ["MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_3>
+                                    }
+
+                                    over "tn__Cylinder036_XH" (
+                                        prepend apiSchemas = ["MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_3>
+                                    }
+
+                                    over "tn__Cylinder037_XH" (
+                                        prepend apiSchemas = ["MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_3>
+                                    }
+
+                                    over "tn__Cylinder038_XH" (
+                                        prepend apiSchemas = ["MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_3>
+                                    }
+                                }
+
+                                over "wrist_1_link"
+                                {
+                                    over "wrist1"
+                                    {
+                                        over "tn__Cylinder039_XH" (
+                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                        )
+                                        {
+                                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_4>
+                                        }
+
+                                        over "tn__Cylinder040_XH" (
+                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                        )
+                                        {
+                                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_4>
+                                        }
+
+                                        over "tn__Cylinder041_XH" (
+                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                        )
+                                        {
+                                            rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_4>
+                                        }
+                                    }
+
+                                    over "wrist_2_link"
+                                    {
+                                        over "wrist2"
+                                        {
+                                            over "tn__Cylinder006_XH" (
+                                                prepend apiSchemas = ["MaterialBindingAPI"]
+                                            )
+                                            {
+                                                rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_5>
+                                            }
+
+                                            over "tn__Cylinder007_XH" (
+                                                prepend apiSchemas = ["MaterialBindingAPI"]
+                                            )
+                                            {
+                                                rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_5>
+                                            }
+                                        }
+
+                                        over "wrist_3_link"
+                                        {
+                                            over "wrist3"
+                                            {
+                                                over "tn__Cylinder045_XH" (
+                                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                                )
+                                                {
+                                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_6>
+                                                }
+
+                                                over "tn__Cylinder044_XH" (
+                                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                                )
+                                                {
+                                                    rel material:binding = </ur/Materials/UR20_DIFF_8bit_2K_png_6>
+                                                }
+                                            }
+
+                                            over "flange"
+                                            {
+                                                over "tool0"
+                                                {
+                                                    over "camera_cable_frame"
+                                                    {
+                                                        over "box" (
+                                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                                        )
+                                                        {
+                                                            rel material:binding = </ur/Materials/dark_grey>
+                                                        }
+                                                    }
+
+                                                    over "camera_frame_1"
+                                                    {
+                                                        over "cylinder" (
+                                                            prepend apiSchemas = ["MaterialBindingAPI"]
+                                                        )
+                                                        {
+                                                            rel material:binding = </ur/Materials/dark_grey>
+                                                        }
+
+                                                        over "camera_frame_2"
+                                                        {
+                                                            over "cylinder" (
+                                                                prepend apiSchemas = ["MaterialBindingAPI"]
+                                                            )
+                                                            {
+                                                                rel material:binding = </ur/Materials/dark_grey>
+                                                            }
+
+                                                            over "camera_link"
+                                                            {
+                                                                over "camera" (
+                                                                    prepend apiSchemas = ["MaterialBindingAPI"]
+                                                                )
+                                                                {
+                                                                    rel material:binding = </ur/Materials/dark_grey>
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

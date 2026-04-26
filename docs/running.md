@@ -99,6 +99,42 @@ uv run scripts/ros2/publish_workcell_markers.py --object sample
 
 `/joint_states`는 조인트를 **알파벳 순서**로 발행하지만 코드는 **이름 매칭**으로 처리하므로 순서 무관.
 
+## Isaac Sim 시뮬레이션
+
+### 사전 준비 (1회성) — URDF → USD 변환
+
+```bash
+uv run --no-sync python -m urdf_usd_converter \
+    --package "ur_description=$(realpath ur20_description)" \
+    ur20_description/ur20_with_camera.urdf ur20_description/
+```
+
+산출: `ur20_description/ur.usda` + `ur20_description/Payload/*` (총 ~1.3MB).
+`<robot name="ur">` 때문에 파일명이 `ur.usda` 가 됨.
+
+### UR20 + ROS2 bridge 시뮬레이션 띄우기
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
+    scripts/isaac/ur_ros2_joint_control.py --object sample
+```
+
+- `OMNI_KIT_ACCEPT_EULA=YES` — Isaac Sim EULA 프롬프트 회피
+- `--no-sync` — `uv sync` 가 cuRobo (path-install) 를 제거하지 않게 보호
+- `--object sample` — `config.py` 의 워크셀 (테이블/벽/타겟 메쉬) 함께 로드 (생략 가능)
+- `--usd-path PATH` — 다른 USD 사용 시 (기본: `ur20_description/ur.usda`)
+
+GUI 가 뜨면 viewport 에 UR20 + 워크셀이 보이고, `/ActionGraph` 가 stage 에 생성된다.
+
+### 다른 터미널에서 joint 제어
+
+```bash
+ros2 topic pub --once /joint_states sensor_msgs/msg/JointState \
+  "{name: ['shoulder_pan_joint','shoulder_lift_joint','elbow_joint',
+           'wrist_1_joint','wrist_2_joint','wrist_3_joint'],
+     position: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]}"
+```
+
 ## 트러블슈팅
 
 ### Tolerance 에러

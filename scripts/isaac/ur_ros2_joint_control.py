@@ -16,12 +16,19 @@
 """
 UR ROS2 Joint Control standalone script for Isaac Sim.
 
-Loads a UR robot (ur5e or ur20) and creates an Action Graph that subscribes to
-/joint_states topic and drives the robot via ArticulationController.
+Loads our local UR20 (camera-attached) and creates an Action Graph that
+subscribes to /joint_states and drives the robot via ArticulationController.
+
+Prerequisite — convert URDF to USD once:
+    uv run --no-sync python -m urdf_usd_converter \
+        --package "ur_description=$(realpath ur20_description)" \
+        ur20_description/ur20_with_camera.urdf ur20_description/
 
 Usage:
-    ./python.sh scripts/isaac/ur_ros2_joint_control.py
-    ./python.sh scripts/isaac/ur_ros2_joint_control.py --robot ur20
+    OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
+        scripts/isaac/ur_ros2_joint_control.py
+    OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
+        scripts/isaac/ur_ros2_joint_control.py --object sample
 
 Test with:
     ros2 topic pub /joint_states sensor_msgs/msg/JointState \
@@ -32,28 +39,30 @@ Test with:
 
 import argparse
 import sys
+from pathlib import Path
 
 import numpy as np
 from isaacsim import SimulationApp
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_USD = PROJECT_ROOT / "ur20_description" / "ur.usda"
+STAGE_PATH = "/World/UR20"
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--robot", choices=["ur5e", "ur20"], default="ur5e")
-parser.add_argument("--object", type=str, default=None, help="Object name to load workcell (e.g. 'sample')")
+parser.add_argument("--usd-path", type=Path, default=DEFAULT_USD,
+                    help=f"Robot USD path (default: {DEFAULT_USD.relative_to(PROJECT_ROOT)})")
+parser.add_argument("--object", type=str, default=None,
+                    help="Object name to load workcell (e.g. 'sample')")
 args, _ = parser.parse_known_args()
 
-ROBOT_CONFIG = {
-    "ur5e": {
-        "stage_path": "/World/UR5e",
-        "usd_path": "/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd",
-    },
-    "ur20": {
-        "stage_path": "/World/UR20",
-        "usd_path": "/Isaac/Robots/UniversalRobots/ur20/ur20.usd",
-    },
-}
-
-STAGE_PATH = ROBOT_CONFIG[args.robot]["stage_path"]
-USD_PATH = ROBOT_CONFIG[args.robot]["usd_path"]
+if not args.usd_path.exists():
+    sys.exit(
+        f"Robot USD not found: {args.usd_path}\n"
+        f"Convert it first:\n"
+        f"  uv run --no-sync python -m urdf_usd_converter \\\n"
+        f"      --package \"ur_description=$(realpath ur20_description)\" \\\n"
+        f"      ur20_description/ur20_with_camera.urdf ur20_description/"
+    )
 
 CONFIG = {"renderer": "RaytracedLighting", "headless": False}
 
@@ -63,9 +72,8 @@ import carb
 import omni.graph.core as og
 from isaacsim.core.api import SimulationContext
 from isaacsim.core.utils import extensions, prims, viewports
-from isaacsim.storage.native import get_assets_root_path
 from isaacsim.core.api.objects import VisualCuboid
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "common"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 import config
 
 # Enable ROS2 bridge extension
@@ -75,22 +83,15 @@ simulation_app.update()
 
 simulation_context = SimulationContext(stage_units_in_meters=1.0)
 
-# Locate Isaac Sim assets folder
-assets_root_path = get_assets_root_path()
-if assets_root_path is None:
-    carb.log_error("Could not find Isaac Sim assets folder")
-    simulation_app.close()
-    sys.exit()
-
 # Set camera view
 viewports.set_camera_view(eye=np.array([1.5, 1.5, 1.0]), target=np.array([0, 0, 0.5]))
 
-# Load robot
+# Load robot from local USD
 prims.create_prim(
     STAGE_PATH,
     "Xform",
     position=np.array([0, 0, 0]),
-    usd_path=assets_root_path + USD_PATH,
+    usd_path=str(args.usd_path),
 )
 
 simulation_app.update()

@@ -20,7 +20,7 @@ dependencies = [
     "yourdfpy",
     "open3d",
     "coacd",
-    "isaacsim[extscache,ros2]==6.0.0",
+    "isaacsim[all,extscache]==6.0.0",
 ]
 
 [tool.uv]
