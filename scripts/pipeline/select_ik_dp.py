@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-DBSCAN + DP 기반 최적 IK 해 선택
+DBSCAN + DP + MotionGen 기반 최적 IK 궤적 생성
 
-각 viewpoint에 대해 다수의 IK 해를 구한 뒤,
-DBSCAN으로 대표 해를 추출하고, DP로 전역 최적 경로를 선택한다.
+각 viewpoint에 대해 다수의 IK 해를 구하고, DP로 전역 최적 경로를 선택한 뒤,
+reconfig 지점은 MotionGen으로 충돌회피 transit을 만들어 균일 spacing으로 resample한다.
 
 단계:
-    1. Multi-seed IK  — viewpoint당 num_seeds개 IK 해
-    2. DBSCAN          — viewpoint당 대표 해 (medoid) 추출
-    3. DP              — 최소 joint-space 비용 경로 선택
+    Phase 1: Multi-seed IK     — viewpoint당 num_seeds개 IK 해
+    Phase 2: DBSCAN            — viewpoint당 대표 해 (medoid) 추출
+    Phase 3: DP                — 최소 joint-space 비용 경로 선택
+       ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
+    Phase 4: MotionGen transit — reconfig 지점 충돌회피 joint-to-joint planning
+    Phase 5: Uniform resample  — cumulative L2 arc-length로 균일 spacing + 충돌 검사
 
 사용법:
     uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -43,9 +46,8 @@ from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
 # Data loading & geometry
 # =========================================================================
 
-def load_viewpoints(object_name: str, num_viewpoints: int):
-    """Load positions, normals, path_order, row_index, cluster data from HDF5."""
-    h5_path = config.get_viewpoint_path(object_name, num_viewpoints)
+def load_viewpoints(h5_path: Path):
+    """Load positions, normals, path_order, cluster_id, working_distance from HDF5."""
     if not h5_path.exists():
         raise FileNotFoundError(f"Viewpoints file not found: {h5_path}")
 
@@ -54,9 +56,7 @@ def load_viewpoints(object_name: str, num_viewpoints: int):
         positions = np.array(grp["positions"], dtype=np.float64)
         normals = np.array(grp["normals"], dtype=np.float64)
         path_order = np.array(grp["path_order"], dtype=np.int32) if "path_order" in grp else None
-        row_index = np.array(grp["row_index"], dtype=np.int32) if "row_index" in grp else None
         cluster_id = np.array(grp["cluster_id"], dtype=np.int32) if "cluster_id" in grp else None
-        cluster_order = np.array(grp["cluster_order"], dtype=np.int32) if "cluster_order" in grp else None
 
         wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
         if "metadata" in f and "camera_spec" in f["metadata"]:
@@ -64,7 +64,7 @@ def load_viewpoints(object_name: str, num_viewpoints: int):
             if "working_distance_mm" in cs.attrs:
                 wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
 
-    return positions, normals, path_order, row_index, wd_m, cluster_id, cluster_order
+    return positions, normals, path_order, cluster_id, wd_m
 
 
 def rot_to_quat_batch(R_batch: np.ndarray) -> np.ndarray:
@@ -79,7 +79,7 @@ def rot_to_quat_batch(R_batch: np.ndarray) -> np.ndarray:
 
 
 def build_camera_poses(positions, normals, working_distance_m):
-    """Surface position + normal → camera 4x4 poses in world frame."""
+    """Surface position + normal → camera 4x4 poses (N,4,4) in world frame."""
     safe_normals = normalize_vectors(normals)
     camera_positions = positions + safe_normals * working_distance_m
     approach = -safe_normals
@@ -105,10 +105,7 @@ def build_camera_poses(positions, normals, working_distance_m):
     target_world[:3, :3] = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
     target_world[:3, 3] = config.TARGET_OBJECT["position"]
 
-    world_poses = np.einsum("ij,njk->nik", target_world, local_poses)
-    camera_positions_world = world_poses[:, :3, 3]
-
-    return world_poses, camera_positions_world
+    return np.einsum("ij,njk->nik", target_world, local_poses)
 
 
 def build_collision_world(object_name: str):
@@ -146,34 +143,19 @@ def build_collision_world(object_name: str):
     return WorldConfig(cuboid=cuboids, mesh=meshes if meshes else None)
 
 
-def compute_fk(solutions, success, robot_cfg_file):
-    """Compute FK for successful IK solutions.
-
-    Returns:
-        ee_positions: (N, 3), ee_quaternions: (N, 4) as (x,y,z,w). NaN for failures.
-    """
+def compute_fk(solutions, robot_cfg_file):
+    """Compute FK for joint solutions. Returns (N,3) positions and (N,4) quats (x,y,z,w)."""
     robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_cfg_file))["robot_cfg"]
-    world_config = WorldConfig()
     ta = TensorDeviceType(device=torch.device("cuda:0"), dtype=torch.float32)
 
-    rw_config = RobotWorldConfig.load_from_config(robot_cfg, world_config, tensor_args=ta)
+    rw_config = RobotWorldConfig.load_from_config(robot_cfg, WorldConfig(), tensor_args=ta)
     robot_world = RobotWorld(rw_config)
 
-    N = solutions.shape[0]
-    ee_positions = np.full((N, 3), np.nan, dtype=np.float64)
-    ee_quaternions = np.full((N, 4), np.nan, dtype=np.float64)
-
-    mask = np.where(success)[0]
-    if len(mask) == 0:
-        return ee_positions, ee_quaternions
-
-    q_batch = torch.tensor(solutions[mask], device="cuda:0", dtype=torch.float32)
+    q_batch = torch.tensor(solutions, device="cuda:0", dtype=torch.float32)
     state = robot_world.get_kinematics(q_batch)
-    ee_pos = state.ee_position.cpu().numpy()
+    ee_positions = state.ee_position.cpu().numpy()
     ee_quat_wxyz = state.ee_quaternion.cpu().numpy()
-
-    ee_positions[mask] = ee_pos
-    ee_quaternions[mask] = ee_quat_wxyz[:, [1, 2, 3, 0]]
+    ee_quaternions = ee_quat_wxyz[:, [1, 2, 3, 0]]
 
     return ee_positions, ee_quaternions
 
@@ -482,30 +464,6 @@ def plan_reconfig_transits(
     return transit_segments, transit_stats
 
 
-def assemble_trajectory(selected, transit_segments):
-    """DP 궤적 + transit 구간을 합쳐서 최종 궤적 생성.
-
-    transit이 있는 reconfig 지점은 transit waypoints로 연결,
-    없는 지점은 원래대로 직접 점프.
-
-    Returns:
-        final_traj: (M, 6) 최종 joint trajectory
-    """
-    N = len(selected)
-    segments = []
-
-    for i in range(N):
-        segments.append(selected[i:i+1])
-
-        if i in transit_segments:
-            # transit의 첫/끝 점은 selected[i], selected[i+1]과 동일하므로 중간만 삽입
-            transit = transit_segments[i]
-            if len(transit) > 2:
-                segments.append(transit[1:-1])
-
-    return np.concatenate(segments, axis=0)
-
-
 # =========================================================================
 # Phase 5: Uniform resample + collision check
 # =========================================================================
@@ -569,14 +527,7 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
 
 
 def batch_collision_check(trajectory, robot_cfg_file, world_config, tensor_args):
-    """전체 궤적에 대해 batch collision check 수행.
-
-    Returns:
-        is_collision: (M,) bool — True이면 충돌
-        n_collisions: int
-    """
-    from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
-
+    """전체 궤적에 대해 batch collision check 수행. Returns (is_collision, n_collisions)."""
     robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_cfg_file))["robot_cfg"]
     rw_config = RobotWorldConfig.load_from_config(robot_cfg, world_config, tensor_args=tensor_args)
     robot_world = RobotWorld(rw_config)
@@ -919,28 +870,10 @@ def main():
 
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")
-    if args.viewpoints:
-        import h5py
-        h5_path = Path(args.viewpoints)
-        if not h5_path.exists():
-            raise FileNotFoundError(f"Viewpoints file not found: {h5_path}")
-        with h5py.File(h5_path, "r") as f:
-            grp = f["viewpoints"]
-            positions = np.array(grp["positions"], dtype=np.float64)
-            normals = np.array(grp["normals"], dtype=np.float64)
-            path_order = np.array(grp["path_order"], dtype=np.int32) if "path_order" in grp else None
-            row_index = np.array(grp["row_index"], dtype=np.int32) if "row_index" in grp else None
-            cluster_id = np.array(grp["cluster_id"], dtype=np.int32) if "cluster_id" in grp else None
-            cluster_order = np.array(grp["cluster_order"], dtype=np.int32) if "cluster_order" in grp else None
-            wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
-            if "metadata" in f and "camera_spec" in f["metadata"]:
-                cs = f["metadata"]["camera_spec"]
-                if "working_distance_mm" in cs.attrs:
-                    wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
-        print(f"  Loaded from {h5_path}")
-    else:
-        positions, normals, path_order, row_index, wd_m, cluster_id, cluster_order = \
-            load_viewpoints(args.object, args.num_viewpoints)
+    h5_path = Path(args.viewpoints) if args.viewpoints \
+        else config.get_viewpoint_path(args.object, args.num_viewpoints)
+    positions, normals, path_order, cluster_id, wd_m = load_viewpoints(h5_path)
+    print(f"  Loaded from {h5_path}")
     print(f"  {len(positions)} viewpoints, working distance: {wd_m*1000:.1f} mm")
 
     # path_order 순서로 정렬 (cluster_id도 함께)
@@ -953,7 +886,7 @@ def main():
 
     # [2] Build camera poses
     print("[2/6] Building camera poses...")
-    world_poses, _ = build_camera_poses(positions, normals, wd_m)
+    world_poses = build_camera_poses(positions, normals, wd_m)
     N = len(world_poses)
 
     positions_np = world_poses[:, :3, 3]
@@ -986,7 +919,13 @@ def main():
 
     print("[5/6] Phase 3 — DP optimal path...")
     reconfig_rad = np.deg2rad(args.reconfig_threshold)
-    selected, total_cost, stats = dp_optimal_path(representatives, reconfig_rad)
+    selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
+
+    # wrist_3 고정 — Phase 4/5 전체가 일관된 wrist_3로 동작하여
+    # resample 후 인접 row의 L2 spacing이 균일해진다 (5-DoF L2 = 6-DoF L2).
+    wrist3_fixed = config.ROBOT_START_STATE[-1]
+    selected[:, -1] = wrist3_fixed
+    print(f"  Locked wrist_3 at {np.rad2deg(wrist3_fixed):.1f}° (pre-transit)")
 
     # 클러스터 간/내 reconfig 분석
     if cluster_id is not None:
@@ -1018,19 +957,17 @@ def main():
     transit_segments = {}
     if len(reconfig_indices) > 0:
         print(f"\n[Phase 4] MotionGen transit for {len(reconfig_indices)} reconfig points...")
-        transit_segments, transit_stats = plan_reconfig_transits(
+        transit_segments, _ = plan_reconfig_transits(
             selected, reconfig_indices, args.robot, world_config, tensor_args,
         )
+        # 안전망: MotionGen이 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정
+        for idx in transit_segments:
+            transit_segments[idx][:, -1] = wrist3_fixed
 
     # Phase 5: Uniform resample + collision check
     print(f"\n[Phase 5] Interpolation + uniform resample...")
     final_traj = interpolate_and_resample(selected, transit_segments, spacing_rad=args.spacing)
     print(f"  Resampled: {len(final_traj)} waypoints (uniform spacing={args.spacing} rad)")
-
-    # wrist_3 고정
-    wrist3_fixed = config.ROBOT_START_STATE[-1]
-    final_traj[:, -1] = wrist3_fixed
-    print(f"  Fixed wrist_3 at {np.rad2deg(wrist3_fixed):.1f}°")
 
     # Collision check
     print("  Collision check...")
@@ -1040,28 +977,41 @@ def main():
     if n_collisions > 0:
         collision_pct = 100 * n_collisions / len(final_traj)
         print(f"  WARNING: {n_collisions}/{len(final_traj)} waypoints in collision ({collision_pct:.1f}%)")
-        # 충돌 waypoints 제거
         final_traj = final_traj[~is_collision]
-        print(f"  Removed collision waypoints → {len(final_traj)} remaining")
+        # 균일성 복원: drop으로 생긴 gap을 cumulative L2 arc-length 재resample로 메움
+        if len(final_traj) >= 2:
+            diffs = np.linalg.norm(np.diff(final_traj, axis=0), axis=1)
+            cum_len = np.concatenate([[0], np.cumsum(diffs)])
+            total_len = cum_len[-1]
+            if total_len > 1e-9:
+                n_out = max(2, int(np.ceil(total_len / args.spacing)) + 1)
+                uniform_s = np.linspace(0, total_len, n_out)
+                new_traj = np.zeros((n_out, final_traj.shape[1]))
+                for j in range(final_traj.shape[1]):
+                    new_traj[:, j] = np.interp(uniform_s, cum_len, final_traj[:, j])
+                final_traj = new_traj
+        print(f"  Removed collisions → re-resampled to {len(final_traj)} waypoints")
     else:
         print(f"  No collisions detected ({len(final_traj)} waypoints)")
 
     # FK + 저장
-    success_mask = np.ones(len(final_traj), dtype=bool)
-    ee_positions, ee_quaternions = compute_fk(final_traj, success_mask, args.robot)
+    ee_positions, ee_quaternions = compute_fk(final_traj, args.robot)
     print(f"  Computed FK for {len(final_traj)} waypoints")
 
     traj_dir = config.get_trajectory_path(args.object, args.num_viewpoints, "dummy").parent
     traj_dir.mkdir(parents=True, exist_ok=True)
 
     suffix = args.output_suffix
-    csv_path = str(traj_dir / f"trajectory_{suffix}.csv")
+    spacing_str = f"{args.spacing:.2f}".replace(".", "")  # 0.10 → "010"
+    tag = f"{suffix}_s{spacing_str}"
+
+    csv_path = str(traj_dir / f"trajectory_{tag}.csv")
     save_trajectory_csv(final_traj, ee_positions, ee_quaternions, csv_path)
 
-    static_path = str(traj_dir / f"trajectory_{suffix}.html")
+    static_path = str(traj_dir / f"trajectory_{tag}.html")
     visualize_static_html(args.object, final_traj, ee_positions, static_path)
 
-    anim_path = str(traj_dir / f"trajectory_{suffix}_anim.html")
+    anim_path = str(traj_dir / f"trajectory_{tag}_anim.html")
     visualize_animated_html(args.object, final_traj, ee_positions, anim_path)
 
     n_transit_ok = len(transit_segments)
