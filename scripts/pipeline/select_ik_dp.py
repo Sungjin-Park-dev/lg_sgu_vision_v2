@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-DBSCAN + DP + MotionGen 기반 최적 IK 궤적 생성
+DBSCAN + DP + MotionPlanner 기반 최적 IK 궤적 생성 (cuRobo v0.8 API)
 
 각 viewpoint에 대해 다수의 IK 해를 구하고, DP로 전역 최적 경로를 선택한 뒤,
-reconfig 지점은 MotionGen으로 충돌회피 transit을 만들어 균일 spacing으로 resample한다.
+reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spacing으로 resample한다.
 
 단계:
-    Phase 1: Multi-seed IK     — viewpoint당 num_seeds개 IK 해
-    Phase 2: DBSCAN            — viewpoint당 대표 해 (medoid) 추출
-    Phase 3: DP                — 최소 joint-space 비용 경로 선택
+    Phase 1: Multi-seed IK         — viewpoint당 num_seeds개 IK 해
+    Phase 2: DBSCAN                — viewpoint당 대표 해 (medoid) 추출
+    Phase 3: DP                    — 최소 joint-space 비용 경로 선택
        ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
-    Phase 4: MotionGen transit — reconfig 지점 충돌회피 joint-to-joint planning
-    Phase 5: Uniform resample  — cumulative L2 arc-length로 균일 spacing + 충돌 검사
+    Phase 4: MotionPlanner transit — reconfig 지점 충돌회피 joint-to-joint planning
+    Phase 5: Uniform resample      — cumulative L2 arc-length로 균일 spacing + 충돌 검사
 
 사용법:
     uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -28,18 +28,85 @@ import torch
 from scipy.spatial.transform import Rotation
 from sklearn.cluster import DBSCAN
 
-from curobo.types.base import TensorDeviceType
-from curobo.types.math import Pose
-from curobo.geom.types import Cuboid, Mesh as CuRoboMesh, WorldConfig
-from curobo.util_file import get_robot_configs_path, join_path, load_yaml
-from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
-from curobo.types.robot import JointState as CuRoboJointState
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
+from curobo.types import Pose, JointState, GoalToolPose
+from curobo.scene import Scene, Cuboid, Mesh as CuRoboMesh
+from curobo.kinematics import Kinematics, KinematicsCfg
+from curobo.collision_checking import RobotCollisionChecker, RobotCollisionCheckerCfg
+from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
+
+
+# =========================================================================
+# Robot config resolution (absolute paths so cuRobo doesn't need symlinks)
+# =========================================================================
+
+def _resolve_robot_config(robot_filename: str):
+    """Robot YAML 을 dict 로 로드하고 urdf_path/asset_root_path 를 절대경로로 패치.
+
+    탐색 순서: 프로젝트 ur20_description/ → cuRobo content/configs/robot/.
+    """
+    import yaml
+    from curobo.content import get_robot_configs_path
+
+    candidates = [
+        config.PROJECT_ROOT / "ur20_description" / robot_filename,
+        Path(get_robot_configs_path()) / robot_filename,
+    ]
+    yaml_path = next((p for p in candidates if p.exists()), None)
+    if yaml_path is None:
+        raise FileNotFoundError(
+            f"Robot config '{robot_filename}' not found in: "
+            + ", ".join(str(p) for p in candidates)
+        )
+
+    import dataclasses
+    from curobo._src.robot.loader.kinematics_loader_cfg import KinematicsLoaderCfg
+    from curobo._src.robot.types.cspace_params import CSpaceParams
+
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f)
+
+    kin = cfg["robot_cfg"]["kinematics"]
+    rel_urdf = kin.get("urdf_path", "")
+
+    asset_search = [
+        config.PROJECT_ROOT / "ur20_description",
+        yaml_path.parent,
+    ]
+    asset_root = next(
+        (p for p in asset_search if (p / Path(rel_urdf).name).exists()), None,
+    )
+    if asset_root is None:
+        raise FileNotFoundError(
+            f"Robot URDF '{Path(rel_urdf).name}' not found in: "
+            + ", ".join(str(p) for p in asset_search)
+        )
+
+    kin["urdf_path"] = str(asset_root / Path(rel_urdf).name)
+    kin["asset_root_path"] = str(asset_root)
+
+    # Translate legacy ee_link → tool_frames; drop fields the new KinematicsLoaderCfg
+    # doesn't accept (usd_*, link_names, ...).
+    if "tool_frames" not in kin and "ee_link" in kin:
+        ee = kin["ee_link"]
+        kin["tool_frames"] = [ee] if isinstance(ee, str) else list(ee)
+
+    # Translate legacy cspace.retract_config → default_joint_position; filter cspace
+    # to fields CSpaceParams accepts.
+    if isinstance(kin.get("cspace"), dict):
+        cs = dict(kin["cspace"])
+        if "default_joint_position" not in cs and "retract_config" in cs:
+            cs["default_joint_position"] = cs["retract_config"]
+        cs_allowed = {f.name for f in dataclasses.fields(CSpaceParams)}
+        kin["cspace"] = {k: v for k, v in cs.items() if k in cs_allowed}
+
+    allowed = {f.name for f in dataclasses.fields(KinematicsLoaderCfg)}
+    cfg["robot_cfg"]["kinematics"] = {k: v for k, v in kin.items() if k in allowed}
+    return cfg
 
 
 # =========================================================================
@@ -140,21 +207,19 @@ def build_collision_world(object_name: str):
     else:
         print(f"  Warning: Target mesh not found at {mesh_path}, skipping mesh collision")
 
-    return WorldConfig(cuboid=cuboids, mesh=meshes if meshes else None)
+    return Scene(cuboid=cuboids, mesh=meshes if meshes else None)
 
 
-def compute_fk(solutions, robot_cfg_file):
+def compute_fk(solutions, robot_cfg):
     """Compute FK for joint solutions. Returns (N,3) positions and (N,4) quats (x,y,z,w)."""
-    robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_cfg_file))["robot_cfg"]
-    ta = TensorDeviceType(device=torch.device("cuda:0"), dtype=torch.float32)
-
-    rw_config = RobotWorldConfig.load_from_config(robot_cfg, WorldConfig(), tensor_args=ta)
-    robot_world = RobotWorld(rw_config)
-
+    kin = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_cfg))
     q_batch = torch.tensor(solutions, device="cuda:0", dtype=torch.float32)
-    state = robot_world.get_kinematics(q_batch)
-    ee_positions = state.ee_position.cpu().numpy()
-    ee_quat_wxyz = state.ee_quaternion.cpu().numpy()
+    js = JointState.from_position(q_batch, joint_names=kin.joint_names)
+    state = kin.compute_kinematics(js)
+
+    ee_pose = state.tool_poses.get_link_pose(kin.tool_frames[0])
+    ee_positions = ee_pose.position.cpu().numpy()
+    ee_quat_wxyz = ee_pose.quaternion.cpu().numpy()
     ee_quaternions = ee_quat_wxyz[:, [1, 2, 3, 0]]
 
     return ee_positions, ee_quaternions
@@ -173,15 +238,15 @@ def normalize_joints(q):
 # Phase 1: Multi-seed IK
 # =========================================================================
 
-def solve_ik_multi_seed(ik_solver, positions_np, quats_np, tensor_args,
+def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
                         num_seeds=100, batch_size=4):
     """각 pose에 대해 num_seeds개 IK 해를 구한다.
 
     Args:
-        ik_solver: cuRobo IKSolver
+        robot_cfg: cuRobo robot config (dict)
+        world_scene: 충돌 Scene
         positions_np: (N, 3) EE positions
         quats_np: (N, 4) EE quaternions (w, x, y, z)
-        tensor_args: TensorDeviceType
         num_seeds: IK seed 수
         batch_size: GPU 배치 크기
 
@@ -189,6 +254,23 @@ def solve_ik_multi_seed(ik_solver, positions_np, quats_np, tensor_args,
         all_solutions: (N, num_seeds, 6)
         all_success: (N, num_seeds) bool
     """
+    cache = {
+        "obb": max(1, len(world_scene.cuboid)),
+        "mesh": max(1, len(world_scene.mesh)),
+    }
+    cfg = InverseKinematicsCfg.create(
+        robot=robot_cfg,
+        scene_model={},
+        self_collision_check=True,
+        num_seeds=num_seeds,
+        max_batch_size=batch_size,
+        use_cuda_graph=False,
+        collision_cache=cache,
+    )
+    ik = InverseKinematics(cfg)
+    ik.update_world(world_scene)
+    tool = ik.tool_frames[0]
+
     N = len(positions_np)
     n_dof = 6
     all_solutions = np.zeros((N, num_seeds, n_dof), dtype=np.float64)
@@ -201,13 +283,19 @@ def solve_ik_multi_seed(ik_solver, positions_np, quats_np, tensor_args,
         s = b * batch_size
         e = min(s + batch_size, N)
 
-        bp = torch.tensor(positions_np[s:e], device=tensor_args.device, dtype=tensor_args.dtype)
-        bq = torch.tensor(quats_np[s:e], device=tensor_args.device, dtype=tensor_args.dtype)
+        bp = torch.tensor(positions_np[s:e], device="cuda:0", dtype=torch.float32)
+        bq = torch.tensor(quats_np[s:e], device="cuda:0", dtype=torch.float32)
         goal = Pose(position=bp, quaternion=bq)
 
-        result = ik_solver.solve_batch(goal, num_seeds=num_seeds, return_seeds=num_seeds)
+        result = ik.solve_pose(
+            GoalToolPose.from_poses({tool: goal}, num_goalset=1),
+            return_seeds=num_seeds,
+        )
 
-        all_solutions[s:e] = result.solution.cpu().numpy()
+        sol = result.js_solution.position.cpu().numpy()
+        if sol.shape[-1] != n_dof:
+            sol = sol[..., :n_dof]
+        all_solutions[s:e] = sol
         all_success[s:e] = result.success.cpu().numpy()
 
         if (b + 1) % 50 == 0 or b == n_batches - 1:
@@ -391,60 +479,58 @@ def dp_optimal_path(representatives, reconfig_threshold_rad=0.5):
 # =========================================================================
 
 def plan_reconfig_transits(
-    selected, reconfig_indices, robot_cfg_file, world_config, tensor_args,
+    selected, reconfig_indices, robot_cfg, world_scene,
 ):
-    """Reconfig 지점마다 MotionGen joint-to-joint planning 수행.
+    """Reconfig 지점마다 MotionPlanner joint-to-joint planning 수행.
 
     Args:
         selected: (N, 6) DP로 선택된 joint trajectory
         reconfig_indices: reconfig이 발생하는 transition 인덱스 배열
-        robot_cfg_file: cuRobo robot config 파일명
-        world_config: 충돌 세계 설정
-        tensor_args: TensorDeviceType
+        robot_cfg: cuRobo robot config (dict)
+        world_scene: Scene (충돌 세계)
 
     Returns:
         transit_segments: dict {idx: (T, 6) transit trajectory} — 성공한 것만
         transit_stats: list of dicts
     """
-    motion_gen_config = MotionGenConfig.load_from_robot_config(
-        robot_cfg_file, world_config,
-        tensor_args=tensor_args,
-        interpolation_dt=0.02,
+    cache = {
+        "obb": max(1, len(world_scene.cuboid)),
+        "mesh": max(1, len(world_scene.mesh)),
+    }
+    cfg = MotionPlannerCfg.create(
+        robot=robot_cfg,
+        collision_cache=cache,
         use_cuda_graph=False,
     )
-    motion_gen = MotionGen(motion_gen_config)
-    print("    Warming up MotionGen...")
-    motion_gen.warmup()
-
-    plan_cfg = MotionGenPlanConfig(
-        max_attempts=10,
-        timeout=5.0,
-        enable_graph=False,
-        enable_opt=True,
-        enable_finetune_trajopt=True,
-    )
+    planner = MotionPlanner(cfg)
+    planner.update_world(world_scene)
+    print("    Warming up MotionPlanner...")
+    planner.warmup(enable_graph=False, num_warmup_iterations=2)
 
     transit_segments = {}
     transit_stats = []
 
     for idx in reconfig_indices:
         start_q = torch.tensor(
-            selected[idx], device=tensor_args.device, dtype=tensor_args.dtype,
+            selected[idx], device="cuda:0", dtype=torch.float32,
         ).unsqueeze(0)
         goal_q = torch.tensor(
-            selected[idx + 1], device=tensor_args.device, dtype=tensor_args.dtype,
+            selected[idx + 1], device="cuda:0", dtype=torch.float32,
         ).unsqueeze(0)
 
-        start_state = CuRoboJointState.from_position(start_q)
-        goal_state = CuRoboJointState.from_position(goal_q)
+        start_state = JointState.from_position(start_q, joint_names=planner.joint_names)
+        goal_state = JointState.from_position(goal_q, joint_names=planner.joint_names)
 
         t0 = time.time()
-        result = motion_gen.plan_single_js(start_state, goal_state, plan_cfg.clone())
+        result = planner.plan_cspace(goal_state, start_state, max_attempts=10)
         dt = time.time() - t0
 
-        if result.success.item():
+        ok = result is not None and bool(result.success.any().item())
+        if ok:
             traj = result.get_interpolated_plan()
-            waypoints = traj.position.cpu().numpy()
+            waypoints = traj.position.squeeze(0).cpu().numpy()
+            if waypoints.shape[-1] != selected.shape[-1]:
+                waypoints = waypoints[..., :selected.shape[-1]]
             transit_segments[idx] = waypoints
             transit_stats.append({
                 "idx": idx, "success": True,
@@ -453,10 +539,9 @@ def plan_reconfig_transits(
             print(f"    {idx}→{idx+1}: OK ({len(waypoints)} waypoints, {dt:.2f}s)")
         else:
             transit_stats.append({
-                "idx": idx, "success": False,
-                "status": str(result.status), "time": dt,
+                "idx": idx, "success": False, "time": dt,
             })
-            print(f"    {idx}→{idx+1}: FAILED ({result.status}, {dt:.2f}s)")
+            print(f"    {idx}→{idx+1}: FAILED ({dt:.2f}s)")
 
     n_ok = sum(1 for s in transit_stats if s["success"])
     print(f"  Transit planning: {n_ok}/{len(reconfig_indices)} succeeded")
@@ -526,18 +611,34 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
     return resampled
 
 
-def batch_collision_check(trajectory, robot_cfg_file, world_config, tensor_args):
+def batch_collision_check(trajectory, robot_cfg, world_scene):
     """전체 궤적에 대해 batch collision check 수행. Returns (is_collision, n_collisions)."""
-    robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_cfg_file))["robot_cfg"]
-    rw_config = RobotWorldConfig.load_from_config(robot_cfg, world_config, tensor_args=tensor_args)
-    robot_world = RobotWorld(rw_config)
+    cfg = RobotCollisionCheckerCfg.load_from_config(
+        robot_config=robot_cfg,
+        scene_model=world_scene,
+        n_cuboids=max(1, len(world_scene.cuboid)),
+        n_meshes=max(1, len(world_scene.mesh)),
+    )
+    checker = RobotCollisionChecker(cfg)
 
-    q_tensor = torch.tensor(trajectory, device=tensor_args.device, dtype=tensor_args.dtype)
-    d_world, d_self = robot_world.get_world_self_collision_distance_from_joints(q_tensor)
+    # NOTE: cuRobo v0.8 RobotSceneCollision.get_scene_self_collision_distance_from_joints
+    # is buggy (passes a tensor where the underlying cost expects a KinematicsState).
+    # Bypass: drive kinematics + collision costs directly with shape (batch, horizon=1, dof).
+    q_tensor = torch.tensor(trajectory, device="cuda:0", dtype=torch.float32).unsqueeze(1)
+    batch, horizon = q_tensor.shape[0], 1
+    state = checker.get_kinematics(q_tensor)
+    num_spheres = state.robot_spheres.shape[-2]
+    checker.collision_cost.update_num_spheres(num_spheres, batch_size=batch, horizon=horizon)
+    checker.self_collision_cost.setup_batch_tensors(batch, horizon)
+    d_scene = checker.collision_cost.forward(state)
+    d_self = checker.self_collision_cost.forward(state.robot_spheres)
 
-    # 음수 거리 = 충돌
-    is_self_collision = (d_self < 0).any(dim=-1).cpu().numpy()
-    is_world_collision = (d_world < 0).any(dim=-1).cpu().numpy()
+    # 음수 거리 = 충돌. Cost shape may be (batch, horizon, num_spheres) or (batch, horizon).
+    # Reduce trailing dims to per-row collision flag.
+    d_scene_r = d_scene.view(batch, -1)
+    d_self_r = d_self.view(batch, -1)
+    is_world_collision = (d_scene_r < 0).any(dim=-1).cpu().numpy()
+    is_self_collision = (d_self_r < 0).any(dim=-1).cpu().numpy()
     is_collision = is_self_collision | is_world_collision
     n_collisions = int(is_collision.sum())
 
@@ -895,19 +996,12 @@ def main():
 
     # [3] Phase 1: Multi-seed IK
     print("[3/6] Phase 1 — Multi-seed IK...")
-    tensor_args = TensorDeviceType()
     world_config = build_collision_world(args.object)
-    robot_cfg = load_yaml(join_path(get_robot_configs_path(), args.robot))["robot_cfg"]
-    ik_config = IKSolverConfig.load_from_robot_config(
-        robot_cfg, world_config,
-        self_collision_check=True,
-        tensor_args=tensor_args,
-        use_cuda_graph=False,
-    )
-    ik_solver = IKSolver(ik_config)
+    robot_cfg = _resolve_robot_config(args.robot)
+    print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
 
     all_solutions, all_success = solve_ik_multi_seed(
-        ik_solver, positions_np, quats_np, tensor_args,
+        robot_cfg, world_config, positions_np, quats_np,
         num_seeds=args.num_seeds, batch_size=args.ik_batch_size,
     )
 
@@ -952,15 +1046,15 @@ def main():
                 print(f"      viewpoint {idx}→{idx+1} (cluster {cid}): "
                       f"jump {jump_deg:.1f}°")
 
-    # Phase 4: MotionGen transit at reconfig points
+    # Phase 4: MotionPlanner transit at reconfig points
     reconfig_indices = np.where(is_reconfig)[0] if cluster_id is not None else np.array([], dtype=int)
     transit_segments = {}
     if len(reconfig_indices) > 0:
-        print(f"\n[Phase 4] MotionGen transit for {len(reconfig_indices)} reconfig points...")
+        print(f"\n[Phase 4] MotionPlanner transit for {len(reconfig_indices)} reconfig points...")
         transit_segments, _ = plan_reconfig_transits(
-            selected, reconfig_indices, args.robot, world_config, tensor_args,
+            selected, reconfig_indices, robot_cfg, world_config,
         )
-        # 안전망: MotionGen이 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정
+        # 안전망: MotionPlanner가 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정
         for idx in transit_segments:
             transit_segments[idx][:, -1] = wrist3_fixed
 
@@ -972,7 +1066,7 @@ def main():
     # Collision check
     print("  Collision check...")
     is_collision, n_collisions = batch_collision_check(
-        final_traj, args.robot, world_config, tensor_args,
+        final_traj, robot_cfg, world_config,
     )
     if n_collisions > 0:
         collision_pct = 100 * n_collisions / len(final_traj)
@@ -995,7 +1089,7 @@ def main():
         print(f"  No collisions detected ({len(final_traj)} waypoints)")
 
     # FK + 저장
-    ee_positions, ee_quaternions = compute_fk(final_traj, args.robot)
+    ee_positions, ee_quaternions = compute_fk(final_traj, robot_cfg)
     print(f"  Computed FK for {len(final_traj)} waypoints")
 
     traj_dir = config.get_trajectory_path(args.object, args.num_viewpoints, "dummy").parent

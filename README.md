@@ -24,11 +24,9 @@ data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 # 1. Python 의존성 설치
 uv sync
 
-# 2. cuRobo 클론 및 설치 (CUDA 빌드 필요)
+# 2. cuRobo 클론 및 설치 (CUDA 13, torch>=2.9 자동 설치)
 git clone https://github.com/NVlabs/curobo.git
-cd curobo
-uv pip install -e . --no-build-isolation
-cd ..
+uv pip install "./curobo[cu13-torch]"
 ```
 
 ## 실행 방법
