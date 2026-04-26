@@ -130,6 +130,56 @@ trajopt 기본값이 다르다. 현재 sample/124 실행에서 transit 이 "1 wa
 최종 출력에는 영향 없으나, 더 매끄러운 transit 이 필요하면 `MotionPlannerCfg.create` 에
 trajopt cfg 를 명시 전달해야 함.
 
+### 4. CUDA 12 통일 (Isaac Sim 6.0.0 호환)
+
+NVIDIA 가 Isaac Sim 6.0.0 의 PyPI 휠을 **CUDA 12 빌드만** 제공한다 — `isaacsim-core`
+가 `nvidia-cublas-cu12==12.8.4.1` 를 고정 의존성으로 박아두고 런타임에
+`libcublas.so.12` 를 dlopen 한다. cu13 의 `libcublas.so.13` 은 ABI 가 다른 별개 파일이라
+대체 불가.
+
+Isaac Sim 과 cuRobo 를 **같은 venv** 에 공존시키려면 cu12 로 통일한다:
+
+| 항목 | 값 |
+|---|---|
+| Python | 3.12 (`requires-python = ">=3.12,<3.13"`) — Isaac Sim 6.0.0 요건 |
+| PyTorch 인덱스 | `https://download.pytorch.org/whl/cu128` (cu130 → cu128 변경) |
+| PyTorch | `2.10.0+cu128` |
+| cuRobo extra | `cu12-torch` (`uv pip install "./curobo[cu12-torch]"`) |
+| Isaac Sim | `isaacsim[extscache,ros2]==6.0.0` (NVIDIA 인덱스 추가 필요) |
+| `[tool.uv]` | `prerelease = "allow"` (isaacsim 의 `tinyobjloader==2.0.0rc13` 때문) |
+| `warp-lang` | `>=1.12,<1.13` 핀 (1.13 이 `wp.torch` 제거, cuRobo 와 충돌) |
+
+`pyproject.toml` 인덱스 블록:
+
+```toml
+[tool.uv]
+index-strategy = "unsafe-best-match"
+prerelease = "allow"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+```
+
+설치 순서:
+
+```bash
+uv sync                                    # Isaac Sim, torch+cu128, NVIDIA libs
+uv pip install "./curobo[cu12-torch]"      # cuRobo (path-install, lock 외)
+```
+
+> **운영 주의**: cuRobo 는 path-install 이라 `uv.lock` 에 들어가지 않는다.
+> `uv sync` 를 다시 돌리면 cuRobo 가 제거되니, 위 두 번째 줄을 다시 실행하거나
+> `uv run --no-sync ...` 로 sync 단계를 건너뛰어 실행한다.
+
 ## 검증 (sample/124, num_seeds=32)
 
 ```

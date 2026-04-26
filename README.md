@@ -20,14 +20,21 @@ data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 
 ## 환경 설정
 
+CUDA 12 로 통일된 환경 (Isaac Sim 6.0.0 이 cu12 빌드만 제공하기 때문 — 자세한 배경은
+[docs/curobo_v0.8_migration.md](docs/curobo_v0.8_migration.md) 참고).
+
 ```bash
-# 1. Python 의존성 설치
+# 1. Python 의존성 설치 (Isaac Sim, torch+cu128, NVIDIA libs 포함)
 uv sync
 
-# 2. cuRobo 클론 및 설치 (CUDA 13, torch>=2.9 자동 설치)
+# 2. cuRobo 클론 및 설치 (cu12-torch extra)
 git clone https://github.com/NVlabs/curobo.git
-uv pip install "./curobo[cu13-torch]"
+uv pip install "./curobo[cu12-torch]"
 ```
+
+> **주의**: cuRobo 는 path-install 이라 `uv.lock` 에 들어가지 않습니다.
+> `uv sync` 를 다시 돌리면 cuRobo 가 제거되니, 위 `uv pip install` 한 줄을 다시
+> 실행해야 합니다. 매번 sync 를 건너뛰려면 `uv run --no-sync ...` 사용.
 
 ## 실행 방법
 

@@ -3,7 +3,7 @@ name = "curobo-ws"
 version = "0.1.0"
 description = "cuRobo workspace"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.10.0",
     "torchvision",
@@ -16,22 +16,28 @@ dependencies = [
     "trimesh",
     "plotly",
     "pyyaml",
-    "warp-lang",
+    "warp-lang>=1.12,<1.13",
     "yourdfpy",
     "open3d",
     "coacd",
+    "isaacsim[extscache,ros2]==6.0.0",
 ]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
+prerelease = "allow"
 
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu130"
+url = "https://download.pytorch.org/whl/cu128"
 
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
 
 [tool.uv.workspace]
 exclude = [
