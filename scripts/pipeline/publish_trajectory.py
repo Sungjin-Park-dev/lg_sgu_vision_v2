@@ -67,13 +67,14 @@ def load_trajectory_csv(csv_path: str) -> np.ndarray:
 
 
 class TrajectoryPublisher(Node):
-    def __init__(self, solutions: np.ndarray):
+    def __init__(self, solutions: np.ndarray, max_joint_vel: float):
         super().__init__("publish_trajectory")
 
         self._action_client = ActionClient(
             self, FollowJointTrajectory, CONTROLLER_TOPIC
         )
         self._solutions = solutions
+        self._max_joint_vel = max_joint_vel
         self._current_joint_positions = None
 
         self._js_sub = self.create_subscription(
@@ -107,7 +108,7 @@ class TrajectoryPublisher(Node):
 
     def _send_trajectory(self):
         MAX_STEP_RAD = 0.1
-        MAX_JOINT_VEL = 2.0
+        MAX_JOINT_VEL = self._max_joint_vel
 
         traj = JointTrajectory()
         traj.joint_names = JOINT_NAMES
@@ -134,24 +135,34 @@ class TrajectoryPublisher(Node):
                 all_waypoints.append((wp, md))
                 prev = wp_arr
 
-        # First point: current position at t=0
-        pt0 = JointTrajectoryPoint()
-        pt0.positions = self._current_joint_positions
-        pt0.velocities = [0.0] * len(JOINT_NAMES)
-        pt0.time_from_start = Duration(sec=0, nanosec=0)
-        traj.points.append(pt0)
-
-        # Add interpolated waypoints with time proportional to displacement
+        # Build positions + times arrays first (pt0 + all interpolated waypoints)
+        positions = [list(self._current_joint_positions)]
+        times = [0.0]
         cumulative_t = 0.0
         for q, max_diff in all_waypoints:
             seg_dt = max(max_diff / MAX_JOINT_VEL, 0.05)
             cumulative_t += seg_dt
+            positions.append(list(q))
+            times.append(cumulative_t)
+
+        positions = np.array(positions)
+        times = np.array(times)
+
+        # Finite-difference velocities (central diff interior, 0 at endpoints).
+        # 컨트롤러가 cubic Hermite spline로 보간하여 C¹ 연속 → reversal 부드럽게.
+        velocities = np.zeros_like(positions)
+        if len(times) >= 3:
+            dt_pair = (times[2:] - times[:-2])[:, None]
+            velocities[1:-1] = (positions[2:] - positions[:-2]) / dt_pair
+
+        for i in range(len(positions)):
             pt = JointTrajectoryPoint()
-            pt.positions = q
-            pt.velocities = [0.0] * len(JOINT_NAMES)
+            pt.positions = positions[i].tolist()
+            pt.velocities = velocities[i].tolist()
+            t = times[i]
             pt.time_from_start = Duration(
-                sec=int(cumulative_t),
-                nanosec=int((cumulative_t - int(cumulative_t)) * 1e9),
+                sec=int(t),
+                nanosec=int((t - int(t)) * 1e9),
             )
             traj.points.append(pt)
 
@@ -195,6 +206,9 @@ def main():
     group.add_argument("--csv", type=str, help="CSV 파일 경로 (직접 지정)")
     group.add_argument("--object", type=str, help="오브젝트 이름 (--num-viewpoints 필요)")
     parser.add_argument("--num-viewpoints", type=int, help="뷰포인트 수")
+    parser.add_argument("--max-joint-vel", type=float, default=0.5,
+                        help="최대 joint 속도 (rad/s, default: 0.5). "
+                             "낮출수록 로봇이 천천히 움직임.")
     args = parser.parse_args()
 
     if args.object:
@@ -215,7 +229,7 @@ def main():
     print(f"  Action server: {CONTROLLER_TOPIC}")
 
     rclpy.init()
-    node = TrajectoryPublisher(solutions)
+    node = TrajectoryPublisher(solutions, max_joint_vel=args.max_joint_vel)
     try:
         print("  Spinning ROS2 node (Ctrl+C to stop)...")
         rclpy.spin(node)

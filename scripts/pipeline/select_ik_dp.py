@@ -11,7 +11,7 @@ reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spa
     Phase 3: DP                    — 최소 joint-space 비용 경로 선택
        ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
     Phase 4: MotionPlanner transit — reconfig 지점 충돌회피 joint-to-joint planning
-    Phase 5: Uniform resample      — cumulative L2 arc-length로 균일 spacing + 충돌 검사
+    Phase 5: Uniform resample      — cumulative L∞ (max-joint) spacing + 충돌 검사
 
 사용법:
     uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -562,7 +562,8 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
     Args:
         selected: (N, 6) DP 선택 궤적
         transit_segments: dict {idx: (T, 6)} transit 경로
-        spacing_rad: uniform spacing in joint-space L2 norm (radians)
+        spacing_rad: uniform spacing in joint-space L∞ norm (max |Δq_j|, radians).
+            상수 dt 재생 시 가장 많이 움직이는 joint의 속도가 dt당 spacing_rad/dt로 일정해진다.
 
     Returns:
         resampled: (M, 6) uniform-spaced trajectory
@@ -582,7 +583,7 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
         else:
             # non-reconfig: linear interpolation
             q0, q1 = selected[i], selected[i + 1]
-            dist = np.linalg.norm(q1 - q0)
+            dist = np.max(np.abs(q1 - q0))
             n_steps = max(1, int(np.ceil(dist / spacing_rad)))
             if n_steps > 1:
                 alphas = np.linspace(0, 1, n_steps + 1)[1:-1]  # 양 끝 제외
@@ -592,8 +593,8 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
     dense_segments.append(selected[-1:])  # 마지막 점
     dense_path = np.concatenate(dense_segments, axis=0)
 
-    # 2) Cumulative arc length 계산
-    diffs = np.linalg.norm(np.diff(dense_path, axis=0), axis=1)
+    # 2) Cumulative L∞ progress (각 step의 max joint diff 누적)
+    diffs = np.max(np.abs(np.diff(dense_path, axis=0)), axis=1)
     cum_len = np.concatenate([[0], np.cumsum(diffs)])
     total_len = cum_len[-1]
 
@@ -963,8 +964,10 @@ def main():
                         help="DBSCAN eps in radians (default: 0.3)")
     parser.add_argument("--reconfig-threshold", type=float, default=29.0,
                         help="Reconfig threshold in degrees (default: 29.0)")
-    parser.add_argument("--spacing", type=float, default=0.1,
-                        help="Uniform resample spacing in radians (default: 0.1)")
+    parser.add_argument("--spacing", type=float, default=0.05,
+                        help="Uniform resample spacing in joint-space L∞ norm "
+                             "(max |Δq_j| per waypoint, radians; default: 0.05). "
+                             "실제 재생 속도는 publish_trajectory.py의 --max-joint-vel로 조절.")
     parser.add_argument("--output-suffix", type=str, default="dp",
                         help="Output file suffix (default: dp)")
     args = parser.parse_args()
@@ -1016,7 +1019,7 @@ def main():
     selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
 
     # wrist_3 고정 — Phase 4/5 전체가 일관된 wrist_3로 동작하여
-    # resample 후 인접 row의 L2 spacing이 균일해진다 (5-DoF L2 = 6-DoF L2).
+    # |Δwrist_3|=0이 되므로 6-DoF L∞ = 5-DoF L∞ (다른 joint가 최대값을 결정).
     wrist3_fixed = config.ROBOT_START_STATE[-1]
     selected[:, -1] = wrist3_fixed
     print(f"  Locked wrist_3 at {np.rad2deg(wrist3_fixed):.1f}° (pre-transit)")
@@ -1072,9 +1075,9 @@ def main():
         collision_pct = 100 * n_collisions / len(final_traj)
         print(f"  WARNING: {n_collisions}/{len(final_traj)} waypoints in collision ({collision_pct:.1f}%)")
         final_traj = final_traj[~is_collision]
-        # 균일성 복원: drop으로 생긴 gap을 cumulative L2 arc-length 재resample로 메움
+        # 균일성 복원: drop으로 생긴 gap을 cumulative L∞ progress 재resample로 메움
         if len(final_traj) >= 2:
-            diffs = np.linalg.norm(np.diff(final_traj, axis=0), axis=1)
+            diffs = np.max(np.abs(np.diff(final_traj, axis=0)), axis=1)
             cum_len = np.concatenate([[0], np.cumsum(diffs)])
             total_len = cum_len[-1]
             if total_len > 1e-9:
