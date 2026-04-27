@@ -51,7 +51,7 @@ from sklearn.cluster import DBSCAN
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix
-from viz.visualize_viewpoints import visualize_clusters_html
+from common.viewpoint_viz import visualize_clusters_html
 
 
 # ============================================================================

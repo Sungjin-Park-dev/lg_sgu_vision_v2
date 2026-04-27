@@ -6,18 +6,18 @@ CoACD Convex Decomposition 시각화
 
 사용법:
     # 기본 (source mesh)
-    uv run scripts/viz/visualize_coacd.py --object sample
+    uv run scripts/prev/visualize_coacd.py --object sample
 
     # threshold 조절
-    uv run scripts/viz/visualize_coacd.py --object sample --threshold 0.05
+    uv run scripts/prev/visualize_coacd.py --object sample --threshold 0.05
 
     # 재질 필터 (target mesh)
-    uv run scripts/viz/visualize_coacd.py --object sample --material-rgb "170,163,158"
+    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "170,163,158"
 
     # threshold 비교
-    uv run scripts/viz/visualize_coacd.py --object sample --material-rgb "170,163,158" --compare
+    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "170,163,158" --compare
 
-    uv run scripts/viz/visualize_coacd.py --object glass --compare
+    uv run scripts/prev/visualize_coacd.py --object glass --compare
 
 """
 

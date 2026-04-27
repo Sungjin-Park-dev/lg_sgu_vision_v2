@@ -10,9 +10,8 @@ scripts/
     generate_viewpoints.py   뷰포인트 생성 + 클러스터링 + GTSP 순서
     select_ik_dp.py          DBSCAN+DP 기반 IK 해 선택 + MotionGen transit
     publish_trajectory.py    ROS2 궤적 전송
-  common/            config, math_utils
+  common/            config, math_utils, viewpoint_viz
   ros2/              ROS2 유틸 (move_to_start, publish_workcell_markers)
-  viz/               시각화 (visualize_viewpoints, visualize_coacd)
   isaac/             Isaac Sim 전용
   prev/              이전 버전 스크립트
 data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)

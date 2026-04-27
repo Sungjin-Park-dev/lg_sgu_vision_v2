@@ -76,7 +76,7 @@ HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
 
 ## HTML 시각화
 
-`scripts/viz/visualize_viewpoints.py`의 `visualize_clusters_html()`로 생성 (내부 전용, 직접 실행 안 함).
+`scripts/common/viewpoint_viz.py`의 `visualize_clusters_html()`로 생성 (내부 전용, 직접 실행 안 함).
 
 **시각화 요소**:
 - **메시**: 반투명 회색 배경
