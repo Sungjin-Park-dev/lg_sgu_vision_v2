@@ -40,8 +40,7 @@ Isaac Sim의 GUI URDF Importer 사용. CLI `urdf_usd_converter`보다 articulati
 
 ```bash
 # 컨테이너, 셸 B (venv 활성, ROS2 sourcing X)
-source /workspace/.venv/bin/activate
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/launch_sim.py
+uv run scripts/isaac/launch_sim.py
 ```
 
 `launch_sim.py`는 빈 stage + URDF Importer 확장만 켜진 상태로 진입.
@@ -100,14 +99,12 @@ for prim in stage.Traverse():
 
 ```bash
 # 컨테이너, 셸 B
-source /workspace/.venv/bin/activate
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/ur_ros2_joint_control.py
+uv run scripts/isaac/ur_ros2_joint_control.py
 ```
 
 워크셀 포함:
 ```bash
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/ur_ros2_joint_control.py \
-    --object sample
+uv run scripts/isaac/ur_ros2_joint_control.py --object sample
 ```
 
 `--object sample` 사용 시 `config.py`의 TABLE/WALLS/ROBOT_MOUNT/TARGET_OBJECT를 stage에 추가.
@@ -146,8 +143,7 @@ ros2 launch ur_robot_driver ur_control.launch.py \
     ur_type:=ur20 use_mock_hardware:=true launch_rviz:=true
 
 # 셸 B: Isaac Sim (venv, 시스템 ROS2 X)
-source /workspace/.venv/bin/activate
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/ur_ros2_joint_control.py
+uv run scripts/isaac/ur_ros2_joint_control.py
 
 # 셸 C: 명령 전송 (시스템 ROS2 + venv)
 source /opt/ros/jazzy/setup.bash
@@ -168,7 +164,7 @@ uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/t
 URDF/USD를 GUI에서 수동 import하거나 stage를 자유롭게 만들 때 사용:
 
 ```bash
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/launch_sim.py
+uv run scripts/isaac/launch_sim.py
 ```
 
 - 로봇 로드 X

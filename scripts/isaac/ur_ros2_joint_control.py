@@ -23,10 +23,7 @@ Prerequisite — USD prepared at ur20_description/ur20/ur20.usd
 (generated via Isaac Sim's URDF Importer GUI with proper articulation root).
 
 Usage:
-    OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-        scripts/isaac/ur_ros2_joint_control.py
-    OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-        scripts/isaac/ur_ros2_joint_control.py --object sample
+    uv run scripts/isaac/ur_ros2_joint_control.py --object sample
 
 Test with:
     ros2 topic pub /joint_states sensor_msgs/msg/JointState \
