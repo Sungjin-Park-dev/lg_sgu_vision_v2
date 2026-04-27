@@ -5,7 +5,7 @@
 URDF/USD 등을 GUI에서 직접 import해서 테스트할 때 사용.
 
 사용법:
-    OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python scripts/isaac/launch_sim.py
+    uv run scripts/isaac/launch_sim.py
 """
 
 import numpy as np
