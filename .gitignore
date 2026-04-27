@@ -22,3 +22,7 @@ curobo/
 # Local tool state
 .claude/
 CLAUDE.md
+
+# Isaac Sim auto-generated caches/artifacts
+.thumbs/
+Collected_*/
