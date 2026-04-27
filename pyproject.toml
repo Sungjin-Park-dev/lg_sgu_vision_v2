@@ -1,5 +1,5 @@
 [project]
-name = "curobo-ws"
+name = "lg-sgu-vision"
 version = "0.1.0"
 description = "cuRobo workspace"
 readme = "README.md"
@@ -7,7 +7,6 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.10.0",
     "torchvision",
-    "torchaudio",
     "ortools>=9.15.6755",
     "numpy",
     "scipy",
@@ -21,11 +20,13 @@ dependencies = [
     "open3d",
     "coacd",
     "isaacsim[all,extscache]==6.0.0",
+    "nvidia-curobo[cu12] @ git+https://github.com/NVlabs/curobo.git@v0.8.0",
 ]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
 prerelease = "allow"
+no-build-isolation-package = ["nvidia-curobo"]
 
 [[tool.uv.index]]
 name = "pytorch"
@@ -38,8 +39,3 @@ url = "https://pypi.org/simple"
 [[tool.uv.index]]
 name = "nvidia"
 url = "https://pypi.nvidia.com"
-
-[tool.uv.workspace]
-exclude = [
-    "arm_coverage",
-]

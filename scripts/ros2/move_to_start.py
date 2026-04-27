@@ -61,6 +61,10 @@ class MoveToStartNode(Node):
             self._current_positions = np.array([positions[n] for n in JOINT_NAMES])
 
     def _on_startup(self):
+        if self._current_positions is None:
+            self.get_logger().info("Waiting for /joint_states...", once=True)
+            return
+
         self._timer.cancel()
 
         self.get_logger().info("Waiting for action server...")
@@ -70,11 +74,6 @@ class MoveToStartNode(Node):
                 "Is ur_robot_driver running?"
             )
             raise SystemExit(1)
-
-        if self._current_positions is None:
-            self.get_logger().info("Waiting for /joint_states...")
-            while self._current_positions is None:
-                rclpy.spin_once(self, timeout_sec=0.5)
 
         diff = np.abs(self._target - self._current_positions)
         max_diff = np.max(diff)
@@ -161,12 +160,12 @@ def main():
 
     parser = argparse.ArgumentParser(description="Move robot to start position")
     parser.add_argument(
-        "--duration", type=float, default=3.0,
-        help="Minimum duration for the motion (seconds, default: 3.0)",
+        "--duration", type=float, default=5.0,
+        help="Minimum duration for the motion (seconds, default: 5.0)",
     )
     parser.add_argument(
-        "--max-vel", type=float, default=1.0,
-        help="Max joint velocity (rad/s, default: 1.0)",
+        "--max-vel", type=float, default=0.5,
+        help="Max joint velocity (rad/s, default: 0.5)",
     )
     args = parser.parse_args()
 

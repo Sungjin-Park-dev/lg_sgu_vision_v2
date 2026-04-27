@@ -7,6 +7,8 @@ plan_motion.py가 생성한 trajectory.csv를 읽어서 로봇에 전송한다.
 사용법:
     uv run scripts/pipeline/publish_trajectory.py --object sample --num-viewpoints 124
     uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
+
+    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_s010.csv
 """
 
 import argparse
@@ -40,7 +42,7 @@ CONTROLLER_TOPIC = "/scaled_joint_trajectory_controller/follow_joint_trajectory"
 
 
 def load_trajectory_csv(csv_path: str) -> np.ndarray:
-    """CSV에서 joint trajectory를 로드.
+    """CSV에서 joint trajectory를 로드. 헤더에 prefix(예: 'ur20_')가 있어도 동작.
 
     Returns:
         solutions: (N, 6) joint angles in radians
@@ -48,8 +50,18 @@ def load_trajectory_csv(csv_path: str) -> np.ndarray:
     solutions = []
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
+        col_map = {}
+        for name in JOINT_NAMES:
+            matches = [c for c in reader.fieldnames if c.endswith(name)]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Expected exactly one column ending with '{name}', "
+                    f"found {matches} in {reader.fieldnames}"
+                )
+            col_map[name] = matches[0]
+
         for row in reader:
-            q = [float(row[name]) for name in JOINT_NAMES]
+            q = [float(row[col_map[name]]) for name in JOINT_NAMES]
             solutions.append(q)
     return np.array(solutions, dtype=np.float64)
 

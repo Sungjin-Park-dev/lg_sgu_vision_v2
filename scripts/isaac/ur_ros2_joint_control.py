@@ -19,10 +19,8 @@ UR ROS2 Joint Control standalone script for Isaac Sim.
 Loads our local UR20 (camera-attached) and creates an Action Graph that
 subscribes to /joint_states and drives the robot via ArticulationController.
 
-Prerequisite — convert URDF to USD once:
-    uv run --no-sync python -m urdf_usd_converter \
-        --package "ur_description=$(realpath ur20_description)" \
-        ur20_description/ur20_with_camera.urdf ur20_description/
+Prerequisite — USD prepared at ur20_description/ur20/ur20.usd
+(generated via Isaac Sim's URDF Importer GUI with proper articulation root).
 
 Usage:
     OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
@@ -45,7 +43,7 @@ import numpy as np
 from isaacsim import SimulationApp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_USD = PROJECT_ROOT / "ur20_description" / "ur.usda"
+DEFAULT_USD = PROJECT_ROOT / "ur20_description" / "ur20" / "ur20.usd"
 STAGE_PATH = "/World/UR20"
 
 parser = argparse.ArgumentParser()
@@ -58,10 +56,8 @@ args, _ = parser.parse_known_args()
 if not args.usd_path.exists():
     sys.exit(
         f"Robot USD not found: {args.usd_path}\n"
-        f"Convert it first:\n"
-        f"  uv run --no-sync python -m urdf_usd_converter \\\n"
-        f"      --package \"ur_description=$(realpath ur20_description)\" \\\n"
-        f"      ur20_description/ur20_with_camera.urdf ur20_description/"
+        f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD\n"
+        f"to ur20_description/ur20/ur20.usd"
     )
 
 CONFIG = {"renderer": "RaytracedLighting", "headless": False}
@@ -130,6 +126,25 @@ if args.object is not None:
 
     simulation_app.update()
 
+# Locate articulation root inside the loaded USD
+from pxr import UsdPhysics
+import omni.usd
+_stage = omni.usd.get_context().get_stage()
+articulation_root_path = None
+for _prim in _stage.Traverse():
+    p = str(_prim.GetPath())
+    if not p.startswith(STAGE_PATH):
+        continue
+    if _prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+        articulation_root_path = p
+        break
+if articulation_root_path is None:
+    print(f"WARNING: No ArticulationRootAPI found under {STAGE_PATH} — applying to STAGE_PATH")
+    UsdPhysics.ArticulationRootAPI.Apply(_stage.GetPrimAtPath(STAGE_PATH))
+    articulation_root_path = STAGE_PATH
+print(f"Articulation root: {articulation_root_path}")
+simulation_app.update()
+
 # Create Action Graph with ROS2 SubscribeJointState -> ArticulationController
 try:
     og.Controller.edit(
@@ -152,7 +167,7 @@ try:
                 ),
             ],
             og.Controller.Keys.SET_VALUES: [
-                ("ArticulationController.inputs:robotPath", STAGE_PATH),
+                ("ArticulationController.inputs:robotPath", articulation_root_path),
                 ("SubscribeJointState.inputs:topicName", "/joint_states"),
             ],
         },
@@ -160,6 +175,15 @@ try:
 except Exception as e:
     print(e)
 
+simulation_app.update()
+
+# Open Action Graph editor window
+import omni.kit.app
+import omni.kit.commands
+_ext_manager = omni.kit.app.get_app().get_extension_manager()
+_ext_manager.set_extension_enabled_immediate("omni.graph.window.action", True)
+simulation_app.update()
+omni.kit.commands.execute("OpenWindow", window_name="Action Graph")
 simulation_app.update()
 
 # Initialize physics and start simulation
