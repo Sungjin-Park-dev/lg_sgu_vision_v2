@@ -84,6 +84,7 @@ simulation_app = SimulationApp(CONFIG)
 import carb
 import omni.graph.core as og
 from isaacsim.core.api import SimulationContext
+from isaacsim.core.api.objects import VisualCuboid
 from isaacsim.core.utils import extensions, prims, viewports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 import config
@@ -135,6 +136,18 @@ prims.create_prim(
     "Xform",
     position=np.array([0.0, 0.0, MOUNT_HEIGHT]),
     usd_path=str(args.usd_path),
+)
+
+# Support — table과 target object 사이를 받치는 막대 (config.WALLS["support"])
+# config는 robot frame이라 visual world로 변환: z += MOUNT_HEIGHT
+_sup = next(w for w in config.WALLS if w["name"] == "support")
+VisualCuboid(
+    prim_path="/World/Support",
+    name="support",
+    position=_sup["position"] + np.array([0.0, 0.0, MOUNT_HEIGHT]),
+    size=1.0,
+    scale=_sup["dimensions"],
+    color=np.array([0.5, 0.5, 0.5]),
 )
 
 simulation_app.update()

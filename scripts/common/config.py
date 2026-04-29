@@ -91,10 +91,11 @@ WALLS = [
         "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
     },
     {
+        # Target object 받침대 — table top(world z=0.630)에서 object bottom(world z=0.795)까지
+        # robot frame z = world 0.7125 - 0.805 = -0.0925, height 0.165m, 2×2cm 단면
         "name": "support",
-        # "position": np.array([0.0, 1.22, -0.0525], dtype=np.float64),
-        "position": np.array([-0.1, 1.1, -0.0525], dtype=np.float64),
-        "dimensions": np.array([0.1, 0.1, 0.265], dtype=np.float64),
+        "position": np.array([-0.1, 1.1, -0.0925], dtype=np.float64),
+        "dimensions": np.array([0.2, 0.3, 0.165], dtype=np.float64),
     },
 ]
 
