@@ -47,21 +47,25 @@ MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 # 월드 설정 (Isaac Sim 좌표계, 미터 단위)
 # ============================================================================
 
-# 대상 객체 설정
+# 좌표계 주의:
+# 본 config의 위치/치수는 모두 robot base_link frame 기준 (cuRobo 충돌 입력용).
+# Isaac Sim visual 은 world frame (floor=0) 이며, robot base = world z=MOUNT_HEIGHT(0.805m).
+# 따라서 robot frame z = world z - 0.805.
+
+# 대상 객체 설정 — visual: world (-0.1, 1.1, 0.795), robot frame z = 0.795-0.805 = -0.010
 TARGET_OBJECT = {
     "name": "target_object",
-    # "position": np.array([0.0, 1.1, 0.095], dtype=np.float64),
-    # "position": np.array([-0.2, 1.1, 0.095], dtype=np.float64),
-    "position": np.array([-0.1, 1.1, 0.095], dtype=np.float64),
+    "position": np.array([-0.1, 1.1, -0.010], dtype=np.float64),
     "rotation": np.array([0.7071, 0.0, 0.0, 0.7071], dtype=np.float64),  # 쿼터니언: w, x, y, z
 }
 
-# 테이블 직육면체 설정
+# 테이블 직육면체 설정 — thor_table.usd 측정값 매칭
+# visual: world center (-0.2, 1.1, 0.315), size 0.910×0.768×0.630
+# robot frame z = 0.315 - 0.805 = -0.490
 TABLE = {
     "name": "table",
-    # "position": np.array([0.0, 1.09 + 0.25, 0.365 - 0.8], dtype=np.float64),
-    "position": np.array([-0.2, 1.1, 0.365 - 0.8], dtype=np.float64),
-    "dimensions": np.array([1.0, 0.6, 0.73], dtype=np.float64),
+    "position": np.array([-0.2, 1.1, -0.490], dtype=np.float64),
+    "dimensions": np.array([0.910, 0.768, 0.630], dtype=np.float64),
 }
 
 # 벽(펜스) 직육면체 설정 - 작업 공간을 둘러싼 4개의 벽
@@ -94,11 +98,13 @@ WALLS = [
     },
 ]
 
-# 로봇 마운트(베이스) 설정
+# 로봇 마운트(베이스) 설정 — ur10_mount.usd visual 매칭
+# visual: world center (0, 0, 0.4025), size 0.54×0.54×0.805 (XY 2배 스케일 적용 후)
+# robot frame z = 0.4025 - 0.805 = -0.4025, top at robot frame z=0 (= robot base)
 ROBOT_MOUNT = {
     "name": "robot_mount",
-    "position": np.array([0.0, 0.0, -0.25], dtype=np.float64),
-    "dimensions": np.array([0.3, 0.3, 0.5], dtype=np.float64),
+    "position": np.array([0.0, 0.0, -0.4025], dtype=np.float64),
+    "dimensions": np.array([0.54, 0.54, 0.805], dtype=np.float64),
 }
 
 

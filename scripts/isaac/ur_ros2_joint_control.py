@@ -40,8 +40,28 @@ import numpy as np
 from isaacsim import SimulationApp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_USD = PROJECT_ROOT / "ur20_description" / "ur20" / "ur20.usd"
+UR20_DIR = PROJECT_ROOT / "ur20_description"
+DEFAULT_USD = UR20_DIR / "ur20" / "ur20.usd"
+ENV_USD     = UR20_DIR / "environment.usd"
+MOUNT_USD   = UR20_DIR / "ur10_mount.usd"
+TABLE_USD   = UR20_DIR / "thor_table.usd"
+
 STAGE_PATH = "/World/UR20"
+MOUNT_PATH = "/World/Mount"
+TABLE_PATH = "/World/Table"
+ENV_PATH   = "/World/Environment"
+
+# 워크셀 치수 (load_environment.py 검증 완료)
+MOUNT_HEIGHT = 0.805    # 로봇 베이스 높이 (m)
+TABLE_HEIGHT = 0.630
+MOUNT_USD_INTRINSIC_Z = 0.515
+TABLE_USD_INTRINSIC_Z = 0.795
+MOUNT_XY_SCALE = 2.0
+TABLE_USD_BBOX_CENTER_X = 0.270   # USD 로컬 bbox center 보정값
+TABLE_USD_BBOX_CENTER_Y = -0.002
+TABLE_TARGET_X = -0.2
+TABLE_TARGET_Y = 1.1
+ENV_OFFSET = np.array([2.0, 0.0, 0.0])
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--usd-path", type=Path, default=DEFAULT_USD,
@@ -65,7 +85,6 @@ import carb
 import omni.graph.core as og
 from isaacsim.core.api import SimulationContext
 from isaacsim.core.utils import extensions, prims, viewports
-from isaacsim.core.api.objects import VisualCuboid
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 import config
 
@@ -79,43 +98,61 @@ simulation_context = SimulationContext(stage_units_in_meters=1.0)
 # Set camera view
 viewports.set_camera_view(eye=np.array([1.5, 1.5, 1.0]), target=np.array([0, 0, 0.5]))
 
-# Load robot from local USD
+# ---------------------------------------------------------------------------
+# Load environment + workcell (environment.usd + mount + table)
+# robot frame == world origin (XY); robot base is elevated by MOUNT_HEIGHT
+# ---------------------------------------------------------------------------
+prims.create_prim(
+    ENV_PATH,
+    "Xform",
+    position=ENV_OFFSET,
+    usd_path=str(ENV_USD),
+)
+
+prims.create_prim(
+    MOUNT_PATH,
+    "Xform",
+    position=np.array([0.0, 0.0, MOUNT_HEIGHT]),
+    scale=np.array([MOUNT_XY_SCALE, MOUNT_XY_SCALE, MOUNT_HEIGHT / MOUNT_USD_INTRINSIC_Z]),
+    usd_path=str(MOUNT_USD),
+)
+
+prims.create_prim(
+    TABLE_PATH,
+    "Xform",
+    position=np.array([
+        TABLE_TARGET_X - TABLE_USD_BBOX_CENTER_X,
+        TABLE_TARGET_Y - TABLE_USD_BBOX_CENTER_Y,
+        TABLE_HEIGHT,
+    ]),
+    scale=np.array([1.0, 1.0, TABLE_HEIGHT / TABLE_USD_INTRINSIC_Z]),
+    usd_path=str(TABLE_USD),
+)
+
+# Robot — mount 윗면 위에 올림
 prims.create_prim(
     STAGE_PATH,
     "Xform",
-    position=np.array([0, 0, 0]),
+    position=np.array([0.0, 0.0, MOUNT_HEIGHT]),
     usd_path=str(args.usd_path),
 )
 
 simulation_app.update()
 
 # ---------------------------------------------------------------------------
-# Load workcell objects from config (table, walls, robot mount, target mesh)
+# Target object (--object 인자가 있을 때만 로드)
+# 위치: 기존 config XY (-0.1, 1.1) + 새 table top 기준 Z = 0.795
+# scale=(1,1,1) 로 source.usd 내부 0.01 스케일 덮어씀
 # ---------------------------------------------------------------------------
 if args.object is not None:
-    # --- Cuboids (table, walls, robot mount) ---
-    cuboid_defs = [config.TABLE, config.ROBOT_MOUNT] + config.WALLS
-    for c in cuboid_defs:
-        VisualCuboid(
-            prim_path=f"/World/obstacles/{c['name']}",
-            name=c["name"],
-            position=c["position"],
-            size=1.0,
-            scale=c["dimensions"],
-            color=np.array([0.8, 0.8, 0.8]),
-        )
-
-    # --- Target object mesh (USD) ---
     usd_path = config.get_mesh_path(args.object, filename="source.usd")
     if usd_path.exists():
-        pos = config.TARGET_OBJECT["position"]
-        rot = config.TARGET_OBJECT["rotation"]  # [w, x, y, z]
         prims.create_prim(
             prim_path=f"/World/{config.TARGET_OBJECT['name']}",
             prim_type="Xform",
             usd_path=str(usd_path),
-            position=pos,
-            orientation=rot,
+            position=np.array([-0.1, 1.1, 0.795]),
+            orientation=config.TARGET_OBJECT["rotation"],
             scale=np.array([1.0, 1.0, 1.0]),
         )
     else:
