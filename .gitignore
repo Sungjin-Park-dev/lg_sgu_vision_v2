@@ -26,3 +26,6 @@ CLAUDE.md
 # Isaac Sim auto-generated caches/artifacts
 .thumbs/
 Collected_*/
+
+# Capture videos (large binary, do not version)
+data/**/video*/

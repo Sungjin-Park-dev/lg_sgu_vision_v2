@@ -11,7 +11,8 @@ reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spa
     Phase 3: DP                    — 최소 joint-space 비용 경로 선택
        ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
     Phase 4: MotionPlanner transit — reconfig 지점 충돌회피 joint-to-joint planning
-    Phase 5: Uniform resample      — cumulative L∞ (max-joint) spacing + 충돌 검사
+    Phase 5: Uniform resample      — cumulative EE arc-length(m) 또는 joint L∞(rad) spacing
+                                     (--resample-mode 로 선택) + 충돌 검사
 
 사용법:
     uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -553,24 +554,71 @@ def plan_reconfig_transits(
 # Phase 5: Uniform resample + collision check
 # =========================================================================
 
-def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
-    """DP 궤적 + transit을 합치고, joint-space uniform spacing으로 resample.
+def _resample_uniform_ee(joints, robot_cfg, spacing_m):
+    """EE position arc-length 기준 uniform resample.
 
-    Non-reconfig 구간: joint-space linear interpolation
-    Transit 구간: MotionGen의 dense 경로를 그대로 사용
+    각 인접 waypoint 간 ||Δee_position|| ≈ spacing_m이 되도록 다시 분할한다.
+    상수 dt 재생 시 EE 선속도가 dt당 spacing_m/dt로 일정해진다.
+    """
+    if len(joints) < 2:
+        return joints
+    ee_positions, _ = compute_fk(joints, robot_cfg)  # (M, 3)
+    diffs = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1)
+    cum_len = np.concatenate([[0], np.cumsum(diffs)])
+    total_len = cum_len[-1]
+    if total_len < 1e-9:
+        return joints
+    n_out = max(2, int(np.ceil(total_len / spacing_m)) + 1)
+    uniform_s = np.linspace(0, total_len, n_out)
+    out = np.zeros((n_out, joints.shape[1]), dtype=np.float64)
+    for j in range(joints.shape[1]):
+        out[:, j] = np.interp(uniform_s, cum_len, joints[:, j])
+    return out
+
+
+def _resample_uniform_joint(joints, spacing_rad):
+    """Joint-space cumulative L∞ (max-joint) 기준 uniform resample.
+
+    각 인접 waypoint 간 max|Δq_j| ≈ spacing_rad이 되도록 다시 분할한다.
+    상수 dt 재생 시 가장 빨리 움직이는 joint의 각속도가 dt당 spacing_rad/dt로 일정해진다.
+    """
+    if len(joints) < 2:
+        return joints
+    diffs = np.max(np.abs(np.diff(joints, axis=0)), axis=1)
+    cum_len = np.concatenate([[0], np.cumsum(diffs)])
+    total_len = cum_len[-1]
+    if total_len < 1e-9:
+        return joints
+    n_out = max(2, int(np.ceil(total_len / spacing_rad)) + 1)
+    uniform_s = np.linspace(0, total_len, n_out)
+    out = np.zeros((n_out, joints.shape[1]), dtype=np.float64)
+    for j in range(joints.shape[1]):
+        out[:, j] = np.interp(uniform_s, cum_len, joints[:, j])
+    return out
+
+
+def interpolate_and_resample(selected, transit_segments, robot_cfg,
+                             mode="ee", spacing=0.01, dense_step_rad=0.02):
+    """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
+
+    Non-reconfig 구간: joint-space linear interpolation으로 dense화
+    Transit 구간: MotionPlanner의 dense 경로를 그대로 사용
+    최종 resample 단위: mode에 따라 EE position arc-length(m) 또는 joint L∞(rad)
 
     Args:
         selected: (N, 6) DP 선택 궤적
         transit_segments: dict {idx: (T, 6)} transit 경로
-        spacing_rad: uniform spacing in joint-space L∞ norm (max |Δq_j|, radians).
-            상수 dt 재생 시 가장 많이 움직이는 joint의 속도가 dt당 spacing_rad/dt로 일정해진다.
+        robot_cfg: cuRobo robot config dict (mode='ee'일 때 FK 용)
+        mode: "ee" (EE position arc-length, meters) | "joint" (cumulative L∞, radians)
+        spacing: 최종 spacing (mode에 따라 m 또는 rad)
+        dense_step_rad: dense path 구성 시 joint-space L∞ step (radians).
 
     Returns:
         resampled: (M, 6) uniform-spaced trajectory
     """
     N = len(selected)
 
-    # 1) 모든 구간을 dense path로 연결
+    # 1) 모든 구간을 dense path로 연결 (joint-space)
     dense_segments = []
     for i in range(N - 1):
         dense_segments.append(selected[i:i+1])
@@ -581,10 +629,10 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
             if len(transit) > 2:
                 dense_segments.append(transit[1:-1])
         else:
-            # non-reconfig: linear interpolation
+            # non-reconfig: joint-space linear interpolation
             q0, q1 = selected[i], selected[i + 1]
             dist = np.max(np.abs(q1 - q0))
-            n_steps = max(1, int(np.ceil(dist / spacing_rad)))
+            n_steps = max(1, int(np.ceil(dist / dense_step_rad)))
             if n_steps > 1:
                 alphas = np.linspace(0, 1, n_steps + 1)[1:-1]  # 양 끝 제외
                 interp = q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :]
@@ -593,23 +641,13 @@ def interpolate_and_resample(selected, transit_segments, spacing_rad=0.02):
     dense_segments.append(selected[-1:])  # 마지막 점
     dense_path = np.concatenate(dense_segments, axis=0)
 
-    # 2) Cumulative L∞ progress (각 step의 max joint diff 누적)
-    diffs = np.max(np.abs(np.diff(dense_path, axis=0)), axis=1)
-    cum_len = np.concatenate([[0], np.cumsum(diffs)])
-    total_len = cum_len[-1]
-
-    if total_len < 1e-9:
-        return dense_path
-
-    # 3) Uniform spacing으로 resample
-    n_out = max(2, int(np.ceil(total_len / spacing_rad)) + 1)
-    uniform_s = np.linspace(0, total_len, n_out)
-
-    resampled = np.zeros((n_out, selected.shape[1]), dtype=np.float64)
-    for j in range(selected.shape[1]):
-        resampled[:, j] = np.interp(uniform_s, cum_len, dense_path[:, j])
-
-    return resampled
+    # 2) Mode별 uniform resample
+    if mode == "ee":
+        return _resample_uniform_ee(dense_path, robot_cfg, spacing)
+    elif mode == "joint":
+        return _resample_uniform_joint(dense_path, spacing)
+    else:
+        raise ValueError(f"Unknown resample mode: {mode!r} (expected 'ee' or 'joint')")
 
 
 def batch_collision_check(trajectory, robot_cfg, world_scene):
@@ -964,13 +1002,20 @@ def main():
                         help="DBSCAN eps in radians (default: 0.3)")
     parser.add_argument("--reconfig-threshold", type=float, default=29.0,
                         help="Reconfig threshold in degrees (default: 29.0)")
-    parser.add_argument("--spacing", type=float, default=0.05,
-                        help="Uniform resample spacing in joint-space L∞ norm "
-                             "(max |Δq_j| per waypoint, radians; default: 0.05). "
+    parser.add_argument("--resample-mode", choices=["ee", "joint"], default="ee",
+                        help="Final resample metric: 'ee' = EE position arc-length (meters), "
+                             "'joint' = joint-space cumulative L∞ (radians). Default: ee")
+    parser.add_argument("--spacing", type=float, default=None,
+                        help="Uniform resample spacing. Unit depends on --resample-mode "
+                             "(ee: meters, joint: radians). "
+                             "Default: 0.01 (ee, 1cm) or 0.05 (joint, ~2.9°). "
                              "실제 재생 속도는 publish_trajectory.py의 --max-joint-vel로 조절.")
     parser.add_argument("--output-suffix", type=str, default="dp",
                         help="Output file suffix (default: dp)")
     args = parser.parse_args()
+
+    if args.spacing is None:
+        args.spacing = 0.01 if args.resample_mode == "ee" else 0.05
 
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")
@@ -1062,9 +1107,16 @@ def main():
             transit_segments[idx][:, -1] = wrist3_fixed
 
     # Phase 5: Uniform resample + collision check
-    print(f"\n[Phase 5] Interpolation + uniform resample...")
-    final_traj = interpolate_and_resample(selected, transit_segments, spacing_rad=args.spacing)
-    print(f"  Resampled: {len(final_traj)} waypoints (uniform spacing={args.spacing} rad)")
+    print(f"\n[Phase 5] Interpolation + uniform resample (mode={args.resample_mode})...")
+    final_traj = interpolate_and_resample(
+        selected, transit_segments, robot_cfg,
+        mode=args.resample_mode, spacing=args.spacing,
+    )
+    if args.resample_mode == "ee":
+        spacing_desc = f"EE spacing={args.spacing*1000:.1f} mm"
+    else:
+        spacing_desc = f"joint spacing={np.rad2deg(args.spacing):.2f}°"
+    print(f"  Resampled: {len(final_traj)} waypoints ({spacing_desc})")
 
     # Collision check
     print("  Collision check...")
@@ -1075,18 +1127,11 @@ def main():
         collision_pct = 100 * n_collisions / len(final_traj)
         print(f"  WARNING: {n_collisions}/{len(final_traj)} waypoints in collision ({collision_pct:.1f}%)")
         final_traj = final_traj[~is_collision]
-        # 균일성 복원: drop으로 생긴 gap을 cumulative L∞ progress 재resample로 메움
-        if len(final_traj) >= 2:
-            diffs = np.max(np.abs(np.diff(final_traj, axis=0)), axis=1)
-            cum_len = np.concatenate([[0], np.cumsum(diffs)])
-            total_len = cum_len[-1]
-            if total_len > 1e-9:
-                n_out = max(2, int(np.ceil(total_len / args.spacing)) + 1)
-                uniform_s = np.linspace(0, total_len, n_out)
-                new_traj = np.zeros((n_out, final_traj.shape[1]))
-                for j in range(final_traj.shape[1]):
-                    new_traj[:, j] = np.interp(uniform_s, cum_len, final_traj[:, j])
-                final_traj = new_traj
+        # 균일성 복원: drop으로 생긴 gap을 동일 metric으로 다시 균등 분할
+        if args.resample_mode == "ee":
+            final_traj = _resample_uniform_ee(final_traj, robot_cfg, args.spacing)
+        else:
+            final_traj = _resample_uniform_joint(final_traj, args.spacing)
         print(f"  Removed collisions → re-resampled to {len(final_traj)} waypoints")
     else:
         print(f"  No collisions detected ({len(final_traj)} waypoints)")
@@ -1099,17 +1144,17 @@ def main():
     traj_dir.mkdir(parents=True, exist_ok=True)
 
     suffix = args.output_suffix
-    spacing_str = f"{args.spacing:.2f}".replace(".", "")  # 0.10 → "010"
-    tag = f"{suffix}_s{spacing_str}"
+    spacing_str = f"{args.spacing:.3f}".replace(".", "")  # 0.010 → "0010", 0.050 → "0050"
+    tag = f"{suffix}_{args.resample_mode}_s{spacing_str}"
 
     csv_path = str(traj_dir / f"trajectory_{tag}.csv")
     save_trajectory_csv(final_traj, ee_positions, ee_quaternions, csv_path)
 
-    static_path = str(traj_dir / f"trajectory_{tag}.html")
-    visualize_static_html(args.object, final_traj, ee_positions, static_path)
+    # static_path = str(traj_dir / f"trajectory_{tag}.html")
+    # visualize_static_html(args.object, final_traj, ee_positions, static_path)
 
-    anim_path = str(traj_dir / f"trajectory_{tag}_anim.html")
-    visualize_animated_html(args.object, final_traj, ee_positions, anim_path)
+    # anim_path = str(traj_dir / f"trajectory_{tag}_anim.html")
+    # visualize_animated_html(args.object, final_traj, ee_positions, anim_path)
 
     n_transit_ok = len(transit_segments)
     print(f"\nDone. reconfigs={stats['n_reconfigs']} "

@@ -41,7 +41,8 @@ from isaacsim import SimulationApp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 UR20_DIR = PROJECT_ROOT / "ur20_description"
-DEFAULT_USD = UR20_DIR / "ur20" / "ur20.usd"
+# DEFAULT_USD = UR20_DIR / "ur20" / "ur20.usd"
+DEFAULT_USD = UR20_DIR / "ur20_with_camera.usd" # usd의 원점이 달라서 공중에 떠있음 
 ENV_USD     = UR20_DIR / "environment.usd"
 MOUNT_USD   = UR20_DIR / "ur10_mount.usd"
 TABLE_USD   = UR20_DIR / "thor_table.usd"
