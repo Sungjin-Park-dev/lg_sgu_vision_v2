@@ -22,6 +22,21 @@ CAMERA_WORKING_DISTANCE_MM = 110.0
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.7
 
+# 센서 해상도 (pixels) + 픽셀 크기 (mm)
+CAMERA_RESOLUTION_W = 4096
+CAMERA_RESOLUTION_H = 3000
+CAMERA_PIXEL_SIZE_MM = 0.010
+
+# Isaac Sim 렌더/퍼블리시 해상도 — 풀해상도는 렉 걸려 다운샘플
+CAMERA_PUBLISH_W = 1024
+CAMERA_PUBLISH_H = 750
+
+# Isaac Sim 검사 카메라 — ROS2 토픽/프레임
+INSPECTION_CAMERA_FRAME_ID = "inspection_camera"
+INSPECTION_CAMERA_RGB_TOPIC = "/inspection_camera/image_raw"
+INSPECTION_CAMERA_DEPTH_TOPIC = "/inspection_camera/depth"
+INSPECTION_CAMERA_INFO_TOPIC = "/inspection_camera/camera_info"
+
 # 로봇 제약 여부
 ROBOT_HAS_CONSTRAINT = True
 

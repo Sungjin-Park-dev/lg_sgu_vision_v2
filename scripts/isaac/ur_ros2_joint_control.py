@@ -193,45 +193,125 @@ if articulation_root_path is None:
 print(f"Articulation root: {articulation_root_path}")
 simulation_app.update()
 
-# Create Action Graph with ROS2 SubscribeJointState -> ArticulationController
+# ---------------------------------------------------------------------------
+# Inspection camera — SG8S Xform 자식으로 추가. 내부 기존 Camera 의 local
+# transform 을 그대로 복사하고 intrinsics 만 config.py 값으로 덮어씀.
+# ---------------------------------------------------------------------------
+from pxr import Gf, UsdGeom
+
+_sg8s_path = None
+for _prim in _stage.Traverse():
+    p = str(_prim.GetPath())
+    if not p.startswith(STAGE_PATH):
+        continue
+    if "SG8S" in _prim.GetName():
+        _sg8s_path = p
+        break
+
+INSPECTION_CAM_PATH = None
+if _sg8s_path is None:
+    print("WARNING: SG8S prim not found — skipping inspection camera setup")
+else:
+    # SG8S subtree 에서 기존 Camera prim 찾기 (transform reference 용)
+    _existing_cam = None
+    for _prim in _stage.GetPrimAtPath(_sg8s_path).GetAllChildren():
+        for _desc in [_prim] + list(_prim.GetAllChildren()):
+            if _desc.IsA(UsdGeom.Camera):
+                _existing_cam = _desc
+                break
+        if _existing_cam:
+            break
+
+    if _existing_cam is None:
+        print(f"WARNING: No existing Camera found under {_sg8s_path} — using identity local pose")
+        _local = Gf.Matrix4d(1.0)
+    else:
+        print(f"Reusing transform from existing camera: {_existing_cam.GetPath()}")
+        _xcache = UsdGeom.XformCache()
+        _cam_world = _xcache.GetLocalToWorldTransform(_existing_cam)
+        _sg8s_world = _xcache.GetLocalToWorldTransform(_stage.GetPrimAtPath(_sg8s_path))
+        _local = _cam_world * _sg8s_world.GetInverse()
+
+    INSPECTION_CAM_PATH = f"{_sg8s_path}/InspectionCamera"
+    _cam = UsdGeom.Camera.Define(_stage, INSPECTION_CAM_PATH)
+    UsdGeom.Xformable(_cam).ClearXformOpOrder()
+    UsdGeom.Xformable(_cam).AddTransformOp().Set(Gf.Matrix4d(_local))
+
+    # 핀홀 모델: FOV(@d) = d · aperture / focalLength
+    # focalLength=WD, aperture=FOV 로 두면 작업거리에서 FOV 가 정확히 맞음
+    _cam.GetFocalLengthAttr().Set(float(config.CAMERA_WORKING_DISTANCE_MM))
+    _cam.GetHorizontalApertureAttr().Set(float(config.CAMERA_FOV_WIDTH_MM))
+    _cam.GetVerticalApertureAttr().Set(float(config.CAMERA_FOV_HEIGHT_MM))
+    _cam.GetFocusDistanceAttr().Set(float(config.CAMERA_WORKING_DISTANCE_MM) * 1e-3)
+    _cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 5.0))
+
+    print(f"Inspection camera: {INSPECTION_CAM_PATH}")
+    simulation_app.update()
+
+# Action Graph — joint state subscribe + (있으면) 카메라 publisher 통합
+_create_nodes = [
+    ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+    ("ROS2Context", "isaacsim.ros2.bridge.ROS2Context"),
+    ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
+    ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
+]
+_connect = [
+    ("OnPlaybackTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
+    ("SubscribeJointState.outputs:execOut", "ArticulationController.inputs:execIn"),
+    ("ROS2Context.outputs:context", "SubscribeJointState.inputs:context"),
+    ("SubscribeJointState.outputs:jointNames", "ArticulationController.inputs:jointNames"),
+    ("SubscribeJointState.outputs:positionCommand", "ArticulationController.inputs:positionCommand"),
+]
+_set_values = [
+    ("ArticulationController.inputs:robotPath", articulation_root_path),
+    ("SubscribeJointState.inputs:topicName", "/joint_states"),
+]
+
+if INSPECTION_CAM_PATH is not None:
+    _create_nodes += [
+        ("RP", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
+        ("RGB", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+        ("Depth", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+        ("Info", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
+    ]
+    _set_values += [
+        ("RP.inputs:cameraPrim", [INSPECTION_CAM_PATH]),
+        ("RP.inputs:width", config.CAMERA_PUBLISH_W),
+        ("RP.inputs:height", config.CAMERA_PUBLISH_H),
+        ("RGB.inputs:type", "rgb"),
+        ("RGB.inputs:topicName", config.INSPECTION_CAMERA_RGB_TOPIC),
+        ("RGB.inputs:frameId", config.INSPECTION_CAMERA_FRAME_ID),
+        ("Depth.inputs:type", "depth"),
+        ("Depth.inputs:topicName", config.INSPECTION_CAMERA_DEPTH_TOPIC),
+        ("Depth.inputs:frameId", config.INSPECTION_CAMERA_FRAME_ID),
+        ("Info.inputs:topicName", config.INSPECTION_CAMERA_INFO_TOPIC),
+        ("Info.inputs:frameId", config.INSPECTION_CAMERA_FRAME_ID),
+    ]
+    _connect += [
+        ("OnPlaybackTick.outputs:tick", "RP.inputs:execIn"),
+        ("ROS2Context.outputs:context", "RGB.inputs:context"),
+        ("ROS2Context.outputs:context", "Depth.inputs:context"),
+        ("ROS2Context.outputs:context", "Info.inputs:context"),
+        ("RP.outputs:execOut", "RGB.inputs:execIn"),
+        ("RP.outputs:execOut", "Depth.inputs:execIn"),
+        ("RP.outputs:execOut", "Info.inputs:execIn"),
+        ("RP.outputs:renderProductPath", "RGB.inputs:renderProductPath"),
+        ("RP.outputs:renderProductPath", "Depth.inputs:renderProductPath"),
+        ("RP.outputs:renderProductPath", "Info.inputs:renderProductPath"),
+    ]
+
 try:
     og.Controller.edit(
         {"graph_path": "/ActionGraph", "evaluator_name": "execution"},
         {
-            og.Controller.Keys.CREATE_NODES: [
-                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
-                ("ROS2Context", "isaacsim.ros2.bridge.ROS2Context"),
-                ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
-                ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
-            ],
-            og.Controller.Keys.CONNECT: [
-                ("OnPlaybackTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
-                ("SubscribeJointState.outputs:execOut", "ArticulationController.inputs:execIn"),
-                ("ROS2Context.outputs:context", "SubscribeJointState.inputs:context"),
-                ("SubscribeJointState.outputs:jointNames", "ArticulationController.inputs:jointNames"),
-                (
-                    "SubscribeJointState.outputs:positionCommand",
-                    "ArticulationController.inputs:positionCommand",
-                ),
-            ],
-            og.Controller.Keys.SET_VALUES: [
-                ("ArticulationController.inputs:robotPath", articulation_root_path),
-                ("SubscribeJointState.inputs:topicName", "/joint_states"),
-            ],
+            og.Controller.Keys.CREATE_NODES: _create_nodes,
+            og.Controller.Keys.CONNECT: _connect,
+            og.Controller.Keys.SET_VALUES: _set_values,
         },
     )
 except Exception as e:
     print(e)
 
-simulation_app.update()
-
-# Open Action Graph editor window
-import omni.kit.app
-import omni.kit.commands
-_ext_manager = omni.kit.app.get_app().get_extension_manager()
-_ext_manager.set_extension_enabled_immediate("omni.graph.window.action", True)
-simulation_app.update()
-omni.kit.commands.execute("OpenWindow", window_name="Action Graph")
 simulation_app.update()
 
 # Initialize physics and start simulation
