@@ -72,8 +72,8 @@ uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124
 |---|---|---|
 | `--object` | (필수) | Object name |
 | `--num-viewpoints` | (필수) | 뷰포인트 수 |
-| `--robot` | `ur20_with_camera.yml` | cuRobo 로봇 설정 |
-| `--interp-spacing` | 2.0 | Cartesian 보간 간격 (mm) |
+| `--viewpoints` | None | h5 파일 직접 지정 |
+| `--spacing` | 0.01 | EE resample 간격 (m) |
 
 **사전조건**: 1단계의 `viewpoints_*.h5` 필요.
 
@@ -131,18 +131,14 @@ uv run scripts/ros2/move_to_start.py --duration 10 --max-vel 0.3
 **셸 C**:
 
 ```bash
-# CSV 직접 지정 (권장 — 다양한 trajectory 종류 사용)
 uv run scripts/pipeline/publish_trajectory.py \
-    --csv data/sample/trajectory/124/trajectory_dp_s010.csv
-
-# 자동 경로 (trajectory.csv 가정)
-uv run scripts/pipeline/publish_trajectory.py --object sample --num-viewpoints 124
+    --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
 ```
 
 스크립트가 자동 처리:
 - 현재 위치를 t=0 포인트로 포함
 - 포인트 간 보간 (`MAX_STEP_RAD=0.1`)
-- 시간 할당을 joint 변화량에 비례 (`MAX_JOINT_VEL=2.0 rad/s`)
+- CSV의 `time` 컬럼을 ROS trajectory `time_from_start`로 사용
 - CSV 헤더 prefix(`ur20_*`) 자동 매칭 (suffix 기반)
 
 ### 3d. RViz 워크셀 마커 (선택)
@@ -211,7 +207,7 @@ source /opt/ros/jazzy/setup.bash
 uv run scripts/ros2/publish_workcell_markers.py --object sample &
 uv run scripts/ros2/move_to_start.py
 uv run scripts/pipeline/publish_trajectory.py \
-    --csv data/sample/trajectory/124/trajectory_dp_s010.csv
+    --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
 ```
 
 ---

@@ -55,6 +55,7 @@ shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joi
 -1.5708, -2.0944, -1.0472, ...
 ```
 각 행이 하나의 waypoint (radians). `JOINT_NAMES` 순서 고정.
+`time`은 `select_ik_dp.py`가 EE 선속도/각속도/joint 속도 제한으로 계산한 실행 시간이다.
 
 ## 카메라-로봇 변환 체인
 
@@ -72,5 +73,5 @@ shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joi
 
 1. **현재 위치 읽기**: `/joint_states` 구독 (이름 매칭으로 조인트 순서 무관)
 2. **보간**: 연속 waypoint 간 `MAX_STEP_RAD=0.1` 이내로 선형 보간
-3. **시간 할당**: 각 sub-step 시간 = `max_joint_diff / MAX_JOINT_VEL` (기본 2.0 rad/s)
+3. **시간 할당**: CSV의 `time` 컬럼을 보존하여 ROS `time_from_start`로 변환
 4. **t=0 포인트**: 현재 로봇 위치를 첫 포인트로 포함 (tolerance violation 방지)

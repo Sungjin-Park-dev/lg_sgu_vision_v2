@@ -2,18 +2,14 @@
 """
 저장된 trajectory CSV를 ROS2 FollowJointTrajectory action으로 전송
 
-plan_motion.py가 생성한 trajectory.csv를 읽어서 로봇에 전송한다.
+select_ik_dp.py가 생성한 trajectory.csv의 time 컬럼을 보존해 로봇에 전송한다.
 
 사용법:
-    uv run scripts/pipeline/publish_trajectory.py --object sample --num-viewpoints 124
-    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory.csv
-
-    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_s010.csv
+    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_ee_s0010.csv
 """
 
 import argparse
 import csv
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -26,9 +22,6 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from common import config
-
 JOINT_NAMES = [
     "shoulder_pan_joint",
     "shoulder_lift_joint",
@@ -39,17 +32,24 @@ JOINT_NAMES = [
 ]
 
 CONTROLLER_TOPIC = "/scaled_joint_trajectory_controller/follow_joint_trajectory"
+MAX_STEP_RAD = 0.1
+APPROACH_MAX_JOINT_VEL_RAD_S = 0.5
+MIN_APPROACH_TIME_S = 0.5
 
 
-def load_trajectory_csv(csv_path: str) -> np.ndarray:
+def load_trajectory_csv(csv_path: str):
     """CSV에서 joint trajectory를 로드. 헤더에 prefix(예: 'ur20_')가 있어도 동작.
 
     Returns:
         solutions: (N, 6) joint angles in radians
+        times: (N,) time from trajectory start in seconds
     """
     solutions = []
+    times = []
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
+        if "time" not in reader.fieldnames:
+            raise ValueError(f"CSV must include a 'time' column: {reader.fieldnames}")
         col_map = {}
         for name in JOINT_NAMES:
             matches = [c for c in reader.fieldnames if c.endswith(name)]
@@ -61,20 +61,30 @@ def load_trajectory_csv(csv_path: str) -> np.ndarray:
             col_map[name] = matches[0]
 
         for row in reader:
+            times.append(float(row["time"]))
             q = [float(row[col_map[name]]) for name in JOINT_NAMES]
             solutions.append(q)
-    return np.array(solutions, dtype=np.float64)
+
+    solutions = np.array(solutions, dtype=np.float64)
+    times = np.array(times, dtype=np.float64)
+    if len(times) != len(solutions):
+        raise ValueError("CSV time and joint row counts do not match")
+    if len(solutions) == 0:
+        raise ValueError("CSV contains no trajectory rows")
+    if len(times) > 1 and np.any(np.diff(times) <= 0.0):
+        raise ValueError("CSV time column must be strictly increasing")
+    return solutions, times
 
 
 class TrajectoryPublisher(Node):
-    def __init__(self, solutions: np.ndarray, max_joint_vel: float):
+    def __init__(self, solutions: np.ndarray, times: np.ndarray):
         super().__init__("publish_trajectory")
 
         self._action_client = ActionClient(
             self, FollowJointTrajectory, CONTROLLER_TOPIC
         )
         self._solutions = solutions
-        self._max_joint_vel = max_joint_vel
+        self._times = times
         self._current_joint_positions = None
 
         self._js_sub = self.create_subscription(
@@ -107,43 +117,59 @@ class TrajectoryPublisher(Node):
         self._send_trajectory()
 
     def _send_trajectory(self):
-        MAX_STEP_RAD = 0.1
-        MAX_JOINT_VEL = self._max_joint_vel
-
         traj = JointTrajectory()
         traj.joint_names = JOINT_NAMES
 
-        # Interpolate between waypoints
-        all_waypoints = []
-        prev = np.array(self._current_joint_positions)
+        csv_times = self._times - self._times[0]
+        first_q = self._solutions[0]
+        current_q = np.array(self._current_joint_positions)
+        start_diff = np.max(np.abs(first_q - current_q))
+        approach_time = 0.0
+        points_with_time = []
 
-        for q in self._solutions:
+        if start_diff > 1e-4:
+            approach_time = max(
+                start_diff / APPROACH_MAX_JOINT_VEL_RAD_S,
+                MIN_APPROACH_TIME_S,
+            )
+            n_steps = int(np.ceil(start_diff / MAX_STEP_RAD))
+            for s in range(1, n_steps + 1):
+                alpha = s / n_steps
+                q = current_q + alpha * (first_q - current_q)
+                points_with_time.append((q.tolist(), alpha * approach_time))
+            start_index = 1
+        else:
+            start_index = 1
+
+        # Interpolate between CSV waypoints while preserving CSV timing.
+        prev = first_q
+        prev_time = approach_time
+        for i in range(start_index, len(self._solutions)):
+            q = self._solutions[i]
+            target_time = approach_time + csv_times[i]
             diff = q - prev
             max_diff = np.max(np.abs(diff))
             if max_diff <= MAX_STEP_RAD:
-                interp_points = [q.tolist()]
+                interp_points = [(q.tolist(), target_time)]
             else:
                 n_steps = int(np.ceil(max_diff / MAX_STEP_RAD))
                 interp_points = []
                 for s in range(1, n_steps + 1):
                     alpha = s / n_steps
-                    interp_points.append((prev + alpha * diff).tolist())
+                    wp = (prev + alpha * diff).tolist()
+                    t = prev_time + alpha * (target_time - prev_time)
+                    interp_points.append((wp, t))
 
-            for wp in interp_points:
-                wp_arr = np.array(wp)
-                md = np.max(np.abs(wp_arr - prev))
-                all_waypoints.append((wp, md))
-                prev = wp_arr
+            points_with_time.extend(interp_points)
+            prev = q
+            prev_time = target_time
 
-        # Build positions + times arrays first (pt0 + all interpolated waypoints)
+        # Build positions + times arrays first (pt0 + all interpolated waypoints).
         positions = [list(self._current_joint_positions)]
         times = [0.0]
-        cumulative_t = 0.0
-        for q, max_diff in all_waypoints:
-            seg_dt = max(max_diff / MAX_JOINT_VEL, 0.05)
-            cumulative_t += seg_dt
+        for q, t in points_with_time:
             positions.append(list(q))
-            times.append(cumulative_t)
+            times.append(float(t))
 
         positions = np.array(positions)
         times = np.array(times)
@@ -172,8 +198,9 @@ class TrajectoryPublisher(Node):
         self.get_logger().info(
             f"Sending trajectory with {len(traj.points)} points "
             f"({len(self._solutions)} waypoints interpolated to "
-            f"{len(all_waypoints)} steps, total time: {cumulative_t:.1f}s, "
-            f"max_vel: {MAX_JOINT_VEL} rad/s)..."
+            f"{len(points_with_time)} steps, total time: {times[-1]:.1f}s, "
+            f"csv duration: {csv_times[-1]:.1f}s, "
+            f"approach time: {approach_time:.1f}s)..."
         )
 
         future = self._action_client.send_goal_async(
@@ -202,34 +229,23 @@ class TrajectoryPublisher(Node):
 
 def main():
     parser = argparse.ArgumentParser(description="저장된 trajectory CSV를 ROS2로 전송")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--csv", type=str, help="CSV 파일 경로 (직접 지정)")
-    group.add_argument("--object", type=str, help="오브젝트 이름 (--num-viewpoints 필요)")
-    parser.add_argument("--num-viewpoints", type=int, help="뷰포인트 수")
-    parser.add_argument("--max-joint-vel", type=float, default=0.5,
-                        help="최대 joint 속도 (rad/s, default: 0.5). "
-                             "낮출수록 로봇이 천천히 움직임.")
+    parser.add_argument("--csv", type=str, required=True, help="CSV 파일 경로")
     args = parser.parse_args()
-
-    if args.object:
-        if args.num_viewpoints is None:
-            parser.error("--object 사용 시 --num-viewpoints 필요")
-        csv_path = str(config.get_trajectory_path(args.object, args.num_viewpoints, "trajectory.csv"))
-    else:
-        csv_path = args.csv
+    csv_path = args.csv
 
     if not Path(csv_path).exists():
         print(f"Error: CSV not found: {csv_path}")
-        print("  plan_motion.py를 먼저 실행하세요.")
+        print("  select_ik_dp.py를 먼저 실행하세요.")
         return
 
     print(f"Loading trajectory from {csv_path}...")
-    solutions = load_trajectory_csv(csv_path)
+    solutions, times = load_trajectory_csv(csv_path)
     print(f"  {len(solutions)} waypoints loaded")
+    print(f"  CSV duration: {times[-1] - times[0]:.1f}s")
     print(f"  Action server: {CONTROLLER_TOPIC}")
 
     rclpy.init()
-    node = TrajectoryPublisher(solutions, max_joint_vel=args.max_joint_vel)
+    node = TrajectoryPublisher(solutions, times=times)
     try:
         print("  Spinning ROS2 node (Ctrl+C to stop)...")
         rclpy.spin(node)

@@ -11,8 +11,8 @@ reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spa
     Phase 3: DP                    — 최소 joint-space 비용 경로 선택
        ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
     Phase 4: MotionPlanner transit — reconfig 지점 충돌회피 joint-to-joint planning
-    Phase 5: Uniform resample      — cumulative EE arc-length(m) 또는 joint L∞(rad) spacing
-                                     (--resample-mode 로 선택) + 충돌 검사
+    Phase 5: Uniform resample      — cumulative EE arc-length(m) spacing + 충돌 검사
+    Phase 6: Time planning         — EE 선속도/각속도/joint 속도 제한 기반 continuous scan
 
 사용법:
     uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -39,6 +39,29 @@ from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
+
+
+# =========================================================================
+# Pipeline defaults
+# =========================================================================
+
+ROBOT_CONFIG = config.DEFAULT_ROBOT_CONFIG
+NUM_IK_SEEDS = 100
+IK_BATCH_SIZE = 4
+DBSCAN_EPS_RAD = 0.3
+RECONFIG_THRESHOLD_DEG = 29.0
+
+RESAMPLE_MODE = "ee"
+DEFAULT_SPACING_M = 0.01
+
+EE_SPEED_MM_S = 50.0
+EE_ANGULAR_SPEED_DEG_S = 20.0
+MAX_JOINT_VEL_RAD_S = 0.3
+MIN_SEGMENT_DT_S = 0.05
+
+CORNER_SLOWDOWN_ENABLED = True
+CORNER_ANGLE_THRESHOLD_DEG = 30.0
+CORNER_MAX_SLOWDOWN = 2.5
 
 
 # =========================================================================
@@ -685,11 +708,146 @@ def batch_collision_check(trajectory, robot_cfg, world_scene):
 
 
 # =========================================================================
+# Time planning
+# =========================================================================
+
+
+def _quat_angle_xyzw(q0, q1):
+    """Quaternion geodesic angle in radians. Input order: x, y, z, w."""
+    q0 = q0 / max(np.linalg.norm(q0), 1e-12)
+    q1 = q1 / max(np.linalg.norm(q1), 1e-12)
+    dot = abs(float(np.dot(q0, q1)))
+    dot = np.clip(dot, -1.0, 1.0)
+    return 2.0 * np.arccos(dot)
+
+
+def _corner_angles(points):
+    """Polyline corner angles at waypoints. Returns length N, endpoints 0."""
+    n = len(points)
+    angles = np.zeros((n,), dtype=np.float64)
+    if n < 3:
+        return angles
+
+    prev_vec = points[1:-1] - points[:-2]
+    next_vec = points[2:] - points[1:-1]
+    prev_norm = np.linalg.norm(prev_vec, axis=1)
+    next_norm = np.linalg.norm(next_vec, axis=1)
+    valid = (prev_norm > 1e-9) & (next_norm > 1e-9)
+    if np.any(valid):
+        u = prev_vec[valid] / prev_norm[valid, None]
+        v = next_vec[valid] / next_norm[valid, None]
+        cos_turn = np.sum(u * v, axis=1)
+        angles[1:-1][valid] = np.arccos(np.clip(cos_turn, -1.0, 1.0))
+    return angles
+
+
+def _corner_slowdown_factors(ee_positions, joints,
+                             threshold_rad=np.deg2rad(30.0),
+                             max_slowdown=2.5):
+    """Corner turn angle 기반 segment slowdown factor. Returns length N-1."""
+    n = len(joints)
+    if n < 2 or max_slowdown <= 1.0:
+        return np.ones((max(n - 1, 0),), dtype=np.float64), {
+            "n_slow_segments": 0,
+            "max_corner_angle_deg": 0.0,
+            "max_slowdown": 1.0,
+        }
+
+    ee_angles = _corner_angles(ee_positions)
+    joint_angles = _corner_angles(joints)
+    corner_angles = np.maximum(ee_angles, joint_angles)
+
+    denom = max(np.pi - threshold_rad, 1e-9)
+    wp_factor = np.ones((n,), dtype=np.float64)
+    mask = corner_angles > threshold_rad
+    if np.any(mask):
+        alpha = np.clip((corner_angles[mask] - threshold_rad) / denom, 0.0, 1.0)
+        wp_factor[mask] = 1.0 + alpha * (max_slowdown - 1.0)
+
+    seg_factor = np.maximum(wp_factor[:-1], wp_factor[1:])
+    stats = {
+        "n_slow_segments": int((seg_factor > 1.001).sum()),
+        "max_corner_angle_deg": float(np.rad2deg(corner_angles.max())),
+        "max_slowdown": float(seg_factor.max()) if len(seg_factor) else 1.0,
+    }
+    return seg_factor, stats
+
+
+def compute_trajectory_times(joints, ee_positions, ee_quaternions,
+                             ee_speed_m_s=0.08,
+                             ee_angular_speed_rad_s=np.deg2rad(30.0),
+                             max_joint_vel_rad_s=0.5,
+                             min_segment_dt=0.05,
+                             corner_slowdown_enabled=True,
+                             corner_angle_threshold_rad=np.deg2rad(30.0),
+                             corner_max_slowdown=2.5):
+    """Continuous scan용 누적 time 생성.
+
+    각 segment 시간은 EE 선속도, EE 각속도, joint 속도 제한을 모두 만족하는
+    최소 시간으로 정한다.
+    """
+    n = len(joints)
+    times = np.zeros((n,), dtype=np.float64)
+    if n < 2:
+        return times, {
+            "total_time": 0.0,
+            "max_linear_speed_mm_s": 0.0,
+            "max_angular_speed_deg_s": 0.0,
+            "max_joint_speed_rad_s": 0.0,
+        }
+
+    if corner_slowdown_enabled:
+        slowdown_factors, corner_stats = _corner_slowdown_factors(
+            ee_positions, joints,
+            threshold_rad=corner_angle_threshold_rad,
+            max_slowdown=corner_max_slowdown,
+        )
+    else:
+        slowdown_factors = np.ones((n - 1,), dtype=np.float64)
+        corner_stats = {
+            "n_slow_segments": 0,
+            "max_corner_angle_deg": 0.0,
+            "max_slowdown": 1.0,
+        }
+
+    for i in range(1, n):
+        linear_dist = float(np.linalg.norm(ee_positions[i] - ee_positions[i - 1]))
+        angular_dist = _quat_angle_xyzw(ee_quaternions[i - 1], ee_quaternions[i])
+        joint_dist = float(np.max(np.abs(joints[i] - joints[i - 1])))
+
+        dt_candidates = [min_segment_dt]
+        if ee_speed_m_s > 0.0:
+            dt_candidates.append(linear_dist / ee_speed_m_s)
+        if ee_angular_speed_rad_s > 0.0:
+            dt_candidates.append(angular_dist / ee_angular_speed_rad_s)
+        if max_joint_vel_rad_s > 0.0:
+            dt_candidates.append(joint_dist / max_joint_vel_rad_s)
+
+        times[i] = times[i - 1] + max(dt_candidates) * slowdown_factors[i - 1]
+
+    segment_dt = np.diff(times)
+    linear_speed = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1) / segment_dt
+    angular_speed = np.array([
+        _quat_angle_xyzw(ee_quaternions[i - 1], ee_quaternions[i]) / segment_dt[i - 1]
+        for i in range(1, n)
+    ])
+    joint_speed = np.max(np.abs(np.diff(joints, axis=0)), axis=1) / segment_dt
+    stats = {
+        "total_time": float(times[-1]),
+        "max_linear_speed_mm_s": float(linear_speed.max() * 1000.0),
+        "max_angular_speed_deg_s": float(np.rad2deg(angular_speed.max())),
+        "max_joint_speed_rad_s": float(joint_speed.max()),
+        **corner_stats,
+    }
+    return times, stats
+
+
+# =========================================================================
 # CSV output
 # =========================================================================
 
 def save_trajectory_csv(solutions, ee_positions, ee_quaternions, output_path,
-                        robot_name="ur20", dt=1.0):
+                        robot_name="ur20", dt=1.0, times=None):
     """Trajectory를 CSV로 저장. joint 컬럼에 robot_name prefix 추가."""
     import csv
 
@@ -713,7 +871,8 @@ def save_trajectory_csv(solutions, ee_positions, ee_quaternions, output_path,
         writer = csv.writer(f)
         writer.writerow(header)
         for i in range(len(solutions)):
-            row = [i * dt] + solutions[i].tolist()
+            t = times[i] if times is not None else i * dt
+            row = [float(t)] + solutions[i].tolist()
             row += ee_positions[i].tolist()
             row += ee_quaternions[i].tolist()
             writer.writerow(row)
@@ -992,30 +1151,14 @@ def main():
     parser.add_argument("--num-viewpoints", type=int, required=True, help="Number of viewpoints")
     parser.add_argument("--viewpoints", type=str, default=None,
                         help="Direct path to viewpoints.h5 (overrides --object/--num-viewpoints for loading)")
-    parser.add_argument("--robot", type=str, default=config.DEFAULT_ROBOT_CONFIG,
-                        help=f"Robot config (default: {config.DEFAULT_ROBOT_CONFIG})")
-    parser.add_argument("--num-seeds", type=int, default=100,
-                        help="IK seeds per viewpoint (default: 100)")
-    parser.add_argument("--ik-batch-size", type=int, default=4,
-                        help="GPU batch size for IK solving (default: 4)")
-    parser.add_argument("--dbscan-eps", type=float, default=0.3,
-                        help="DBSCAN eps in radians (default: 0.3)")
-    parser.add_argument("--reconfig-threshold", type=float, default=29.0,
-                        help="Reconfig threshold in degrees (default: 29.0)")
-    parser.add_argument("--resample-mode", choices=["ee", "joint"], default="ee",
-                        help="Final resample metric: 'ee' = EE position arc-length (meters), "
-                             "'joint' = joint-space cumulative L∞ (radians). Default: ee")
-    parser.add_argument("--spacing", type=float, default=None,
-                        help="Uniform resample spacing. Unit depends on --resample-mode "
-                             "(ee: meters, joint: radians). "
-                             "Default: 0.01 (ee, 1cm) or 0.05 (joint, ~2.9°). "
-                             "실제 재생 속도는 publish_trajectory.py의 --max-joint-vel로 조절.")
+    parser.add_argument("--spacing", type=float, default=DEFAULT_SPACING_M,
+                        help=f"EE arc-length resample spacing in meters (default: {DEFAULT_SPACING_M})")
     parser.add_argument("--output-suffix", type=str, default="dp",
                         help="Output file suffix (default: dp)")
     args = parser.parse_args()
 
-    if args.spacing is None:
-        args.spacing = 0.01 if args.resample_mode == "ee" else 0.05
+    if args.spacing <= 0.0:
+        parser.error("--spacing must be > 0")
 
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")
@@ -1045,22 +1188,22 @@ def main():
     # [3] Phase 1: Multi-seed IK
     print("[3/6] Phase 1 — Multi-seed IK...")
     world_config = build_collision_world(args.object)
-    robot_cfg = _resolve_robot_config(args.robot)
+    robot_cfg = _resolve_robot_config(ROBOT_CONFIG)
     print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
 
     all_solutions, all_success = solve_ik_multi_seed(
         robot_cfg, world_config, positions_np, quats_np,
-        num_seeds=args.num_seeds, batch_size=args.ik_batch_size,
+        num_seeds=NUM_IK_SEEDS, batch_size=IK_BATCH_SIZE,
     )
 
     # [4] Phase 2 + 3: DBSCAN → DP
     print("[4/6] Phase 2 — DBSCAN clustering...")
     representatives = cluster_ik_solutions(
-        all_solutions, all_success, eps=args.dbscan_eps,
+        all_solutions, all_success, eps=DBSCAN_EPS_RAD,
     )
 
     print("[5/6] Phase 3 — DP optimal path...")
-    reconfig_rad = np.deg2rad(args.reconfig_threshold)
+    reconfig_rad = np.deg2rad(RECONFIG_THRESHOLD_DEG)
     selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
 
     # wrist_3 고정 — Phase 4/5 전체가 일관된 wrist_3로 동작하여
@@ -1107,12 +1250,12 @@ def main():
             transit_segments[idx][:, -1] = wrist3_fixed
 
     # Phase 5: Uniform resample + collision check
-    print(f"\n[Phase 5] Interpolation + uniform resample (mode={args.resample_mode})...")
+    print(f"\n[Phase 5] Interpolation + uniform resample (mode={RESAMPLE_MODE})...")
     final_traj = interpolate_and_resample(
         selected, transit_segments, robot_cfg,
-        mode=args.resample_mode, spacing=args.spacing,
+        mode=RESAMPLE_MODE, spacing=args.spacing,
     )
-    if args.resample_mode == "ee":
+    if RESAMPLE_MODE == "ee":
         spacing_desc = f"EE spacing={args.spacing*1000:.1f} mm"
     else:
         spacing_desc = f"joint spacing={np.rad2deg(args.spacing):.2f}°"
@@ -1128,7 +1271,7 @@ def main():
         print(f"  WARNING: {n_collisions}/{len(final_traj)} waypoints in collision ({collision_pct:.1f}%)")
         final_traj = final_traj[~is_collision]
         # 균일성 복원: drop으로 생긴 gap을 동일 metric으로 다시 균등 분할
-        if args.resample_mode == "ee":
+        if RESAMPLE_MODE == "ee":
             final_traj = _resample_uniform_ee(final_traj, robot_cfg, args.spacing)
         else:
             final_traj = _resample_uniform_joint(final_traj, args.spacing)
@@ -1140,15 +1283,43 @@ def main():
     ee_positions, ee_quaternions = compute_fk(final_traj, robot_cfg)
     print(f"  Computed FK for {len(final_traj)} waypoints")
 
+    traj_times, time_stats = compute_trajectory_times(
+        final_traj, ee_positions, ee_quaternions,
+        ee_speed_m_s=EE_SPEED_MM_S / 1000.0,
+        ee_angular_speed_rad_s=np.deg2rad(EE_ANGULAR_SPEED_DEG_S),
+        max_joint_vel_rad_s=MAX_JOINT_VEL_RAD_S,
+        min_segment_dt=MIN_SEGMENT_DT_S,
+        corner_slowdown_enabled=CORNER_SLOWDOWN_ENABLED,
+        corner_angle_threshold_rad=np.deg2rad(CORNER_ANGLE_THRESHOLD_DEG),
+        corner_max_slowdown=CORNER_MAX_SLOWDOWN,
+    )
+    print(f"  Time profile: total={time_stats['total_time']:.1f}s, "
+          f"max EE={time_stats['max_linear_speed_mm_s']:.1f} mm/s, "
+          f"max rot={time_stats['max_angular_speed_deg_s']:.1f} deg/s, "
+          f"max joint={time_stats['max_joint_speed_rad_s']:.2f} rad/s, "
+          f"corners={time_stats['n_slow_segments']} seg "
+          f"(max angle={time_stats['max_corner_angle_deg']:.1f}°, "
+          f"slowdown={time_stats['max_slowdown']:.2f}x)")
+
     traj_dir = config.get_trajectory_path(args.object, args.num_viewpoints, "dummy").parent
     traj_dir.mkdir(parents=True, exist_ok=True)
 
     suffix = args.output_suffix
     spacing_str = f"{args.spacing:.3f}".replace(".", "")  # 0.010 → "0010", 0.050 → "0050"
-    tag = f"{suffix}_{args.resample_mode}_s{spacing_str}"
+    ee_speed_str = f"{EE_SPEED_MM_S:.0f}"
+    ang_speed_str = f"{EE_ANGULAR_SPEED_DEG_S:.0f}"
+    joint_vel_str = f"{MAX_JOINT_VEL_RAD_S:.2f}".replace(".", "p")
+    tag = f"{suffix}_{RESAMPLE_MODE}_s{spacing_str}_eev{ee_speed_str}mms_av{ang_speed_str}dps_jv{joint_vel_str}"
+    if CORNER_SLOWDOWN_ENABLED:
+        corner_thresh_str = f"{CORNER_ANGLE_THRESHOLD_DEG:.0f}"
+        corner_slow_str = f"{CORNER_MAX_SLOWDOWN:.1f}".replace(".", "p")
+        tag = f"{tag}_corner{corner_thresh_str}d_x{corner_slow_str}"
 
     csv_path = str(traj_dir / f"trajectory_{tag}.csv")
-    save_trajectory_csv(final_traj, ee_positions, ee_quaternions, csv_path)
+    save_trajectory_csv(
+        final_traj, ee_positions, ee_quaternions, csv_path,
+        times=traj_times,
+    )
 
     # static_path = str(traj_dir / f"trajectory_{tag}.html")
     # visualize_static_html(args.object, final_traj, ee_positions, static_path)
