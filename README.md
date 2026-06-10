@@ -53,6 +53,10 @@ uv run scripts/pipeline/generate_viewpoints.py \
 
 `data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5` 생성.
 
+> **배치 모드**: 기본 `grid`(PCA 평면 투영)는 평평한 판재에 적합하지만 곡면·측벽엔 점이 거의
+> 안 생긴다. 곡면/입체물은 `--sampling-mode surface --ordering-mode graph`(표면 직접 균일
+> 샘플링 + 탄젠트 그래프 순서)를 쓴다. 자세한 내용: [docs/generate_viewpoints.md](docs/generate_viewpoints.md#배치-모드---sampling-mode).
+
 #### 뷰포인트 스튜디오 (viser, 선택)
 
 브라우저에서 물체를 골라 **파라미터 튜닝으로 viewpoint를 실시간 재생성**하거나, 기존

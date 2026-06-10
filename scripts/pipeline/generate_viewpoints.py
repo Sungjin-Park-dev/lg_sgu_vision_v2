@@ -39,6 +39,7 @@ import os
 import sys
 import argparse
 import time
+import warnings
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -438,6 +439,77 @@ def generate_grid_viewpoints(
     return positions, normals, path_order, row_index, center, axis1, axis2
 
 
+def _nn_path_length(points: np.ndarray) -> float:
+    """Greedy nearest-neighbor 경로 길이 (미터). 클러스터링 전 baseline 보고용.
+
+    PCA/그리드 구조에 의존하지 않는 단순 베이스라인. 점이 2개 미만이면 0.
+    """
+    n = len(points)
+    if n < 2:
+        return 0.0
+    visited = np.zeros(n, dtype=bool)
+    cur = 0
+    visited[0] = True
+    total = 0.0
+    for _ in range(n - 1):
+        d = np.linalg.norm(points - points[cur], axis=1)
+        d[visited] = np.inf
+        nxt = int(np.argmin(d))
+        total += float(d[nxt])
+        visited[nxt] = True
+        cur = nxt
+    return total
+
+
+def generate_surface_viewpoints(
+    mesh: trimesh.Trimesh,
+    spacing_m: float,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """표면 직접 균일 샘플링(Poisson-disk blue-noise)으로 뷰포인트를 생성한다.
+
+    PCA 평면 투영 그리드와 달리 메시 표면 위에서 직접 균일 분포를 뽑아,
+    곡면·측벽도 표면적 기준으로 고르게 덮는다(평면 투영의 곡면 누락 문제 해결).
+
+    Args:
+        mesh: 대상 메시
+        spacing_m: 샘플 간 최소 거리(=Poisson-disk radius, 미터)
+
+    Returns:
+        generate_grid_viewpoints와 동일한 7-튜플
+        (positions, normals, path_order, row_index, center, axis1, axis2).
+        path_order/row_index는 placeholder(그래프 순서가 별도로 대체).
+    """
+    # 목표 개수 기반 균등 샘플링(radius 미지정). trimesh의 sample_surface_even은
+    # 내부적으로 radius=sqrt(area/(2*count))로 균등 분산하므로, 원하는 표면 간격
+    # spacing_m을 얻으려면 count = area / (2 * spacing_m^2)로 역산한다.
+    # (radius 직접 지정 방식은 culling이 saturation에 못 미쳐 under-pack 됨.)
+    count = max(16, int(mesh.area / (2.0 * max(spacing_m, 1e-6) ** 2)))
+    if verbose:
+        print(f"Generating surface viewpoints (Poisson-disk, even)...")
+        print(f"  Surface area: {mesh.area:.6f} m2, target spacing: {spacing_m * 1000:.1f} mm")
+        print(f"  Target count: {count}")
+
+    samples, face_indices = trimesh.sample.sample_surface_even(mesh, count, seed=42)
+    samples = np.asarray(samples)
+
+    normals = mesh.face_normals[face_indices]
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-8, 1.0, norms)
+    normals = (normals / norms).astype(np.float32)
+
+    positions = samples.astype(np.float32)
+    N = len(positions)
+    if verbose:
+        print(f"  Generated: {N} viewpoints (≈{spacing_m * 1000:.1f} mm apart)")
+
+    center, axis1, axis2 = compute_pca_axes(samples.astype(np.float64))
+    path_order = np.arange(N, dtype=np.int32)   # placeholder (graph 순서가 대체)
+    row_index = np.zeros(N, dtype=np.int32)     # placeholder
+
+    return positions, normals, path_order, row_index, center, axis1, axis2
+
+
 # ============================================================================
 # Clustering
 # ============================================================================
@@ -476,6 +548,77 @@ def cluster_dbscan(
             labels[i] = next_id
             next_id += 1
     return labels
+
+
+def cluster_agglomerative(
+    positions: np.ndarray,
+    normals: np.ndarray,
+    target_size: int = 12,
+    normal_weight: float = 0.0,
+    n_neighbors: int = 8,
+    max_span_mm: Optional[float] = None,
+) -> np.ndarray:
+    """Agglomerative 기반 공간 분할 클러스터링. 두 가지 노브 모드.
+
+    균일 밀도 표면에서 DBSCAN이 '거대 클러스터 1개 + 싱글톤 다발'로 깨지는 문제를
+    피해, 컴팩트한 구역으로 나눈다.
+
+    - max_span_mm 지정(권장): **complete linkage + distance_threshold**.
+      → 모든 클러스터의 지름(내부 최대 점간 거리) ≤ max_span 보장. 멀리 떨어진
+      viewpoint가 한 클러스터로 묶이는 것을 원천 차단. 클러스터 수는 자동 결정.
+      이 모드는 **순수 위치 거리** 기준(threshold가 mm로 직접 해석되도록 normal_weight 미적용).
+    - max_span_mm None: Ward + kNN 연결성, n_clusters = round(N / target_size)
+      (평균 크기 ≈ target_size; 지름은 제한 안 함).
+
+    Args:
+        positions: (N, 3) 위치
+        normals: (N, 3) 표면 법선
+        target_size: [ward 모드] 클러스터당 목표 점 개수
+        normal_weight: [ward 모드] 법선 가중치 (feature에 결합)
+        n_neighbors: [ward 모드] 연결성 그래프 kNN 수
+        max_span_mm: [distance 모드] 클러스터 최대 지름 (mm)
+
+    Returns:
+        cluster_ids: (N,) 0-based 클러스터 할당
+    """
+    from sklearn.cluster import AgglomerativeClustering
+
+    n = len(positions)
+    if n < 2:
+        return np.zeros(n, dtype=np.int32)
+
+    # distance 모드: complete linkage로 클러스터 지름 ≤ max_span 보장 (순수 위치)
+    if max_span_mm is not None:
+        model = AgglomerativeClustering(
+            n_clusters=None, distance_threshold=max_span_mm / 1000.0, linkage='complete',
+        )
+        labels = model.fit_predict(positions)
+        return labels.astype(np.int32)
+
+    # ward 모드: 개수 기반
+    from sklearn.neighbors import kneighbors_graph
+    if n < 3:
+        return np.zeros(n, dtype=np.int32)
+    k = max(1, int(round(n / max(target_size, 1))))
+    if k <= 1:
+        return np.zeros(n, dtype=np.int32)
+    k = min(k, n)
+
+    if normal_weight > 0:
+        features = np.hstack([positions, normal_weight * normals])
+    else:
+        features = positions
+
+    # 연결성 그래프는 위치(표면 인접)로, Ward 비용은 feature로.
+    conn = kneighbors_graph(
+        positions, n_neighbors=min(n_neighbors, n - 1), include_self=False,
+    )
+    with warnings.catch_warnings():
+        # 연결성 그래프가 분리되면 sklearn이 트리를 완성하며 경고 → 무음 처리.
+        warnings.simplefilter("ignore")
+        model = AgglomerativeClustering(n_clusters=k, connectivity=conn, linkage='ward')
+        labels = model.fit_predict(features)
+    return labels.astype(np.int32)
 
 
 def cluster_coacd(
@@ -527,6 +670,7 @@ def cluster_coacd_dbscan(
     mesh: trimesh.Trimesh,
     positions: np.ndarray,
     normals: np.ndarray,
+    camera_positions: np.ndarray,
     coacd_threshold: float = 0.05,
     eps_m: float = 0.03,
     min_samples: int = 2,
@@ -535,13 +679,15 @@ def cluster_coacd_dbscan(
 ) -> Tuple[np.ndarray, List, np.ndarray]:
     """CoACD → DBSCAN 2단계 클러스터링.
 
-    1단계: CoACD로 메시를 convex 파트로 분해하여 뷰포인트를 파트별로 할당.
-    2단계: 각 CoACD 파트 내에서 DBSCAN으로 세분화.
+    1단계: CoACD로 메시를 convex 파트로 분해하여 뷰포인트를 파트별로 할당(표면 positions).
+    2단계: 각 CoACD 파트 내에서 **camera_positions** 기준 DBSCAN으로 세분화
+    (렌더·로봇 EE가 카메라 위치이므로 — 곡면에서 표면은 가까워도 카메라는 벌어짐).
 
     Args:
         mesh: 대상 메시
-        positions: (N, 3) 뷰포인트 표면 위치
+        positions: (N, 3) 뷰포인트 표면 위치 (CoACD 파트 할당용)
         normals: (N, 3) 표면 법선 벡터
+        camera_positions: (N, 3) 카메라 위치 (DBSCAN 클러스터링 기준)
         coacd_threshold: CoACD concavity threshold
         eps_m: DBSCAN 이웃 반경 (미터)
         min_samples: DBSCAN 코어 포인트 최소 이웃 수
@@ -564,9 +710,7 @@ def cluster_coacd_dbscan(
     num_coacd_parts = len(np.unique(coacd_ids))
     print(f"  CoACD+DBSCAN: {num_coacd_parts} CoACD parts → DBSCAN sub-clustering...")
 
-    # 2단계: 각 CoACD 파트 내에서 DBSCAN
-    # camera_positions는 positions + normals * working_distance이므로
-    # 여기서는 positions (표면 위치) 기준으로 DBSCAN 적용
+    # 2단계: 각 CoACD 파트 내에서 camera_positions 기준 DBSCAN
     t0 = time.perf_counter()
     final_ids = np.full(len(positions), -1, dtype=np.int32)
     next_cluster = 0
@@ -574,18 +718,18 @@ def cluster_coacd_dbscan(
 
     for part_id in np.unique(coacd_ids):
         mask = coacd_ids == part_id
-        part_positions = positions[mask]
+        part_cam = camera_positions[mask]
         part_normals = normals[mask]
         indices = np.where(mask)[0]
 
-        if len(part_positions) < min_samples:
+        if len(part_cam) < min_samples:
             # 포인트가 너무 적으면 하나의 클러스터로
             final_ids[indices] = next_cluster
             next_cluster += 1
             total_sub_clusters += 1
         else:
             sub_ids = cluster_dbscan(
-                part_positions, part_normals,
+                part_cam, part_normals,
                 eps_m, min_samples, normal_weight,
             )
             n_sub = len(np.unique(sub_ids))
@@ -598,6 +742,59 @@ def cluster_coacd_dbscan(
 
     print(f"  CoACD+DBSCAN: {num_coacd_parts} parts → {next_cluster} final clusters "
           f"(coacd={t_coacd:.3f}s, dbscan={t_dbscan:.3f}s)")
+    return final_ids, part_meshes, coacd_ids
+
+
+def cluster_coacd_agglomerative(
+    mesh: trimesh.Trimesh,
+    positions: np.ndarray,
+    normals: np.ndarray,
+    camera_positions: np.ndarray,
+    coacd_threshold: float = 0.05,
+    target_size: int = 12,
+    normal_weight: float = 0.0,
+    max_span_mm: Optional[float] = None,
+    precomputed_coacd: Optional[Tuple[np.ndarray, List]] = None,
+) -> Tuple[np.ndarray, List, np.ndarray]:
+    """CoACD → Agglomerative 2단계 클러스터링 (DBSCAN 대체).
+
+    1단계: CoACD로 convex 파트 분할(표면 positions). 2단계: 각 파트 내
+    **camera_positions** 기준 Agglomerative 공간 분할 (렌더·로봇 EE가 카메라 위치이므로 —
+    곡면에서 표면은 가까워도 카메라는 벌어짐). max_span은 카메라 위치 지름을 제한.
+
+    Returns: (cluster_ids, part_meshes, coacd_ids) — cluster_coacd_dbscan과 동일 시그니처.
+    """
+    # 1단계: CoACD (캐시 재사용 가능 — dbscan과 동일 경로)
+    if precomputed_coacd is not None:
+        coacd_ids, part_meshes = precomputed_coacd
+        t_coacd = 0.0
+    else:
+        t0 = time.perf_counter()
+        coacd_ids, part_meshes = cluster_coacd(mesh, positions, coacd_threshold)
+        t_coacd = time.perf_counter() - t0
+    num_coacd_parts = len(np.unique(coacd_ids))
+    print(f"  CoACD+Agglomerative: {num_coacd_parts} CoACD parts → Ward sub-clustering...")
+
+    # 2단계: 각 CoACD 파트 내에서 camera_positions 기준 Agglomerative
+    t0 = time.perf_counter()
+    final_ids = np.full(len(positions), -1, dtype=np.int32)
+    next_cluster = 0
+
+    for part_id in np.unique(coacd_ids):
+        mask = coacd_ids == part_id
+        indices = np.where(mask)[0]
+        sub_ids = cluster_agglomerative(
+            camera_positions[mask], normals[mask], target_size, normal_weight,
+            max_span_mm=max_span_mm,
+        )
+        for sub_id in np.unique(sub_ids):
+            sub_mask = sub_ids == sub_id
+            final_ids[indices[sub_mask]] = next_cluster
+            next_cluster += 1
+    t_aggl = time.perf_counter() - t0
+
+    print(f"  CoACD+Agglomerative: {num_coacd_parts} parts → {next_cluster} final clusters "
+          f"(coacd={t_coacd:.3f}s, aggl={t_aggl:.3f}s)")
     return final_ids, part_meshes, coacd_ids
 
 
@@ -813,6 +1010,152 @@ def order_clusters_gtsp(
     return _gtsp_greedy_nn(unique_clusters, cluster_internal, normal_weight)
 
 
+def _tangent_basis(mean_normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """평균 법선에 직교하는 2D 탄젠트 프레임 (u, v)를 수치 안정적으로 구성.
+
+    PCA가 아니라 클러스터의 실제 평균 법선을 사용 (surface-intrinsic).
+    평균 법선이 0에 가깝거나 NaN이면 표준 (e_x, e_y)로 폴백.
+    """
+    mn = np.asarray(mean_normal, dtype=np.float64)
+    norm = np.linalg.norm(mn)
+    if not np.isfinite(norm) or norm < 1e-9:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    n = mn / norm
+    # n과 가장 덜 정렬된 좌표축을 기준으로 잡아 near-parallel cross 회피
+    a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = a - np.dot(a, n) * n
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    v /= np.linalg.norm(v)
+    return u, v
+
+
+def _two_opt_open(order: list, points: np.ndarray, max_passes: int) -> list:
+    """Open-path 2-opt 개선(full). 양 끝점(order[0], order[-1])은 고정 → 열린 경로 유지.
+
+    클러스터가 작으므로(호출측에서 n<=max_2opt_n 보장) O(n²) full 2-opt로 충분.
+    """
+    n = len(order)
+    if n < 4:
+        return order
+    pos = points
+    improved = True
+    passes = 0
+    while improved and passes < max_passes:
+        improved = False
+        passes += 1
+        for i in range(1, n - 1):
+            for j in range(i + 1, n - 1):
+                a, b = order[i - 1], order[i]
+                c, d = order[j], order[j + 1]
+                before = np.linalg.norm(pos[a] - pos[b]) + np.linalg.norm(pos[c] - pos[d])
+                after = np.linalg.norm(pos[a] - pos[c]) + np.linalg.norm(pos[b] - pos[d])
+                if after + 1e-12 < before:
+                    order[i:j + 1] = order[i:j + 1][::-1]
+                    improved = True
+    return order
+
+
+def order_cluster_graph(
+    camera_positions_sub: np.ndarray,
+    normals_sub: np.ndarray,
+    max_2opt_n: int = 120,
+    max_2opt_passes: int = 30,
+) -> list:
+    """한 클러스터의 surface-intrinsic open-path 순서(로컬 인덱스 permutation).
+
+    전역 PCA 평면 대신 클러스터 평균 법선의 탄젠트 평면에 투영 → Delaunay/kNN
+    인접 그래프 → nearest-neighbor + 2-opt open path. 절대 tangent-정렬
+    baseline보다 길어지지 않도록 가드.
+
+    Returns: list[int] — 방문 순서(permutation). sorted_indices = [idx[i] for i in perm].
+    """
+    P = np.asarray(camera_positions_sub, dtype=np.float64)
+    n = len(P)
+    if n <= 2:
+        return list(range(n))
+    if not np.all(np.isfinite(P)):
+        return list(range(n))
+
+    # 1. 평균 법선 탄젠트 프레임 → 2D 투영
+    mean_n = np.asarray(normals_sub, dtype=np.float64).mean(axis=0)
+    u, v = _tangent_basis(mean_n)
+    Pc = P - P.mean(axis=0)
+    P2 = np.column_stack([Pc @ u, Pc @ v])
+
+    # 최장 탄젠트 extent 축 → 시작점(극단) + tangent-정렬 baseline
+    spread = P2.max(axis=0) - P2.min(axis=0)
+    major = 0 if spread[0] >= spread[1] else 1
+    tangent_sorted = list(np.argsort(P2[:, major]))
+
+    # 2. 인접 그래프 (Delaunay → kNN 폴백)
+    neighbors: Optional[dict] = None
+    try:
+        from scipy.spatial import Delaunay, QhullError
+        try:
+            tri = Delaunay(P2)
+            nb: dict = {i: set() for i in range(n)}
+            for simplex in tri.simplices:
+                for a_i in simplex:
+                    for b_i in simplex:
+                        if a_i != b_i:
+                            nb[int(a_i)].add(int(b_i))
+            if any(nb.values()):
+                neighbors = {k: tuple(s) for k, s in nb.items()}
+        except QhullError:
+            neighbors = None
+    except Exception:  # noqa: BLE001
+        neighbors = None
+
+    if neighbors is None:
+        # kNN 폴백 (3D 거리 기준)
+        try:
+            from scipy.spatial import cKDTree
+            k = min(n, 8)
+            tree = cKDTree(P)
+            _, idx = tree.query(P, k=k)
+            nb = {i: set() for i in range(n)}
+            for i in range(n):
+                for j in np.atleast_1d(idx[i]):
+                    j = int(j)
+                    if j != i:
+                        nb[i].add(j)
+                        nb[j].add(i)
+            if any(nb.values()):
+                neighbors = {kk: tuple(s) for kk, s in nb.items()}
+        except Exception:  # noqa: BLE001
+            neighbors = None
+
+    if neighbors is None:
+        # 완전 병리적(전부 공선 등) → tangent 정렬로 단락
+        return tangent_sorted
+
+    # 3. nearest-neighbor seed (극단점에서 시작) + 2-opt
+    start = int(np.argmin(P2[:, major]))
+    visited = np.zeros(n, dtype=bool)
+    order = [start]
+    visited[start] = True
+    cur = start
+    for _ in range(n - 1):
+        d = np.linalg.norm(P - P[cur], axis=1)
+        d[visited] = np.inf
+        nxt = int(np.argmin(d))
+        order.append(nxt)
+        visited[nxt] = True
+        cur = nxt
+
+    if n <= max_2opt_n:
+        order = _two_opt_open(order, P, max_2opt_passes)
+
+    # 4. anti-explosion 가드: tangent-정렬 baseline보다 길면 폴백
+    def _plen(seq: list) -> float:
+        return float(np.sum(np.linalg.norm(np.diff(P[seq], axis=0), axis=1))) if len(seq) > 1 else 0.0
+
+    if _plen(order) > _plen(tangent_sorted):
+        return tangent_sorted
+    return order
+
+
 def compute_cluster_internal_order(
     cluster_ids: np.ndarray,
     camera_positions: np.ndarray,
@@ -821,6 +1164,7 @@ def compute_cluster_internal_order(
     grid_row_index: Optional[np.ndarray] = None,
     global_axis1: Optional[np.ndarray] = None,
     global_axis2: Optional[np.ndarray] = None,
+    ordering_mode: str = 'zigzag',
 ) -> dict:
     """각 클러스터의 내부 zigzag 순서를 사전 계산.
 
@@ -858,6 +1202,11 @@ def compute_cluster_internal_order(
 
         if len(indices) < 3:
             sorted_indices = list(indices)
+        elif ordering_mode == 'graph':
+            # surface-intrinsic: 평균 법선 탄젠트 + Delaunay/kNN + open-path TSP.
+            # order_cluster_graph는 permutation을 직접 반환(argsort 불필요).
+            perm = order_cluster_graph(camera_positions[indices], normals[indices])
+            sorted_indices = [indices[i] for i in perm]
         else:
             cluster_cam = camera_positions[indices]
 
@@ -1047,16 +1396,32 @@ Examples:
 
     # --- Clustering ---
     parser.add_argument('--cluster-method', type=str, default='dbscan',
-                        choices=['dbscan', 'coacd', 'coacd+dbscan'],
-                        help='클러스터링 방법 (기본: dbscan)')
+                        choices=['dbscan', 'coacd', 'coacd+dbscan',
+                                 'agglomerative', 'coacd+agglomerative'],
+                        help='클러스터링 방법 (기본: dbscan). agglomerative=Ward 공간분할(균등·싱글톤 없음)')
     parser.add_argument('--eps', type=float, default=None,
                         help=f'[dbscan] 이웃 반경 mm (기본: {config.CAMERA_FOV_WIDTH_MM:.0f}mm)')
     parser.add_argument('--min-samples', type=int, default=2,
                         help='[dbscan] 코어 포인트 최소 이웃 수 (기본: 2)')
+    parser.add_argument('--target-size', type=int, default=12,
+                        help='[agglomerative ward] 클러스터당 목표 점 개수 (기본: 12)')
+    parser.add_argument('--max-span', type=float, default=None,
+                        help='[agglomerative] 클러스터 최대 지름 mm. 지정 시 complete-linkage로 '
+                             '지름 ≤ 값 보장(멀리 떨어진 점 묶임 방지)')
     parser.add_argument('--normal-weight', type=float, default=0.0,
-                        help='[dbscan] 법선 가중치 (미터 단위, 0이면 위치만 사용, 기본: 0.0)')
+                        help='[dbscan/agglomerative] 법선 가중치 (미터 단위, 0이면 위치만 사용, 기본: 0.0)')
     parser.add_argument('--coacd-threshold', type=float, default=0.05,
                         help='[coacd] concavity threshold (낮을수록 더 많은 파트, 기본: 0.05)')
+
+    # --- Sampling / Ordering ---
+    parser.add_argument('--sampling-mode', type=str, default='grid',
+                        choices=['grid', 'surface'],
+                        help='뷰포인트 배치: grid(PCA 평면 투영) | surface(표면 Poisson-disk, 곡면 커버리지). 기본: grid')
+    parser.add_argument('--surface-spacing', type=float, default=None,
+                        help='[surface] Poisson radius mm (기본: FOV 작은 축)')
+    parser.add_argument('--ordering-mode', type=str, default='zigzag',
+                        choices=['zigzag', 'graph'],
+                        help='클러스터 내부 순서: zigzag(전역 PCA) | graph(탄젠트 Delaunay/TSP). 기본: zigzag')
 
     # --- Comparison ---
     parser.add_argument('--compare', action='store_true',
@@ -1101,6 +1466,11 @@ class ViewpointGenParams:
     min_samples: int = 2
     normal_weight: float = 0.0
     coacd_threshold: float = 0.05
+    target_size: int = 12                     # [agglomerative ward] 클러스터당 목표 점 개수
+    max_span_mm: Optional[float] = None       # [agglomerative] 클러스터 최대 지름 mm (지정 시 complete-linkage)
+    sampling_mode: str = 'grid'               # 'grid'(PCA 그리드 투영) | 'surface'(Poisson-disk)
+    surface_spacing_mm: Optional[float] = None  # surface 모드 Poisson radius (None이면 FOV 작은 축)
+    ordering_mode: str = 'zigzag'             # 'zigzag'(전역 PCA) | 'graph'(탄젠트 Delaunay/TSP)
 
 
 @dataclass
@@ -1199,11 +1569,26 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
         cids, coacd_parts = cluster_coacd(target_mesh, positions, kwargs['threshold'])
     elif method == 'coacd+dbscan':
         cids, coacd_parts, coacd_ids = cluster_coacd_dbscan(
-            target_mesh, positions, normals,
+            target_mesh, positions, normals, camera_positions,
             coacd_threshold=kwargs['threshold'],
             eps_m=kwargs.get('eps_m', 0.03),
             min_samples=kwargs.get('min_samples', 2),
             normal_weight=kwargs.get('normal_weight', 0.0),
+            precomputed_coacd=kwargs.get('precomputed_coacd'),
+        )
+    elif method == 'agglomerative':
+        cids = cluster_agglomerative(
+            camera_positions, normals,
+            kwargs.get('target_size', 12), kwargs.get('normal_weight', 0.0),
+            max_span_mm=kwargs.get('max_span_mm'),
+        )
+    elif method == 'coacd+agglomerative':
+        cids, coacd_parts, coacd_ids = cluster_coacd_agglomerative(
+            target_mesh, positions, normals, camera_positions,
+            coacd_threshold=kwargs['threshold'],
+            target_size=kwargs.get('target_size', 12),
+            normal_weight=kwargs.get('normal_weight', 0.0),
+            max_span_mm=kwargs.get('max_span_mm'),
             precomputed_coacd=kwargs.get('precomputed_coacd'),
         )
     else:
@@ -1218,6 +1603,7 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
     c_internal = compute_cluster_internal_order(
         cids, camera_positions, normals, row_spacing_m,
         grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
+        ordering_mode=kwargs.get('ordering_mode', 'zigzag'),
     )
     c_order, c_direction = order_clusters_gtsp(cids, camera_positions, c_internal, nw)
     t_gtsp = time.perf_counter() - t0
@@ -1244,7 +1630,7 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
     }
     if coacd_parts is not None:
         result['coacd_parts'] = coacd_parts
-    if method == 'coacd+dbscan':
+    if method in ('coacd+dbscan', 'coacd+agglomerative'):
         result['coacd_ids'] = coacd_ids
     return result
 
@@ -1270,22 +1656,34 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
     print(f"  Col spacing (axis2): {col_spacing_m * 1000:.1f} mm")
     print()
 
-    # 4. grid viewpoints (PCA)
-    print(f"Generating grid viewpoints (PCA)...")
-    positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = generate_grid_viewpoints(
-        target_mesh, row_spacing_m, col_spacing_m,
-    )
-    print(f"  Generated: {len(positions)} viewpoints")
-
-    # Camera positions
     wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
-    camera_positions = positions + normals * wd_m
 
-    # 5. PCA 축 기준 지그재그 정렬
-    grid_row_index = row_index.copy()  # 그리드 생성 시 확정된 원본 행 인덱스 보존
-    _, cam_axis1, cam_axis2 = compute_pca_axes(camera_positions.astype(np.float64))
-    path_order, row_index, n_rows = reorder_zigzag(camera_positions, cam_axis1, cam_axis2, row_spacing_m)
-    print(f"  Ordered with PCA-axis on camera positions: {n_rows} rows")
+    if params.sampling_mode == 'surface':
+        # 4'. 표면 직접 균일 샘플링 (Poisson-disk) — 곡면 커버리지
+        spacing_m = (params.surface_spacing_mm / 1000.0) if params.surface_spacing_mm \
+            else min(row_spacing_m, col_spacing_m)
+        positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = \
+            generate_surface_viewpoints(target_mesh, spacing_m)
+        camera_positions = positions + normals * wd_m
+        # 전역 zigzag 생략(그래프 순서가 담당). axis/row는 placeholder.
+        grid_row_index = row_index.copy()
+        cam_axis1, cam_axis2 = pca_axis1, pca_axis2
+    else:
+        # 4. grid viewpoints (PCA)
+        print(f"Generating grid viewpoints (PCA)...")
+        positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = generate_grid_viewpoints(
+            target_mesh, row_spacing_m, col_spacing_m,
+        )
+        print(f"  Generated: {len(positions)} viewpoints")
+
+        # Camera positions
+        camera_positions = positions + normals * wd_m
+
+        # 5. PCA 축 기준 지그재그 정렬
+        grid_row_index = row_index.copy()  # 그리드 생성 시 확정된 원본 행 인덱스 보존
+        _, cam_axis1, cam_axis2 = compute_pca_axes(camera_positions.astype(np.float64))
+        path_order, row_index, n_rows = reorder_zigzag(camera_positions, cam_axis1, cam_axis2, row_spacing_m)
+        print(f"  Ordered with PCA-axis on camera positions: {n_rows} rows")
 
     # 7. Filter bottom-facing viewpoints
     if params.filter_bottom:
@@ -1308,8 +1706,11 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
         else:
             print(f"  No bottom-facing viewpoints to filter")
 
-    # Path length (before clustering)
-    original_path_length_mm = compute_path_length(camera_positions, path_order) * 1000.0
+    # Path length (before clustering) — surface는 PCA 무관 NN baseline
+    if params.sampling_mode == 'surface':
+        original_path_length_mm = _nn_path_length(camera_positions) * 1000.0
+    else:
+        original_path_length_mm = compute_path_length(camera_positions, path_order) * 1000.0
     print(f"  Total path length: {original_path_length_mm:.1f} mm")
     print()
 
@@ -1335,6 +1736,7 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
         row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
         cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
         original_path_length_mm=grid['original_path_length_mm'],
+        ordering_mode=params.ordering_mode,
     )
 
     method = params.cluster_method
@@ -1365,6 +1767,26 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
             eps_m=eps_mm / 1000.0, min_samples=params.min_samples,
             normal_weight=params.normal_weight,
         )
+    elif method == 'agglomerative':
+        knob = (f"max_span: {params.max_span_mm:.0f}mm" if params.max_span_mm
+                else f"target_size: {params.target_size}")
+        print(f"Clustering (Agglomerative, {knob})...")
+        label = method
+        result = cluster_and_order(
+            label, 'agglomerative', **common,
+            target_size=params.target_size, normal_weight=params.normal_weight,
+            max_span_mm=params.max_span_mm,
+        )
+    elif method == 'coacd+agglomerative':
+        knob = (f"max_span={params.max_span_mm:.0f}mm" if params.max_span_mm
+                else f"ts={params.target_size}")
+        print(f"Clustering (CoACD+Agglomerative, coacd_threshold: {params.coacd_threshold}, {knob})...")
+        label = f"coacd+agglomerative t={params.coacd_threshold} {knob}"
+        result = cluster_and_order(
+            label, 'coacd+agglomerative', **common, threshold=params.coacd_threshold,
+            target_size=params.target_size, normal_weight=params.normal_weight,
+            max_span_mm=params.max_span_mm,
+        )
     else:
         raise ValueError(f"Unknown cluster_method: {method}")
 
@@ -1386,6 +1808,19 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
         cluster_meta['dbscan_eps_mm'] = eps_mm
         cluster_meta['dbscan_min_samples'] = params.min_samples
         cluster_meta['dbscan_normal_weight'] = params.normal_weight
+    elif method == 'agglomerative':
+        cluster_meta['normal_weight'] = params.normal_weight
+        if params.max_span_mm:
+            cluster_meta['max_span_mm'] = params.max_span_mm
+        else:
+            cluster_meta['target_size'] = params.target_size
+    elif method == 'coacd+agglomerative':
+        cluster_meta['coacd_threshold'] = params.coacd_threshold
+        cluster_meta['normal_weight'] = params.normal_weight
+        if params.max_span_mm:
+            cluster_meta['max_span_mm'] = params.max_span_mm
+        else:
+            cluster_meta['target_size'] = params.target_size
 
     return ViewpointResult(
         positions=grid['positions'], normals=grid['normals'],
@@ -1446,6 +1881,11 @@ def main():
         min_samples=args.min_samples,
         normal_weight=args.normal_weight,
         coacd_threshold=args.coacd_threshold,
+        target_size=args.target_size,
+        max_span_mm=args.max_span,
+        sampling_mode=args.sampling_mode,
+        surface_spacing_mm=args.surface_spacing,
+        ordering_mode=args.ordering_mode,
     )
 
     method = args.cluster_method
@@ -1462,6 +1902,7 @@ def main():
             row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
             cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
             original_path_length_mm=grid['original_path_length_mm'],
+            ordering_mode=params.ordering_mode,
         )
         fov_w = config.CAMERA_FOV_WIDTH_MM
         compare_results = {}
@@ -1500,6 +1941,47 @@ def main():
                     normal_weight=args.normal_weight,
                     precomputed_coacd=cached_coacd,
                 )
+        elif method == 'agglomerative':
+            if args.max_span:
+                print("Comparing Agglomerative (max_span variations)...")
+                for ms in [40, 60, 80, 120]:
+                    label = f"agglomerative span={ms}mm"
+                    compare_results[label] = cluster_and_order(
+                        label, 'agglomerative', **common,
+                        max_span_mm=ms, normal_weight=args.normal_weight,
+                    )
+            else:
+                print("Comparing Agglomerative (target_size variations)...")
+                for ts in [8, 12, 16, 24]:
+                    label = f"agglomerative ts={ts}"
+                    compare_results[label] = cluster_and_order(
+                        label, 'agglomerative', **common,
+                        target_size=ts, normal_weight=args.normal_weight,
+                    )
+        elif method == 'coacd+agglomerative':
+            t = args.coacd_threshold
+            t0 = time.perf_counter()
+            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
+            t_coacd = time.perf_counter() - t0
+            print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
+            if args.max_span:
+                print(f"Comparing CoACD+Agglomerative (coacd_threshold={t} fixed, max_span variations)...")
+                for ms in [40, 60, 80, 120]:
+                    label = f"coacd+agglomerative t={t} span={ms}mm"
+                    compare_results[label] = cluster_and_order(
+                        label, 'coacd+agglomerative', **common, threshold=t,
+                        max_span_mm=ms, normal_weight=args.normal_weight,
+                        precomputed_coacd=cached_coacd,
+                    )
+            else:
+                print(f"Comparing CoACD+Agglomerative (coacd_threshold={t} fixed, target_size variations)...")
+                for ts in [8, 12, 16, 24]:
+                    label = f"coacd+agglomerative t={t} ts={ts}"
+                    compare_results[label] = cluster_and_order(
+                        label, 'coacd+agglomerative', **common, threshold=t,
+                        target_size=ts, normal_weight=args.normal_weight,
+                        precomputed_coacd=cached_coacd,
+                    )
 
         print()
 
@@ -1543,7 +2025,11 @@ def main():
         metadata = {
             'timestamp': datetime.now().isoformat(),
             'input_mesh': str(input_path),
-            'method': 'pca_grid',
+            'method': f"{params.sampling_mode}+{params.ordering_mode}",
+            'sampling_mode': params.sampling_mode,
+            'ordering_mode': params.ordering_mode,
+            'surface_spacing_mm': params.surface_spacing_mm if params.surface_spacing_mm
+                else min(res.row_spacing_m, res.col_spacing_m) * 1000.0,
             'row_spacing_mm': res.row_spacing_m * 1000.0,
             'col_spacing_mm': res.col_spacing_m * 1000.0,
             'total_path_length_mm': compute_path_length(res.camera_positions, res.path_order) * 1000.0,
