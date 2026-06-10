@@ -14,6 +14,7 @@ dependencies = [
     "h5py",
     "trimesh",
     "plotly",
+    "viser>=0.2.11",
     "pyyaml",
     "warp-lang>=1.12,<1.13",
     "yourdfpy",

@@ -43,6 +43,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+from dataclasses import dataclass
 
 import trimesh
 import h5py
@@ -1083,8 +1084,329 @@ Examples:
 
 
 # ============================================================================
+# Generation core (importable — no file IO / CLI)
+# ============================================================================
+
+@dataclass
+class ViewpointGenParams:
+    """generate_viewpoints_core 입력 파라미터 (CLI 플래그 미러)."""
+    material_rgb: Optional[str] = None        # "R,G,B" 문자열 (load_meshes에서 파싱)
+    color_tolerance: float = 5.0
+    row_spacing_mm: Optional[float] = None
+    col_spacing_mm: Optional[float] = None
+    filter_bottom: bool = True
+    bottom_angle: float = 80.0
+    cluster_method: str = 'dbscan'
+    eps_mm: Optional[float] = None
+    min_samples: int = 2
+    normal_weight: float = 0.0
+    coacd_threshold: float = 0.05
+
+
+@dataclass
+class ViewpointResult:
+    """generate_viewpoints_core 결과 (in-memory; 저장은 호출측 책임)."""
+    positions: np.ndarray
+    normals: np.ndarray
+    camera_positions: np.ndarray
+    path_order: np.ndarray
+    row_index: np.ndarray
+    cluster_id: np.ndarray
+    cluster_order: np.ndarray
+    cluster_direction: np.ndarray
+    coacd_parts: Optional[list]
+    coacd_ids: Optional[np.ndarray]
+    pca: dict                       # {'center', 'axis1', 'axis2'}
+    row_spacing_m: float
+    col_spacing_m: float
+    original_path_length_mm: float
+    clustered_path_length_mm: float
+    num_clusters: int
+    cluster_meta: dict
+    method: str
+    label: str
+
+
+def load_meshes(object_name, material_rgb=None, color_tolerance=5.0):
+    """소스 메시 로드 + (선택) 재질 RGB 필터로 타깃 메시 추출.
+
+    Returns: (full_mesh, target_mesh, input_path)
+    """
+    input_path = str(config.get_mesh_path(object_name, mesh_type="source"))
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input mesh not found: {input_path}")
+
+    print("Loading mesh...")
+    loaded = trimesh.load(input_path)
+    if isinstance(loaded, trimesh.Scene):
+        mesh = trimesh.util.concatenate(list(loaded.geometry.values()))
+    else:
+        mesh = loaded
+    print(f"  Loaded: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} triangles")
+    print()
+
+    if material_rgb:
+        print("Parsing materials...")
+        triangle_materials, mtl_file = parse_obj_material_usage(input_path)
+        if mtl_file is None or not os.path.exists(mtl_file):
+            raise FileNotFoundError("MTL file not found")
+
+        materials = parse_mtl_file(mtl_file)
+        print(f"  Found {len(materials)} materials:")
+        for mat_name, mat_props in materials.items():
+            if 'Kd' in mat_props:
+                rgb = kd_to_rgb(mat_props['Kd'])
+                print(f"    - {mat_name}: RGB{rgb}")
+        print()
+
+        print("Matching material...")
+        target_rgb = tuple(map(int, material_rgb.split(',')))
+        matched_materials = match_material_by_color(materials, target_rgb, color_tolerance)
+        if len(matched_materials) == 0:
+            raise ValueError(
+                f"No materials matched RGB{target_rgb} within tolerance {color_tolerance}")
+        print(f"  Matched: {matched_materials}")
+        print()
+
+        print("Extracting target mesh...")
+        target_mesh = extract_target_mesh(mesh, triangle_materials, matched_materials)
+        target_percentage = (len(target_mesh.faces) / len(mesh.faces)) * 100
+        print(f"  Target: {len(target_mesh.faces):,} / {len(mesh.faces):,} triangles ({target_percentage:.1f}%)")
+    else:
+        print("Using entire mesh (no material filter)...")
+        target_mesh = mesh
+        print(f"  Triangles: {len(target_mesh.faces):,}")
+
+    print(f"  Surface area: {target_mesh.area:.6f} m2")
+    print()
+    return mesh, target_mesh, input_path
+
+
+def cluster_and_order(label, method, *, positions, normals, camera_positions, target_mesh,
+                      row_spacing_m, grid_row_index, cam_axis1, cam_axis2,
+                      original_path_length_mm, **kwargs):
+    """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환."""
+    t_total_start = time.perf_counter()
+
+    coacd_parts = None
+    t0 = time.perf_counter()
+    if method == 'dbscan':
+        cids = cluster_dbscan(
+            camera_positions, normals, kwargs['eps_m'],
+            kwargs.get('min_samples', 2), kwargs.get('normal_weight', 0.0),
+        )
+    elif method == 'coacd':
+        cids, coacd_parts = cluster_coacd(target_mesh, positions, kwargs['threshold'])
+    elif method == 'coacd+dbscan':
+        cids, coacd_parts, coacd_ids = cluster_coacd_dbscan(
+            target_mesh, positions, normals,
+            coacd_threshold=kwargs['threshold'],
+            eps_m=kwargs.get('eps_m', 0.03),
+            min_samples=kwargs.get('min_samples', 2),
+            normal_weight=kwargs.get('normal_weight', 0.0),
+            precomputed_coacd=kwargs.get('precomputed_coacd'),
+        )
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    t_cluster = time.perf_counter() - t0
+
+    K = len(np.unique(cids))
+    sizes = np.array([np.sum(cids == c) for c in np.unique(cids)])
+    nw = kwargs.get('normal_weight', 0.0)
+
+    t0 = time.perf_counter()
+    c_internal = compute_cluster_internal_order(
+        cids, camera_positions, normals, row_spacing_m,
+        grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
+    )
+    c_order, c_direction = order_clusters_gtsp(cids, camera_positions, c_internal, nw)
+    t_gtsp = time.perf_counter() - t0
+
+    p_order = build_clustered_path_order(cids, c_order, c_internal, c_direction)
+    pl_mm = compute_path_length(camera_positions, p_order) * 1000.0
+
+    t_total = time.perf_counter() - t_total_start
+
+    n_fwd = int(np.sum(c_direction == 0))
+    n_rev = int(np.sum(c_direction == 1))
+    print(f"  [{label}] {K} clusters "
+          f"(sizes: {sizes.min()}-{sizes.max()}, mean={sizes.mean():.1f}) "
+          f"path: {pl_mm:.1f} mm "
+          f"({(1 - pl_mm / original_path_length_mm) * 100:.1f}% reduction) "
+          f"[dir: {n_fwd}F/{n_rev}R]")
+    print(f"    timing: cluster={t_cluster:.3f}s, GTSP={t_gtsp:.3f}s, total={t_total:.3f}s")
+
+    result = {
+        'cluster_ids': cids, 'cluster_order': c_order,
+        'cluster_direction': c_direction,
+        'path_order': p_order, 'path_length_mm': pl_mm,
+        'num_clusters': K,
+    }
+    if coacd_parts is not None:
+        result['coacd_parts'] = coacd_parts
+    if method == 'coacd+dbscan':
+        result['coacd_ids'] = coacd_ids
+    return result
+
+
+def prepare_grid(target_mesh, params: ViewpointGenParams):
+    """그리드 뷰포인트 생성 + 지그재그 정렬 + bottom 필터 (클러스터링 전 단계).
+
+    Returns: dict — positions, normals, camera_positions, path_order, row_index,
+        grid_row_index, cam_axis1, cam_axis2, row_spacing_m, col_spacing_m,
+        original_path_length_mm, pca_center, pca_axis1, pca_axis2
+    """
+    # 3. spacing
+    if params.row_spacing_mm:
+        row_spacing_m = params.row_spacing_mm / 1000.0
+    else:
+        row_spacing_m = config.CAMERA_FOV_HEIGHT_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
+    if params.col_spacing_mm:
+        col_spacing_m = params.col_spacing_mm / 1000.0
+    else:
+        col_spacing_m = config.CAMERA_FOV_WIDTH_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
+
+    print(f"  Row spacing (axis1): {row_spacing_m * 1000:.1f} mm")
+    print(f"  Col spacing (axis2): {col_spacing_m * 1000:.1f} mm")
+    print()
+
+    # 4. grid viewpoints (PCA)
+    print(f"Generating grid viewpoints (PCA)...")
+    positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = generate_grid_viewpoints(
+        target_mesh, row_spacing_m, col_spacing_m,
+    )
+    print(f"  Generated: {len(positions)} viewpoints")
+
+    # Camera positions
+    wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
+    camera_positions = positions + normals * wd_m
+
+    # 5. PCA 축 기준 지그재그 정렬
+    grid_row_index = row_index.copy()  # 그리드 생성 시 확정된 원본 행 인덱스 보존
+    _, cam_axis1, cam_axis2 = compute_pca_axes(camera_positions.astype(np.float64))
+    path_order, row_index, n_rows = reorder_zigzag(camera_positions, cam_axis1, cam_axis2, row_spacing_m)
+    print(f"  Ordered with PCA-axis on camera positions: {n_rows} rows")
+
+    # 7. Filter bottom-facing viewpoints
+    if params.filter_bottom:
+        R_obj = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
+        world_normals = (R_obj @ normals.T).T
+        cos_thresh = np.cos(np.deg2rad(params.bottom_angle))
+        keep = (-world_normals[:, 2]) < cos_thresh
+
+        n_removed = (~keep).sum()
+        if n_removed > 0:
+            positions = positions[keep]
+            normals = normals[keep]
+            camera_positions = camera_positions[keep]
+            row_index = row_index[keep]
+            grid_row_index = grid_row_index[keep]
+            old_order = path_order[keep]
+            path_order = np.argsort(np.argsort(old_order)).astype(np.int32)
+            print(f"  Filtered {n_removed} bottom-facing viewpoints (within {params.bottom_angle}° from down)")
+            print(f"  Remaining: {len(positions)} viewpoints")
+        else:
+            print(f"  No bottom-facing viewpoints to filter")
+
+    # Path length (before clustering)
+    original_path_length_mm = compute_path_length(camera_positions, path_order) * 1000.0
+    print(f"  Total path length: {original_path_length_mm:.1f} mm")
+    print()
+
+    return {
+        'positions': positions, 'normals': normals, 'camera_positions': camera_positions,
+        'path_order': path_order, 'row_index': row_index, 'grid_row_index': grid_row_index,
+        'cam_axis1': cam_axis1, 'cam_axis2': cam_axis2,
+        'row_spacing_m': row_spacing_m, 'col_spacing_m': col_spacing_m,
+        'original_path_length_mm': original_path_length_mm,
+        'pca_center': pca_center, 'pca_axis1': pca_axis1, 'pca_axis2': pca_axis2,
+    }
+
+
+def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> ViewpointResult:
+    """그리드 생성 → 클러스터링 → 경로 순서 최적화 (단일 method). 파일 IO 없음.
+
+    Phase B(viser 실시간 재생성)가 호출할 import 시임.
+    """
+    grid = prepare_grid(target_mesh, params)
+    common = dict(
+        positions=grid['positions'], normals=grid['normals'],
+        camera_positions=grid['camera_positions'], target_mesh=target_mesh,
+        row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
+        cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
+        original_path_length_mm=grid['original_path_length_mm'],
+    )
+
+    method = params.cluster_method
+    eps_mm = params.eps_mm if params.eps_mm else config.CAMERA_FOV_WIDTH_MM
+
+    if method == 'dbscan':
+        nw_str = f", normal_weight: {params.normal_weight}" if params.normal_weight > 0 else ""
+        print(f"Clustering (DBSCAN, eps: {eps_mm:.0f} mm, min_samples: {params.min_samples}{nw_str})...")
+        label = method
+        result = cluster_and_order(
+            label, 'dbscan', **common, eps_m=eps_mm / 1000.0,
+            min_samples=params.min_samples, normal_weight=params.normal_weight,
+        )
+    elif method == 'coacd':
+        print(f"Clustering (CoACD, threshold: {params.coacd_threshold})...")
+        label = method
+        result = cluster_and_order(
+            label, 'coacd', **common, threshold=params.coacd_threshold,
+            normal_weight=params.normal_weight,
+        )
+    elif method == 'coacd+dbscan':
+        nw_str = f", normal_weight: {params.normal_weight}" if params.normal_weight > 0 else ""
+        print(f"Clustering (CoACD+DBSCAN, coacd_threshold: {params.coacd_threshold}, "
+              f"eps: {eps_mm:.0f} mm, min_samples: {params.min_samples}{nw_str})...")
+        label = f"coacd+dbscan t={params.coacd_threshold} eps={eps_mm:.0f}mm"
+        result = cluster_and_order(
+            label, 'coacd+dbscan', **common, threshold=params.coacd_threshold,
+            eps_m=eps_mm / 1000.0, min_samples=params.min_samples,
+            normal_weight=params.normal_weight,
+        )
+    else:
+        raise ValueError(f"Unknown cluster_method: {method}")
+
+    cluster_meta = {
+        'clustering_method': method,
+        'num_clusters': result['num_clusters'],
+        'clustered_path_length_mm': result['path_length_mm'],
+        'original_path_length_mm': grid['original_path_length_mm'],
+        'clustering_timestamp': datetime.now().isoformat(),
+    }
+    if method == 'dbscan':
+        cluster_meta['dbscan_eps_mm'] = eps_mm
+        cluster_meta['dbscan_min_samples'] = params.min_samples
+        cluster_meta['dbscan_normal_weight'] = params.normal_weight
+    elif method == 'coacd':
+        cluster_meta['coacd_threshold'] = params.coacd_threshold
+    elif method == 'coacd+dbscan':
+        cluster_meta['coacd_threshold'] = params.coacd_threshold
+        cluster_meta['dbscan_eps_mm'] = eps_mm
+        cluster_meta['dbscan_min_samples'] = params.min_samples
+        cluster_meta['dbscan_normal_weight'] = params.normal_weight
+
+    return ViewpointResult(
+        positions=grid['positions'], normals=grid['normals'],
+        camera_positions=grid['camera_positions'],
+        path_order=result['path_order'], row_index=grid['row_index'],
+        cluster_id=result['cluster_ids'], cluster_order=result['cluster_order'],
+        cluster_direction=result['cluster_direction'],
+        coacd_parts=result.get('coacd_parts'), coacd_ids=result.get('coacd_ids'),
+        pca={'center': grid['pca_center'], 'axis1': grid['pca_axis1'], 'axis2': grid['pca_axis2']},
+        row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
+        original_path_length_mm=grid['original_path_length_mm'],
+        clustered_path_length_mm=result['path_length_mm'],
+        num_clusters=result['num_clusters'],
+        cluster_meta=cluster_meta, method=method, label=label,
+    )
+
+
+# ============================================================================
 # Main
 # ============================================================================
+
 
 def main():
     args = parse_arguments()
@@ -1103,192 +1425,44 @@ def main():
     print(f"Clustering: {args.cluster_method}")
     print()
 
-    # Validate input exists
-    if not os.path.exists(input_path):
-        print(f"Error: Input mesh not found: {input_path}")
+    # 1-2. Load mesh + extract target mesh (material filter)
+    try:
+        mesh, target_mesh, input_path = load_meshes(
+            args.object, args.material_rgb, args.color_tolerance,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
         return 1
 
-    # 1. Load OBJ
-    print("Loading mesh...")
-    loaded = trimesh.load(input_path)
-
-    if isinstance(loaded, trimesh.Scene):
-        mesh = trimesh.util.concatenate(list(loaded.geometry.values()))
-    else:
-        mesh = loaded
-
-    print(f"  Loaded: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} triangles")
-    print()
-
-    # 2. Determine target mesh
-    if args.material_rgb:
-        print("Parsing materials...")
-        triangle_materials, mtl_file = parse_obj_material_usage(input_path)
-
-        if mtl_file is None or not os.path.exists(mtl_file):
-            print(f"Error: MTL file not found")
-            return 1
-
-        materials = parse_mtl_file(mtl_file)
-        print(f"  Found {len(materials)} materials:")
-        for mat_name, mat_props in materials.items():
-            if 'Kd' in mat_props:
-                rgb = kd_to_rgb(mat_props['Kd'])
-                print(f"    - {mat_name}: RGB{rgb}")
-        print()
-
-        print("Matching material...")
-        target_rgb = tuple(map(int, args.material_rgb.split(',')))
-        matched_materials = match_material_by_color(materials, target_rgb, args.color_tolerance)
-
-        if len(matched_materials) == 0:
-            print(f"  Error: No materials matched RGB{target_rgb} within tolerance {args.color_tolerance}")
-            return 1
-
-        print(f"  Matched: {matched_materials}")
-        print()
-
-        print("Extracting target mesh...")
-        target_mesh = extract_target_mesh(mesh, triangle_materials, matched_materials)
-        target_percentage = (len(target_mesh.faces) / len(mesh.faces)) * 100
-        print(f"  Target: {len(target_mesh.faces):,} / {len(mesh.faces):,} triangles ({target_percentage:.1f}%)")
-    else:
-        print("Using entire mesh (no material filter)...")
-        target_mesh = mesh
-        print(f"  Triangles: {len(target_mesh.faces):,}")
-
-    print(f"  Surface area: {target_mesh.area:.6f} m2")
-    print()
-
-    # 3. Calculate spacing
-    if args.row_spacing:
-        row_spacing_m = args.row_spacing / 1000.0
-    else:
-        row_spacing_m = config.CAMERA_FOV_HEIGHT_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
-    if args.col_spacing:
-        col_spacing_m = args.col_spacing / 1000.0
-    else:
-        col_spacing_m = config.CAMERA_FOV_WIDTH_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
-
-    print(f"  Row spacing (axis1): {row_spacing_m * 1000:.1f} mm")
-    print(f"  Col spacing (axis2): {col_spacing_m * 1000:.1f} mm")
-    print()
-
-    # 4. Generate viewpoints
-    print(f"Generating grid viewpoints (PCA)...")
-    positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = generate_grid_viewpoints(
-        target_mesh, row_spacing_m, col_spacing_m,
+    params = ViewpointGenParams(
+        material_rgb=args.material_rgb,
+        color_tolerance=args.color_tolerance,
+        row_spacing_mm=args.row_spacing,
+        col_spacing_mm=args.col_spacing,
+        filter_bottom=not args.no_filter_bottom,
+        bottom_angle=args.bottom_angle,
+        cluster_method=args.cluster_method,
+        eps_mm=args.eps,
+        min_samples=args.min_samples,
+        normal_weight=args.normal_weight,
+        coacd_threshold=args.coacd_threshold,
     )
-    print(f"  Generated: {len(positions)} viewpoints")
-
-    # Camera positions
-    wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
-    camera_positions = positions + normals * wd_m
-
-    # 5. PCA 축 기준 지그재그 정렬
-    grid_row_index = row_index.copy()  # 그리드 생성 시 확정된 원본 행 인덱스 보존
-    _, cam_axis1, cam_axis2 = compute_pca_axes(camera_positions.astype(np.float64))
-    path_order, row_index, n_rows = reorder_zigzag(camera_positions, cam_axis1, cam_axis2, row_spacing_m)
-    print(f"  Ordered with PCA-axis on camera positions: {n_rows} rows")
-
-    # 7. Filter bottom-facing viewpoints
-    if not args.no_filter_bottom:
-        R_obj = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
-        world_normals = (R_obj @ normals.T).T
-        cos_thresh = np.cos(np.deg2rad(args.bottom_angle))
-        keep = (-world_normals[:, 2]) < cos_thresh
-
-        n_removed = (~keep).sum()
-        if n_removed > 0:
-            positions = positions[keep]
-            normals = normals[keep]
-            camera_positions = camera_positions[keep]
-            row_index = row_index[keep]
-            grid_row_index = grid_row_index[keep]
-            old_order = path_order[keep]
-            path_order = np.argsort(np.argsort(old_order)).astype(np.int32)
-            print(f"  Filtered {n_removed} bottom-facing viewpoints (within {args.bottom_angle}° from down)")
-            print(f"  Remaining: {len(positions)} viewpoints")
-        else:
-            print(f"  No bottom-facing viewpoints to filter")
-
-    # Path length (before clustering)
-    original_path_length_mm = compute_path_length(camera_positions, path_order) * 1000.0
-    print(f"  Total path length: {original_path_length_mm:.1f} mm")
-    print()
-
-    # 8. Clustering helper
-    base_path_order = path_order.copy()
-
-    def run_clustering(label, method, **kwargs):
-        """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환."""
-        t_total_start = time.perf_counter()
-
-        coacd_parts = None
-        t0 = time.perf_counter()
-        if method == 'dbscan':
-            cids = cluster_dbscan(
-                camera_positions, normals, kwargs['eps_m'],
-                kwargs.get('min_samples', 2), kwargs.get('normal_weight', 0.0),
-            )
-        elif method == 'coacd':
-            cids, coacd_parts = cluster_coacd(target_mesh, positions, kwargs['threshold'])
-        elif method == 'coacd+dbscan':
-            cids, coacd_parts, coacd_ids = cluster_coacd_dbscan(
-                target_mesh, positions, normals,
-                coacd_threshold=kwargs['threshold'],
-                eps_m=kwargs.get('eps_m', 0.03),
-                min_samples=kwargs.get('min_samples', 2),
-                normal_weight=kwargs.get('normal_weight', 0.0),
-                precomputed_coacd=kwargs.get('precomputed_coacd'),
-            )
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        t_cluster = time.perf_counter() - t0
-
-        K = len(np.unique(cids))
-        sizes = np.array([np.sum(cids == c) for c in np.unique(cids)])
-        nw = kwargs.get('normal_weight', 0.0)
-
-        t0 = time.perf_counter()
-        c_internal = compute_cluster_internal_order(
-            cids, camera_positions, normals, row_spacing_m,
-            grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
-        )
-        c_order, c_direction = order_clusters_gtsp(cids, camera_positions, c_internal, nw)
-        t_gtsp = time.perf_counter() - t0
-
-        p_order = build_clustered_path_order(cids, c_order, c_internal, c_direction)
-        pl_mm = compute_path_length(camera_positions, p_order) * 1000.0
-
-        t_total = time.perf_counter() - t_total_start
-
-        n_fwd = int(np.sum(c_direction == 0))
-        n_rev = int(np.sum(c_direction == 1))
-        print(f"  [{label}] {K} clusters "
-              f"(sizes: {sizes.min()}-{sizes.max()}, mean={sizes.mean():.1f}) "
-              f"path: {pl_mm:.1f} mm "
-              f"({(1 - pl_mm / original_path_length_mm) * 100:.1f}% reduction) "
-              f"[dir: {n_fwd}F/{n_rev}R]")
-        print(f"    timing: cluster={t_cluster:.3f}s, GTSP={t_gtsp:.3f}s, total={t_total:.3f}s")
-
-        result = {
-            'cluster_ids': cids, 'cluster_order': c_order,
-            'cluster_direction': c_direction,
-            'path_order': p_order, 'path_length_mm': pl_mm,
-            'num_clusters': K,
-        }
-        if coacd_parts is not None:
-            result['coacd_parts'] = coacd_parts
-        if method == 'coacd+dbscan':
-            result['coacd_ids'] = coacd_ids
-        return result
 
     method = args.cluster_method
     eps_mm = args.eps if args.eps else config.CAMERA_FOV_WIDTH_MM
 
+    # ------------------------------------------------------------------
+    # Compare mode: 파라미터 스윕 → 드롭다운 HTML
+    # ------------------------------------------------------------------
     if args.compare:
-        # 파라미터 스윕 비교 모드
+        grid = prepare_grid(target_mesh, params)
+        common = dict(
+            positions=grid['positions'], normals=grid['normals'],
+            camera_positions=grid['camera_positions'], target_mesh=target_mesh,
+            row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
+            cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
+            original_path_length_mm=grid['original_path_length_mm'],
+        )
         fov_w = config.CAMERA_FOV_WIDTH_MM
         compare_results = {}
 
@@ -1297,16 +1471,16 @@ def main():
             for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
                 e_mm = fov_w * factor
                 label = f"dbscan eps={e_mm:.0f}mm"
-                compare_results[label] = run_clustering(
-                    label, 'dbscan', eps_m=e_mm / 1000.0,
+                compare_results[label] = cluster_and_order(
+                    label, 'dbscan', **common, eps_m=e_mm / 1000.0,
                     min_samples=args.min_samples, normal_weight=args.normal_weight,
                 )
         elif method == 'coacd':
             print("Comparing CoACD (threshold variations)...")
             for t in [0.1, 0.2, 0.25, 0.3]:
                 label = f"coacd t={t}"
-                compare_results[label] = run_clustering(
-                    label, 'coacd', threshold=t,
+                compare_results[label] = cluster_and_order(
+                    label, 'coacd', **common, threshold=t,
                     normal_weight=args.normal_weight,
                 )
         elif method == 'coacd+dbscan':
@@ -1314,14 +1488,14 @@ def main():
             print(f"Comparing CoACD+DBSCAN (coacd_threshold={t} fixed, eps variations)...")
             # CoACD 1회 실행 후 캐싱
             t0 = time.perf_counter()
-            cached_coacd = cluster_coacd(target_mesh, positions, t)
+            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
             t_coacd = time.perf_counter() - t0
             print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
             for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
                 e_mm = fov_w * factor
                 label = f"coacd+dbscan t={t} eps={e_mm:.0f}mm"
-                compare_results[label] = run_clustering(
-                    label, 'coacd+dbscan', threshold=t,
+                compare_results[label] = cluster_and_order(
+                    label, 'coacd+dbscan', **common, threshold=t,
                     eps_m=e_mm / 1000.0, min_samples=args.min_samples,
                     normal_weight=args.normal_weight,
                     precomputed_coacd=cached_coacd,
@@ -1332,12 +1506,12 @@ def main():
         # 비교 HTML 저장
         if not args.dry_run:
             html_path = str(config.get_viewpoint_path(
-                args.object, len(positions), filename=f"compare_{method}.html",
+                args.object, len(grid['positions']), filename=f"compare_{method}.html",
             ))
             os.makedirs(os.path.dirname(html_path), exist_ok=True)
             visualize_clusters_html(
-                mesh, positions, camera_positions,
-                compare_results, original_path_length_mm,
+                mesh, grid['positions'], grid['camera_positions'],
+                compare_results, grid['original_path_length_mm'],
                 html_path,
             )
 
@@ -1345,56 +1519,10 @@ def main():
         print("=" * 60)
         return 0
 
-    # 단일 클러스터링 모드
-    if method == 'dbscan':
-        nw_str = f", normal_weight: {args.normal_weight}" if args.normal_weight > 0 else ""
-        print(f"Clustering (DBSCAN, eps: {eps_mm:.0f} mm, min_samples: {args.min_samples}{nw_str})...")
-        label = method
-        result = run_clustering(
-            label, 'dbscan', eps_m=eps_mm / 1000.0,
-            min_samples=args.min_samples, normal_weight=args.normal_weight,
-        )
-    elif method == 'coacd':
-        print(f"Clustering (CoACD, threshold: {args.coacd_threshold})...")
-        label = method
-        result = run_clustering(label, 'coacd', threshold=args.coacd_threshold,
-                               normal_weight=args.normal_weight)
-    elif method == 'coacd+dbscan':
-        nw_str = f", normal_weight: {args.normal_weight}" if args.normal_weight > 0 else ""
-        print(f"Clustering (CoACD+DBSCAN, coacd_threshold: {args.coacd_threshold}, "
-              f"eps: {eps_mm:.0f} mm, min_samples: {args.min_samples}{nw_str})...")
-        label = f"coacd+dbscan t={args.coacd_threshold} eps={eps_mm:.0f}mm"
-        result = run_clustering(
-            label, 'coacd+dbscan', threshold=args.coacd_threshold,
-            eps_m=eps_mm / 1000.0, min_samples=args.min_samples,
-            normal_weight=args.normal_weight,
-        )
-
-    cluster_ids = result['cluster_ids']
-    cluster_order = result['cluster_order']
-    cluster_direction = result['cluster_direction']
-    path_order = result['path_order']
-    clustered_path_length_mm = result['path_length_mm']
-    K = result['num_clusters']
-
-    cluster_meta = {
-        'clustering_method': method,
-        'num_clusters': K,
-        'clustered_path_length_mm': clustered_path_length_mm,
-        'original_path_length_mm': original_path_length_mm,
-        'clustering_timestamp': datetime.now().isoformat(),
-    }
-    if method == 'dbscan':
-        cluster_meta['dbscan_eps_mm'] = eps_mm
-        cluster_meta['dbscan_min_samples'] = args.min_samples
-        cluster_meta['dbscan_normal_weight'] = args.normal_weight
-    elif method == 'coacd':
-        cluster_meta['coacd_threshold'] = args.coacd_threshold
-    elif method == 'coacd+dbscan':
-        cluster_meta['coacd_threshold'] = args.coacd_threshold
-        cluster_meta['dbscan_eps_mm'] = eps_mm
-        cluster_meta['dbscan_min_samples'] = args.min_samples
-        cluster_meta['dbscan_normal_weight'] = args.normal_weight
+    # ------------------------------------------------------------------
+    # Single mode: 생성 코어 호출 → 저장 → 시각화
+    # ------------------------------------------------------------------
+    res = generate_viewpoints_core(target_mesh, params)
 
     # 9. Save to HDF5
     if args.dry_run:
@@ -1402,7 +1530,7 @@ def main():
         print("[DRY RUN] HDF5 not modified.")
     else:
         output_path = str(config.get_viewpoint_path(
-            args.object, len(positions), filename=f"viewpoints_{method}.h5",
+            args.object, len(res.positions), filename=f"viewpoints_{method}.h5",
         ))
         print(f"Output: {output_path}")
 
@@ -1416,18 +1544,20 @@ def main():
             'timestamp': datetime.now().isoformat(),
             'input_mesh': str(input_path),
             'method': 'pca_grid',
-            'row_spacing_mm': row_spacing_m * 1000.0,
-            'col_spacing_mm': col_spacing_m * 1000.0,
-            'total_path_length_mm': compute_path_length(camera_positions, path_order) * 1000.0,
+            'row_spacing_mm': res.row_spacing_m * 1000.0,
+            'col_spacing_mm': res.col_spacing_m * 1000.0,
+            'total_path_length_mm': compute_path_length(res.camera_positions, res.path_order) * 1000.0,
         }
-        pca_data = {'center': pca_center, 'axis1': pca_axis1, 'axis2': pca_axis2}
+        pca_data = {
+            'center': res.pca['center'], 'axis1': res.pca['axis1'], 'axis2': res.pca['axis2'],
+        }
         save_viewpoints_hdf5(
-            positions, normals, output_path, metadata, camera_spec,
-            path_order, pca_data, row_index,
-            cluster_id=cluster_ids,
-            cluster_order=cluster_order,
-            cluster_direction=cluster_direction,
-            cluster_metadata=cluster_meta,
+            res.positions, res.normals, output_path, metadata, camera_spec,
+            res.path_order, pca_data, res.row_index,
+            cluster_id=res.cluster_id,
+            cluster_order=res.cluster_order,
+            cluster_direction=res.cluster_direction,
+            cluster_metadata=res.cluster_meta,
         )
         print()
 
@@ -1438,19 +1568,19 @@ def main():
     if not args.dry_run:
         html_path = str(Path(output_path).with_suffix('.html'))
         cluster_result = {
-            label: {
-                'cluster_ids': cluster_ids, 'cluster_order': cluster_order,
-                'path_order': path_order, 'path_length_mm': clustered_path_length_mm,
-                'num_clusters': K,
+            res.label: {
+                'cluster_ids': res.cluster_id, 'cluster_order': res.cluster_order,
+                'path_order': res.path_order, 'path_length_mm': res.clustered_path_length_mm,
+                'num_clusters': res.num_clusters,
             }
         }
-        if 'coacd_parts' in result:
-            cluster_result[label]['coacd_parts'] = result['coacd_parts']
-        if 'coacd_ids' in result:
-            cluster_result[label]['coacd_ids'] = result['coacd_ids']
+        if res.coacd_parts is not None:
+            cluster_result[res.label]['coacd_parts'] = res.coacd_parts
+        if res.coacd_ids is not None:
+            cluster_result[res.label]['coacd_ids'] = res.coacd_ids
         visualize_clusters_html(
-            mesh, positions, camera_positions,
-            cluster_result, original_path_length_mm,
+            mesh, res.positions, res.camera_positions,
+            cluster_result, res.original_path_length_mm,
             html_path,
         )
 

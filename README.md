@@ -11,7 +11,7 @@ scripts/
     plan_trajectory.py       DBSCAN+DP 기반 IK 해 선택 + MotionGen transit
     publish_trajectory.py    ROS2 궤적 전송
   prep/              mesh 전처리 (normalize_mesh, generate_normals)
-  viser/             viser 웹 프론트엔드 (view_meshes)
+  viser/             viser 웹 프론트엔드 (view_meshes, viewpoint_app)
   common/            config, math_utils, viewpoint_viz
   ros2/              ROS2 유틸 (move_to_start, publish_workcell_markers)
   isaac/             Isaac Sim 전용 (usd/ 하위: build_ghost_usd, inspect_usd)
@@ -52,6 +52,18 @@ uv run scripts/pipeline/generate_viewpoints.py \
 ```
 
 `data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5` 생성.
+
+#### 뷰포인트 스튜디오 (viser, 선택)
+
+브라우저에서 물체를 골라 **파라미터 튜닝으로 viewpoint를 실시간 재생성**하거나, 기존
+`viewpoints*.h5`를 불러와 확인 (메시·클러스터·경로·CoACD 파트 + 경로 순서 재생, Save):
+
+```bash
+uv run scripts/viser/viewpoint_app.py --object curved_structure
+# http://localhost:8080 접속 → Generate / Save
+```
+
+자세한 사용법: [docs/viewpoint_app.md](docs/viewpoint_app.md).
 
 ### 2. IK 선택 + 궤적 생성
 
