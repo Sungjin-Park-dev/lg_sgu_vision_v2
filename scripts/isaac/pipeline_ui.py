@@ -2,19 +2,24 @@
 """
 Omni UI panel for the trajectory pipeline inside Isaac Sim.
 
-Boots Isaac Sim with the same workcell as ur_ros2_joint_control.py, then opens
+Boots Isaac Sim with the same workcell as joint_control.py, then opens
 an Omni UI window with three panels:
 
-    A) select_ik_dp parameters + [Generate Trajectory]   (subprocess)
+    A) plan_trajectory parameters + [Generate Trajectory]   (subprocess)
     B) CSV preview with Play/Pause/Stop/Slider           (in-process animation)
     C) publish_trajectory parameters + [Publish]         (subprocess)
 
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
 
-During preview the Action Graph's OnPlaybackTick is disabled so the local
-articulation driver owns the joint targets; on Stop it is re-enabled so
-external /joint_states publishers can drive the robot again.
+Preview overlays a pre-built physics-free "ghost" UR20 (built once via
+scripts/isaac/usd/build_ghost_usd.py → ur20_description/ur20_ghost.usd,
+cyan-tinted, no rigid bodies, no articulation) at /World/UR20_preview and
+poses each link by writing one xformOp per frame via FK. The real
+/World/UR20 articulation is never touched by preview, so the Action Graph
+and any external /joint_states publisher keep running uninterrupted.
+ActionGraphSwitch is kept for the publish path (ensure-graph-enabled) but
+not toggled during preview.
 
 Usage:
     uv run scripts/isaac/pipeline_ui.py --object sample
@@ -39,8 +44,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Reuse loaders from ur_ros2_joint_control.py — same workcell, robot, camera.
-from isaac import ur_ros2_joint_control as urctl  # noqa: E402
+# Reuse loaders from joint_control.py — same workcell, robot, camera.
+from isaac import joint_control as urctl  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -52,6 +57,157 @@ JOINT_NAMES = [
 ]
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
+
+GHOST_ROOT_PATH = "/World/UR20_preview"
+GHOST_USD_NAME = "ur20_ghost.usd"  # built by scripts/isaac/usd/build_ghost_usd.py
+
+
+# =============================================================================
+# Preview ghost — references a pre-built physics-free ghost USD (cyan-tinted,
+# 30% opacity, all UsdPhysics/PhysxSchema APIs stripped, joints disabled).
+# PreviewPlayer poses link xforms via FK; we never touch PhysX at runtime.
+# =============================================================================
+
+@dataclass
+class GhostJoint:
+    """One revolute joint in the ghost's kinematic chain (parent → child)."""
+    name: str
+    parent_link_path: str
+    child_link_path: str
+    axis: np.ndarray              # 3-vec, unit
+    T_joint_in_parent: np.ndarray # 4x4, joint origin expressed in parent link frame
+    T_joint_in_child: np.ndarray  # 4x4, joint origin expressed in child  link frame
+
+
+def _np_from_pos_quat(pos, quat_wxyz) -> np.ndarray:
+    """4x4 numpy transform (column-vector convention) from (x,y,z) + (w,x,y,z)."""
+    T = np.eye(4)
+    T[:3, 3] = [pos[0], pos[1], pos[2]]
+    w, x, y, z = quat_wxyz
+    T[:3, :3] = np.array([
+        [1 - 2*(y*y + z*z),   2*(x*y - z*w),       2*(x*z + y*w)],
+        [2*(x*y + z*w),       1 - 2*(x*x + z*z),   2*(y*z - x*w)],
+        [2*(x*z - y*w),       2*(y*z + x*w),       1 - 2*(x*x + y*y)],
+    ])
+    return T
+
+
+def _axis_angle_4x4(axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rodrigues 4x4 rotation about `axis` (unit) by `angle` (rad)."""
+    c, s = float(np.cos(angle)), float(np.sin(angle))
+    x, y, z = float(axis[0]), float(axis[1]), float(axis[2])
+    R = np.array([
+        [c + x*x*(1-c),     x*y*(1-c) - z*s, x*z*(1-c) + y*s],
+        [y*x*(1-c) + z*s,   c + y*y*(1-c),   y*z*(1-c) - x*s],
+        [z*x*(1-c) - y*s,   z*y*(1-c) + x*s, c + z*z*(1-c)],
+    ])
+    T = np.eye(4)
+    T[:3, :3] = R
+    return T
+
+
+def _gf_to_np(gf_mat) -> np.ndarray:
+    """Gf.Matrix4d (row-vector, translation in last row) → numpy 4x4 (column-vec)."""
+    arr = np.array([[gf_mat[r][c] for c in range(4)] for r in range(4)],
+                   dtype=np.float64)
+    return arr.T
+
+
+def _np_to_gf(np_mat: np.ndarray):
+    """numpy 4x4 (column-vec) → Gf.Matrix4d (row-vector)."""
+    from pxr import Gf
+    M = np_mat.T
+    return Gf.Matrix4d(
+        float(M[0,0]), float(M[0,1]), float(M[0,2]), float(M[0,3]),
+        float(M[1,0]), float(M[1,1]), float(M[1,2]), float(M[1,3]),
+        float(M[2,0]), float(M[2,1]), float(M[2,2]), float(M[2,3]),
+        float(M[3,0]), float(M[3,1]), float(M[3,2]), float(M[3,3]),
+    )
+
+
+def spawn_preview_ghost(usd_path: Path, ghost_root: str, position,
+                        joint_order: list,
+                        log: Callable[[str], None]):
+    """Reference the pre-built physics-free ghost USD and extract its FK chain.
+
+    The USD is already stripped (no rigid bodies, no articulation, no
+    collisions — see build_ghost_usd.py), so this function only does
+    USD-level work: reference, walk joint prims for chain info, hide.
+    Returns (base_link_path, chain).
+    """
+    from isaacsim.core.utils import prims
+    import omni.usd
+    from pxr import UsdGeom, UsdPhysics
+
+    prims.create_prim(
+        ghost_root, "Xform",
+        position=position,
+        usd_path=str(usd_path),
+    )
+
+    stage = omni.usd.get_context().get_stage()
+
+    # Joint prims are kept in the ghost USD (with jointEnabled=False) precisely
+    # so we can read body0/body1/axis/localPose to build the FK chain.
+    found: "dict[str, GhostJoint]" = {}
+    for prim in stage.Traverse():
+        p = str(prim.GetPath())
+        if not p.startswith(ghost_root):
+            continue
+        if not prim.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        rj = UsdPhysics.RevoluteJoint(prim)
+        pn = prim.GetName()
+        match = next((n for n in joint_order if pn == n or pn.endswith(n)), None)
+        if match is None:
+            continue
+        b0 = rj.GetBody0Rel().GetTargets()
+        b1 = rj.GetBody1Rel().GetTargets()
+        if not b0 or not b1:
+            log(f"[ghost] joint {pn} missing body0/body1, skipping")
+            continue
+        axis_tok = rj.GetAxisAttr().Get() or "Z"
+        axis = np.array({"X": [1., 0., 0.], "Y": [0., 1., 0.], "Z": [0., 0., 1.]}[axis_tok])
+        p0 = rj.GetLocalPos0Attr().Get()
+        r0 = rj.GetLocalRot0Attr().Get()
+        p1 = rj.GetLocalPos1Attr().Get()
+        r1 = rj.GetLocalRot1Attr().Get()
+        pos0 = (float(p0[0]), float(p0[1]), float(p0[2])) if p0 else (0., 0., 0.)
+        pos1 = (float(p1[0]), float(p1[1]), float(p1[2])) if p1 else (0., 0., 0.)
+        rot0 = (float(r0.GetReal()), *(float(v) for v in r0.GetImaginary())) if r0 \
+               else (1., 0., 0., 0.)
+        rot1 = (float(r1.GetReal()), *(float(v) for v in r1.GetImaginary())) if r1 \
+               else (1., 0., 0., 0.)
+        found[match] = GhostJoint(
+            name=match,
+            parent_link_path=str(b0[0]),
+            child_link_path=str(b1[0]),
+            axis=axis,
+            T_joint_in_parent=_np_from_pos_quat(pos0, rot0),
+            T_joint_in_child=_np_from_pos_quat(pos1, rot1),
+        )
+
+    chain = [found[n] for n in joint_order if n in found]
+    if len(chain) != len(joint_order):
+        missing = [n for n in joint_order if n not in found]
+        raise RuntimeError(f"[ghost] missing joints under {ghost_root}: {missing}")
+    base_link_path = chain[0].parent_link_path
+
+    UsdGeom.Imageable(stage.GetPrimAtPath(ghost_root)).MakeInvisible()
+    log(f"[ghost] spawned at {ghost_root}: chain={len(chain)} joints rooted at "
+        f"{base_link_path}, starting hidden")
+    return base_link_path, chain
+
+
+def set_ghost_visible(ghost_root: str, visible: bool) -> None:
+    import omni.usd
+    from pxr import UsdGeom
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(ghost_root)
+    if not prim or not prim.IsValid():
+        return
+    img = UsdGeom.Imageable(prim)
+    img.MakeVisible() if visible else img.MakeInvisible()
 
 
 # =============================================================================
@@ -178,21 +334,21 @@ class PreviewState:
 
 
 class PreviewPlayer:
-    """Animates the UR20 articulation through a loaded CSV trajectory."""
+    """Animates the ghost UR20 by computing FK and writing each link's xformOp.
 
-    def __init__(self, articulation_path: str, log: Callable[[str], None]):
-        self._art_path = articulation_path
+    The ghost USD is physics-free; this class only does USD-level pose
+    writes. The real /World/UR20 articulation is never touched, so
+    ActionGraphSwitch and any external /joint_states publisher keep running
+    independently.
+    """
+
+    def __init__(self, ghost_root_prim: str, base_link_path: str,
+                 chain: "list[GhostJoint]", log: Callable[[str], None]):
+        self._ghost_root = ghost_root_prim
+        self._base_link_path = base_link_path
+        self._chain = chain
         self._log = log
-        self._art = None
         self._state = PreviewState()
-
-    def _ensure_articulation(self):
-        if self._art is not None:
-            return
-        # Defer import to runtime — Kit's API only loads after SimulationApp.
-        from isaacsim.core.prims import SingleArticulation
-        self._art = SingleArticulation(prim_path=self._art_path, name="ur20_preview")
-        self._art.initialize()
 
     def load(self, csv_path: str) -> bool:
         try:
@@ -200,29 +356,22 @@ class PreviewPlayer:
         except Exception as e:
             self._log(f"[preview] CSV load failed: {e}")
             return False
-
-        self._ensure_articulation()
-
-        # Build joint permutation from articulation DOF names → JOINT_NAMES order.
-        dof_names = list(self._art.dof_names)
-        try:
-            perm = [dof_names.index(n) for n in JOINT_NAMES]
-        except ValueError as e:
-            self._log(f"[preview] DOF name mismatch: {e}; dof_names={dof_names}")
-            return False
-
+        # CSV columns are already in JOINT_NAMES order (load_trajectory_csv),
+        # and the chain is built in that same order — no permutation needed.
         self._state = PreviewState(
             solutions=solutions,
             times=times,
             duration=float(times[-1] - times[0]),
             t=0.0,
             playing=False,
-            dof_perm=perm,
+            dof_perm=None,
         )
         self._log(
             f"[preview] Loaded {len(solutions)} waypoints, "
-            f"duration={self._state.duration:.2f}s, DOF map={perm}"
+            f"duration={self._state.duration:.2f}s"
         )
+        set_ghost_visible(self._ghost_root, True)
+        self._apply()
         return True
 
     @property
@@ -246,6 +395,7 @@ class PreviewPlayer:
     def stop(self):
         self._state.playing = False
         self._state.t = 0.0
+        set_ghost_visible(self._ghost_root, False)
 
     def seek(self, t: float):
         if not self.loaded:
@@ -263,23 +413,59 @@ class PreviewPlayer:
         self._apply()
 
     def _apply(self):
-        if not self.loaded or self._art is None:
+        if not self.loaded:
             return
-        from isaacsim.core.utils.types import ArticulationAction
+        import omni.usd
+        from pxr import UsdGeom
 
         sol, times = self._state.solutions, self._state.times
         t = self._state.t + times[0]
-        q_world_order = np.array(
+        q = np.array(
             [np.interp(t, times, sol[:, j]) for j in range(sol.shape[1])],
             dtype=np.float64,
         )
-        # Reorder JOINT_NAMES → articulation DOF order via inverse permutation.
-        perm = self._state.dof_perm or list(range(len(JOINT_NAMES)))
-        q_dof = np.zeros(len(perm), dtype=np.float64)
-        for j_idx, dof_idx in enumerate(perm):
-            q_dof[dof_idx] = q_world_order[j_idx]
 
-        self._art.apply_action(ArticulationAction(joint_positions=q_dof))
+        stage = omni.usd.get_context().get_stage()
+        base_prim = stage.GetPrimAtPath(self._base_link_path)
+        if not base_prim.IsValid():
+            self._log(f"[fk] base link invalid: {self._base_link_path}")
+            return
+
+        parent_world = _gf_to_np(
+            UsdGeom.Xformable(base_prim).ComputeLocalToWorldTransform(0.0)
+        )
+
+        for j_idx, joint in enumerate(self._chain):
+            angle = float(q[j_idx])
+            # USD physics joint constraint:
+            #   body0_world @ T_joint_in_parent @ R(axis, angle)
+            #     == body1_world @ T_joint_in_child
+            child_world = (
+                parent_world
+                @ joint.T_joint_in_parent
+                @ _axis_angle_4x4(joint.axis, angle)
+                @ np.linalg.inv(joint.T_joint_in_child)
+            )
+
+            child_prim = stage.GetPrimAtPath(joint.child_link_path)
+            if not child_prim.IsValid():
+                continue
+
+            usd_parent = child_prim.GetParent()
+            if usd_parent and usd_parent.IsValid():
+                pw = _gf_to_np(
+                    UsdGeom.Xformable(usd_parent).ComputeLocalToWorldTransform(0.0)
+                )
+                local_T = np.linalg.inv(pw) @ child_world
+            else:
+                local_T = child_world
+
+            xform = UsdGeom.Xformable(child_prim)
+            xform.ClearXformOpOrder()
+            op = xform.AddTransformOp(opSuffix="ghostFK")
+            op.Set(_np_to_gf(local_T))
+
+            parent_world = child_world
 
 
 # =============================================================================
@@ -340,7 +526,9 @@ class PipelineWindow:
 
     LOG_MAX_LINES = 500
 
-    def __init__(self, articulation_path: str, graph_path: str, default_object: str):
+    def __init__(self, ghost_root_prim: str, base_link_path: str,
+                 chain: "list[GhostJoint]", graph_path: str,
+                 default_object: str):
         import omni.ui as ui
 
         self._ui = ui
@@ -350,8 +538,14 @@ class PipelineWindow:
 
         self._gen_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
+        # Keep ActionGraphSwitch around for the publish path. Preview no
+        # longer needs it (ghost is a separate prim tree, not the real UR20),
+        # so we leave the graph untouched during preview — the user-confirmed
+        # stable original idle behavior is preserved.
         self._graph = ActionGraphSwitch(graph_path, self._append_log)
-        self._preview = PreviewPlayer(articulation_path, self._append_log)
+        self._preview = PreviewPlayer(
+            ghost_root_prim, base_link_path, chain, self._append_log,
+        )
 
         self._uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
         if not Path(self._uv).exists() and shutil.which("uv") is None:
@@ -403,7 +597,7 @@ class PipelineWindow:
 
     def _build_panel_generate(self):
         ui = self._ui
-        with ui.CollapsableFrame("A. Generate Trajectory (select_ik_dp.py)", height=0):
+        with ui.CollapsableFrame("A. Generate Trajectory (plan_trajectory.py)", height=0):
             with ui.VStack(spacing=4):
                 self._fields["object"]            = self._row("--object",              self._default_object)
                 self._fields["num_viewpoints"]    = self._row("--num-viewpoints",      124)
@@ -488,7 +682,7 @@ class PipelineWindow:
         suffix      = self._get_field("output_suffix", str).strip() or "dp"
 
         cmd = [
-            self._uv, "run", "scripts/pipeline/select_ik_dp.py",
+            self._uv, "run", "scripts/pipeline/plan_trajectory.py",
             "--object", obj,
             "--num-viewpoints", str(n_vp),
             "--spacing", str(spacing),
@@ -589,7 +783,6 @@ class PipelineWindow:
             self._append_log(f"[preview] CSV not found: {csv}")
             return
         if self._preview.load(csv):
-            self._graph.set_active(False)  # take ownership for preview
             self._update_slider_bounds()
             self._refresh_status()
 
@@ -597,7 +790,6 @@ class PipelineWindow:
         if not self._preview.loaded:
             self._append_log("[preview] load a CSV first")
             return
-        self._graph.set_active(False)
         self._preview.play()
 
     def _on_pause(self):
@@ -605,13 +797,11 @@ class PipelineWindow:
 
     def _on_stop(self):
         self._preview.stop()
-        self._graph.set_active(True)
         self._refresh_status()
 
     def _on_slider(self, model):
         if not self._preview.loaded:
             return
-        self._graph.set_active(False)
         self._preview.seek(model.get_value_as_float())
         self._refresh_status()
 
@@ -733,8 +923,29 @@ def main():
     graph_path = urctl.build_action_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
+    # Physics-free ghost overlay for trajectory preview. Built once offline
+    # by scripts/isaac/usd/build_ghost_usd.py — referencing it here
+    # should add zero physics state and leave the real /World/UR20
+    # articulation untouched.
+    ghost_usd_path = args.usd_path.parent / GHOST_USD_NAME
+    if not ghost_usd_path.exists():
+        sys.exit(
+            f"Ghost USD not found: {ghost_usd_path}\n"
+            f"Build it first: uv run scripts/isaac/usd/build_ghost_usd.py"
+        )
+    base_link, chain = spawn_preview_ghost(
+        usd_path=ghost_usd_path,
+        ghost_root=GHOST_ROOT_PATH,
+        position=np.array([0.0, 0.0, urctl.MOUNT_HEIGHT]),
+        joint_order=JOINT_NAMES,
+        log=print,
+    )
+    simulation_app.update()
+
     window = PipelineWindow(
-        articulation_path=articulation_root,
+        ghost_root_prim=GHOST_ROOT_PATH,
+        base_link_path=base_link,
+        chain=chain,
         graph_path=graph_path,
         default_object=(args.object or "sample"),
     )

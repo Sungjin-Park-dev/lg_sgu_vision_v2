@@ -23,7 +23,7 @@ Prerequisite — USD prepared at ur20_description/ur20/ur20.usd
 (generated via Isaac Sim's URDF Importer GUI with proper articulation root).
 
 Usage:
-    uv run scripts/isaac/ur_ros2_joint_control.py --object sample
+    uv run scripts/isaac/joint_control.py --object sample
 
 Test with:
     ros2 topic pub /joint_states sensor_msgs/msg/JointState \
@@ -61,7 +61,7 @@ TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
 ACTION_GRAPH_PATH = "/ActionGraph"
 
-# 워크셀 치수 (load_environment.py 검증 완료)
+# 워크셀 치수 (load_workcell.py 검증 완료)
 MOUNT_HEIGHT = 0.805
 TABLE_HEIGHT = 0.630
 MOUNT_USD_INTRINSIC_Z = 0.515

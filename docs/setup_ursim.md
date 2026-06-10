@@ -162,6 +162,6 @@ URSim 사용 시 동시에 띄우는 셸 구성:
 | **A** | `start_ursim.sh -m UR20` | URSim 컨테이너 (호스트 daemon에 띄움) |
 | **B** | `ur_control.launch.py ...` | ur_robot_driver |
 | **C** | `move_to_start.py`, `publish_trajectory.py` | 명령 전송 |
-| **D** | `ur_ros2_joint_control.py` (Isaac Sim) | 시각화 — 옵션 |
+| **D** | `joint_control.py` (Isaac Sim) | 시각화 — 옵션 |
 
 각각 `docker exec -it ros-jazzy bash`로 별도 셸 진입.

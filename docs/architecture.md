@@ -13,7 +13,7 @@ Stage 1: 뷰포인트 생성 + 클러스터링 + 클러스터 순서 최적화
            → 클러스터 간: GTSP (Noon-Bean + OR-Tools ATSP)
 
 Stage 2: 궤적 생성
-  scripts/pipeline/plan_motion.py
+  scripts/pipeline/plan_trajectory.py
   Input:  viewpoints.h5 (클러스터 데이터 필수)
   Output: data/{object}/trajectory/{num}/trajectory.csv + trajectory.html
   Process:
@@ -55,7 +55,7 @@ shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joi
 -1.5708, -2.0944, -1.0472, ...
 ```
 각 행이 하나의 waypoint (radians). `JOINT_NAMES` 순서 고정.
-`time`은 `select_ik_dp.py`가 EE 선속도/각속도/joint 속도 제한으로 계산한 실행 시간이다.
+`time`은 `plan_trajectory.py`가 EE 선속도/각속도/joint 속도 제한으로 계산한 실행 시간이다.
 
 ## 카메라-로봇 변환 체인
 

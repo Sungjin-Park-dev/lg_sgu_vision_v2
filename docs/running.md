@@ -7,11 +7,11 @@ UR20 비전 검사 파이프라인 실행 흐름. 환경 셋업은 [setup_docker
 ```
 [1. 뷰포인트 생성]   generate_viewpoints.py → viewpoints.h5
         ↓
-[2. IK + 궤적 계획]  select_ik_dp.py        → trajectory_dp.csv
+[2. IK + 궤적 계획]  plan_trajectory.py        → trajectory_dp.csv
         ↓
 [3. 로봇 실행]       publish_trajectory.py  → ROS2 action goal
         ↓                                      ↑
-[4. 시각화 (선택)]   ur_ros2_joint_control.py  └─ ur_robot_driver
+[4. 시각화 (선택)]   joint_control.py  └─ ur_robot_driver
                      (Isaac Sim)
 ```
 
@@ -64,7 +64,7 @@ uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "1
 **셸 C** (venv + GPU 사용 — cuRobo):
 
 ```bash
-uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124
+uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124
 ```
 
 옵션:
@@ -82,7 +82,7 @@ uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124
 - `data/{object}/trajectory/{N}/trajectory_dp_*.html` — 시각화
 - `data/{object}/trajectory/{N}/trajectory_dp_*_anim.html` — 애니메이션
 
-상세는 [select_ik_dp.md](select_ik_dp.md) 참조.
+상세는 [plan_trajectory.md](plan_trajectory.md) 참조.
 
 ---
 
@@ -156,7 +156,7 @@ uv run scripts/ros2/publish_workcell_markers.py --object sample
 **셸 B**:
 ```bash
 source /workspace/.venv/bin/activate
-uv run scripts/isaac/ur_ros2_joint_control.py --object sample
+uv run scripts/isaac/joint_control.py --object sample
 ```
 
 - `--no-sync` — `uv sync`가 cuRobo path-install을 건드리지 않도록
@@ -190,7 +190,7 @@ USD가 없으면 GUI URDF Importer로 먼저 변환. [setup_isaac_sim.md](setup_
 uv run scripts/pipeline/generate_viewpoints.py --object sample \
     --material-rgb "170,163,158" --cluster-method coacd+dbscan \
     --normal-weight 0.05 --coacd-threshold 0.25
-uv run scripts/pipeline/select_ik_dp.py --object sample --num-viewpoints 124
+uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124
 
 # 셸 A — driver
 source /opt/ros/jazzy/setup.bash
@@ -200,7 +200,7 @@ ros2 launch ur_robot_driver ur_control.launch.py \
 # 셸 B — Isaac Sim 시각화 (선택)
 source /workspace/.venv/bin/activate
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-    scripts/isaac/ur_ros2_joint_control.py --object sample
+    scripts/isaac/joint_control.py --object sample
 
 # 셸 C — 로봇 제어
 source /opt/ros/jazzy/setup.bash

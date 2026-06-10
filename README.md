@@ -8,11 +8,13 @@ UR20 로봇을 이용한 비전 검사 궤적 생성 시스템. cuRobo(IK/충돌
 scripts/
   pipeline/          핵심 파이프라인
     generate_viewpoints.py   뷰포인트 생성 + 클러스터링 + GTSP 순서
-    select_ik_dp.py          DBSCAN+DP 기반 IK 해 선택 + MotionGen transit
+    plan_trajectory.py       DBSCAN+DP 기반 IK 해 선택 + MotionGen transit
     publish_trajectory.py    ROS2 궤적 전송
+  prep/              mesh 전처리 (normalize_mesh, generate_normals)
+  viser/             viser 웹 프론트엔드 (view_meshes)
   common/            config, math_utils, viewpoint_viz
   ros2/              ROS2 유틸 (move_to_start, publish_workcell_markers)
-  isaac/             Isaac Sim 전용
+  isaac/             Isaac Sim 전용 (usd/ 하위: build_ghost_usd, inspect_usd)
   prev/              이전 버전 스크립트
 data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 ```
@@ -54,7 +56,7 @@ uv run scripts/pipeline/generate_viewpoints.py \
 ### 2. IK 선택 + 궤적 생성
 
 ```bash
-uv run scripts/pipeline/select_ik_dp.py \
+uv run scripts/pipeline/plan_trajectory.py \
     --object sample \
     --num-viewpoints 124 \
     --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -82,7 +84,7 @@ uv run --no-sync python -m urdf_usd_converter \
 
 # 시뮬레이션 + ROS2 bridge
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-    scripts/isaac/ur_ros2_joint_control.py --object sample
+    scripts/isaac/joint_control.py --object sample
 ```
 
 자세한 절차·트러블슈팅: [docs/running.md](docs/running.md#isaac-sim-시뮬레이션).

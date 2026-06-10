@@ -2,7 +2,7 @@
 """
 저장된 trajectory CSV를 ROS2 FollowJointTrajectory action으로 전송
 
-select_ik_dp.py가 생성한 trajectory.csv의 time 컬럼을 보존해 로봇에 전송한다.
+plan_trajectory.py가 생성한 trajectory.csv의 time 컬럼을 보존해 로봇에 전송한다.
 
 사용법:
     uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_ee_s0010.csv
@@ -235,7 +235,7 @@ def main():
 
     if not Path(csv_path).exists():
         print(f"Error: CSV not found: {csv_path}")
-        print("  select_ik_dp.py를 먼저 실행하세요.")
+        print("  plan_trajectory.py를 먼저 실행하세요.")
         return
 
     print(f"Loading trajectory from {csv_path}...")

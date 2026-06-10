@@ -88,4 +88,4 @@ HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
 
 ## 하류 호환성
 
-`plan_motion.py`의 `load_viewpoints()`는 `cluster_id`, `cluster_order`를 **필수**로 읽는다. 두 데이터가 없으면 에러로 종료. 레거시 non-clustered 모드는 제거됨.
+`plan_trajectory.py`의 `load_viewpoints()`는 `cluster_id`, `cluster_order`를 **필수**로 읽는다. 두 데이터가 없으면 에러로 종료. 레거시 non-clustered 모드는 제거됨.
