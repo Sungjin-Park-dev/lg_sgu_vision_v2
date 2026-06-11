@@ -80,12 +80,15 @@ def parse_args(argv=None):
                         help=f"Robot USD path (default: {DEFAULT_USD.relative_to(PROJECT_ROOT)})")
     parser.add_argument("--object", type=str, default=None,
                         help="Object name to load workcell (e.g. 'sample')")
+    parser.add_argument("--mode", choices=["sim", "real"], default="sim",
+                        help="sim = Isaac-only, no live ROS traffic (default); "
+                             "real = mirror /joint_states + publish to the robot")
     args, _ = parser.parse_known_args(argv)
     return args
 
 
-def start_sim(headless: bool = False):
-    """Create SimulationApp, enable ROS2 bridge, set camera view, return app."""
+def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
+    """Create SimulationApp, optionally enable ROS2 bridge, set camera view, return app."""
     from isaacsim import SimulationApp
 
     config_dict = {"renderer": "RaytracedLighting", "headless": headless}
@@ -94,7 +97,19 @@ def start_sim(headless: bool = False):
     # These imports are only valid after SimulationApp() exists.
     from isaacsim.core.utils import extensions, viewports
 
-    extensions.enable_extension("isaacsim.ros2.bridge")
+    # The action graph that mirrors /joint_states + publishes camera frames
+    # needs this extension. We always enable it (eager): the graph is built but
+    # left inactive in sim mode, so the toggle just flips its tick — no runtime
+    # extension-enable (which is fragile after play() in Isaac 6.0).
+    if enable_ros_bridge:
+        extensions.enable_extension("isaacsim.ros2.bridge")
+    # In GUI mode, also load the OmniGraph editor window so the /ActionGraph is
+    # inspectable via Window > Graph Editors > Action Graph. SimulationApp's
+    # minimal app does NOT auto-enable editor UI: the graph runtime works (and
+    # /ActionGraph shows in Stage), but the editor menu/window are absent until
+    # this extension is on.
+    if not headless:
+        extensions.enable_extension("omni.graph.window.action")
     simulation_app.update()
 
     viewports.set_camera_view(
@@ -286,9 +301,18 @@ def setup_inspection_camera() -> str | None:
 def build_action_graph(articulation_root: str, inspection_cam: str | None) -> str:
     """Create the ROS2 joint-state subscriber + optional camera publishers. Returns graph path."""
     import omni.graph.core as og
+    import omni.usd
+    from isaacsim.core.utils import prims
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
     import config as _config
+
+    # Idempotency guard: ACTION_GRAPH_PATH is fixed, so re-running this would try
+    # to CREATE_NODES onto an existing graph (duplicate-node error). Tear any
+    # existing graph down first so the function is safe to call more than once.
+    stage = omni.usd.get_context().get_stage()
+    if stage is not None and stage.GetPrimAtPath(ACTION_GRAPH_PATH).IsValid():
+        prims.delete_prim(ACTION_GRAPH_PATH)
 
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),

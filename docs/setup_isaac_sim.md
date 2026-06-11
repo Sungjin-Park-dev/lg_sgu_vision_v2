@@ -134,12 +134,27 @@ Articulation root: /World/UR20/base_link    ← 또는 비슷한 경로
 
 ## pipeline_ui.py — 물체 선택·이동·궤적 생성/테스트
 
-`joint_control.py`와 같은 워크셀을 띄우고, Omni.UI 3패널(Generate / Preview / Publish)로
+`joint_control.py`와 같은 워크셀을 띄우고, Omni.UI 패널(Mode / Generate / Preview / Publish)로
 **물체를 고르고, 뷰포트 기즈모로 옮긴 뒤, 그 위치에서 궤적을 생성·미리보기**한다.
 
 ```bash
-uv run scripts/isaac/pipeline_ui.py --object sample
+uv run scripts/isaac/pipeline_ui.py --object sample            # 기본 sim 모드
+uv run scripts/isaac/pipeline_ui.py --object sample --mode real # 실로봇 모드로 부팅
 ```
+
+### 모드 (sim / real)
+
+상단 `Mode` 패널의 `Run mode` 드롭다운으로 **런타임에 sim ⇄ real을 전환**한다(부팅 기본 = `sim`).
+
+- **sim** — Isaac Sim 단독. **ROS 연결 불필요**. Generate(cuRobo)·Preview(ghost)만으로 시뮬레이션
+  테스트. 액션그래프 tick이 꺼져 `/joint_states` 미구독·카메라 미발행, **Publish 차단**(회색).
+- **real** — **ROS 연결**. 액션그래프가 켜져 viewport가 실로봇 `/joint_states`를 미러링하고
+  **Publish 활성**. `ur_robot_driver`(mock/URSim/실로봇)가 떠 있어야 한다.
+
+전환은 즉시(그래프 노드 생성/삭제 없이 tick 플래그만 토글). Generate·Preview는 두 모드에서 동일.
+
+> ROS 브리지 확장은 eager로 항상 로드되므로 sim에서도 inert DDS participant가 존재한다(연결은
+> 불필요). 따라서 **sim 작업은 ROS를 source하지 않은 셸**에서 띄우는 것을 권장(FastDDS 충돌 회피).
 
 ### 워크플로
 

@@ -542,10 +542,11 @@ class PipelineWindow:
 
     def __init__(self, ghost_root_prim: str, base_link_path: str,
                  chain: "list[GhostJoint]", graph_path: str,
-                 default_object: str):
+                 default_object: str, initial_mode: str = "sim"):
         import omni.ui as ui
 
         self._ui = ui
+        self._mode = initial_mode  # "sim" (no live ROS) | "real" (ROS robot)
         self._log_lines: list[str] = []
         self._log_model = ui.SimpleStringModel("")
         self._csv_path_model = ui.SimpleStringModel("")
@@ -573,6 +574,8 @@ class PipelineWindow:
         self._btn_cancel_pub = None
         self._slider_model: Optional["ui.SimpleFloatModel"] = None
         self._status_label: Optional["ui.Label"] = None
+        self._mode_combo = None
+        self._mode_label: Optional["ui.Label"] = None
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
@@ -584,6 +587,19 @@ class PipelineWindow:
         self._object_combo = None
         self._build()
 
+        # Dock into the right-hand panel instead of floating as a standalone
+        # window. deferred_dock_in waits until the target panel exists in the
+        # layout, then tabs this window alongside it. CURRENT_WINDOW_IS_ACTIVE
+        # brings the Pipeline UI tab to the front. "Property" is the standard
+        # bottom-right panel in the Isaac Sim default layout; change the title
+        # (e.g. "Stage") to dock elsewhere.
+        try:
+            self._window.deferred_dock_in(
+                "Property", ui.DockPolicy.CURRENT_WINDOW_IS_ACTIVE
+            )
+        except Exception as e:  # noqa: BLE001 — docking is cosmetic, never fatal
+            self._append_log(f"[ui] dock failed ({e}); window stays floating")
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -591,6 +607,7 @@ class PipelineWindow:
         ui = self._ui
         with self._window.frame:
             with ui.VStack(spacing=6):
+                self._build_panel_mode()
                 self._build_panel_generate()
                 self._build_panel_preview()
                 self._build_panel_publish()
@@ -614,6 +631,64 @@ class PipelineWindow:
                 return f.model
             else:
                 raise TypeError(type(model))
+
+    # ------------------------------------------------------------------
+    # Mode panel (sim / real) + helpers
+    # ------------------------------------------------------------------
+    def _build_panel_mode(self):
+        ui = self._ui
+        with ui.CollapsableFrame("Mode", height=0, collapsed=False):
+            with ui.VStack(spacing=4):
+                with ui.HStack(height=26, spacing=8):
+                    ui.Label("Run mode", width=80)
+                    idx = 0 if self._mode == "sim" else 1
+                    self._mode_combo = ui.ComboBox(idx, "sim (Isaac only)", "real (ROS robot)")
+                    self._mode_combo.model.add_item_changed_fn(self._on_mode_changed)
+                    self._mode_label = ui.Label(self._mode_text(), width=120)
+                ui.Label("sim = no ROS, Generate+Preview only.  real = mirror /joint_states + "
+                         "Publish to robot (needs ur_robot_driver).",
+                         height=28, word_wrap=True)
+
+    def _mode_text(self) -> str:
+        return f"● {self._mode.upper()}"
+
+    def _on_mode_changed(self, *_):
+        if self._mode_combo is None:
+            return
+        idx = self._mode_combo.model.get_item_value_model().get_value_as_int()
+        self.apply_mode("sim" if idx == 0 else "real")
+
+    def apply_mode(self, mode: str):
+        """Single source of truth for both boot init and live toggles.
+
+        real → action graph ticks (Isaac mirrors /joint_states + camera publish),
+        Publish enabled. sim → graph stops (no ROS traffic, robot idle; preview
+        uses the ghost), Publish blocked. No graph nodes are created/destroyed —
+        we only flip the existing graph's tick, so toggling is instant and safe.
+        """
+        self._mode = mode
+        active = (mode == "real")
+        self._graph.set_active(active)
+        # ActionGraphSwitch falls back to "noop" if it can't find a tick handle;
+        # surface that instead of silently leaving the graph running in sim.
+        if not active and getattr(self._graph, "_mode", None) == "noop":
+            self._append_log(
+                "[mode] WARNING: action graph could not be gated — sim mode may "
+                "still mirror /joint_states.")
+        self._sync_mode_ui()
+        self._append_log(
+            f"[mode] → {mode.upper()} :: action graph "
+            f"{'ENABLED' if active else 'DISABLED'}"
+            + ("" if active else " (no /joint_states, no camera publish, Publish blocked)"))
+
+    def _sync_mode_ui(self):
+        if self._mode_label is not None:
+            self._mode_label.text = self._mode_text()
+            self._mode_label.style = {
+                "color": 0xFF33CC33 if self._mode == "real" else 0xFFFF6622
+            }
+        if self._btn_publish is not None:
+            self._btn_publish.enabled = (self._mode == "real") and not self._pub_runner.running
 
     def _build_panel_generate(self):
         ui = self._ui
@@ -941,6 +1016,11 @@ class PipelineWindow:
     # Publish panel callbacks
     # ------------------------------------------------------------------
     def _on_publish(self):
+        if self._mode != "real":
+            self._append_log(
+                "[publish] BLOCKED — Publish requires REAL mode (live ROS robot). "
+                "Switch the Run mode dropdown to 'real' first.")
+            return
         if self._pub_runner.running:
             self._append_log("[publish] already running")
             return
@@ -1052,10 +1132,15 @@ def main():
         chain=chain,
         graph_path=graph_path,
         default_object=(args.object or "sample"),
+        initial_mode=args.mode,
     )
 
     simulation_context.initialize_physics()
     simulation_context.play()
+
+    # Apply the initial mode now that the graph exists and playback has started:
+    # default sim → graph tick OFF from frame 0 (no /joint_states, no publish).
+    window.apply_mode(args.mode)
 
     last_t = None
     import time as _time
