@@ -29,3 +29,6 @@ Collected_*/
 
 # Capture videos (large binary, do not version)
 data/**/video*/
+
+# reorient_mesh.py backups
+*.obj.bak

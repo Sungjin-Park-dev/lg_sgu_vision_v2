@@ -1155,10 +1155,29 @@ def main():
                         help=f"EE arc-length resample spacing in meters (default: {DEFAULT_SPACING_M})")
     parser.add_argument("--output-suffix", type=str, default="dp",
                         help="Output file suffix (default: dp)")
+    parser.add_argument("--object-position", type=float, nargs=3, default=None,
+                        metavar=("X", "Y", "Z"),
+                        help="Override target object position in robot-base frame (meters). "
+                             "If omitted, config.TARGET_OBJECT['position'] is used.")
+    parser.add_argument("--object-quat", type=float, nargs=4, default=None,
+                        metavar=("W", "X", "Y", "Z"),
+                        help="Override target object orientation quaternion (w x y z). "
+                             "If omitted, config.TARGET_OBJECT['rotation'] is used.")
     args = parser.parse_args()
 
     if args.spacing <= 0.0:
         parser.error("--spacing must be > 0")
+
+    # Object pose override (e.g. moved via the Isaac Sim viewport gizmo). Mutating
+    # config.TARGET_OBJECT in place propagates to build_camera_poses (local→world EE
+    # pose transform) and build_collision_world (mesh placement), which read it at
+    # call time. Safe because this script runs as a one-shot subprocess.
+    if args.object_position is not None:
+        config.TARGET_OBJECT["position"] = np.array(args.object_position, dtype=np.float64)
+        print(f"  Object position override (robot frame): {args.object_position}")
+    if args.object_quat is not None:
+        config.TARGET_OBJECT["rotation"] = np.array(args.object_quat, dtype=np.float64)
+        print(f"  Object rotation override (w,x,y,z): {args.object_quat}")
 
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")

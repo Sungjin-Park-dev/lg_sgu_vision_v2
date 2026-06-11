@@ -68,10 +68,13 @@ MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 # 따라서 robot frame z = world z - 0.805.
 
 # 대상 객체 설정 — visual: world (-0.1, 1.1, 0.795), robot frame z = 0.795-0.805 = -0.010
+# rotation = identity: 물체 방향은 config가 아니라 **메시에 베이크**한다(prep/reorient_mesh.py).
+# 그래야 viser(로컬 프레임)와 Isaac(월드 프레임)이 회전 차이 없이 동일하게 보임.
+# (이전 [0.7071,0,0,0.7071]은 순수 z-yaw였음 → identity로 바꿔도 bottom 필터는 불변, sample은 90° yaw만 풀림.)
 TARGET_OBJECT = {
     "name": "target_object",
     "position": np.array([-0.1, 1.1, -0.010], dtype=np.float64),
-    "rotation": np.array([0.7071, 0.0, 0.0, 0.7071], dtype=np.float64),  # 쿼터니언: w, x, y, z
+    "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),  # 쿼터니언: w, x, y, z (identity)
 }
 
 # 테이블 직육면체 설정 — thor_table.usd 측정값 매칭

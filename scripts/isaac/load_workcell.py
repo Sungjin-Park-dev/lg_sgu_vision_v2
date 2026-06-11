@@ -83,7 +83,7 @@ MOUNT_XY_SCALE = 2.0
 # old table top z = -0.07 → object center가 table top + 0.165m
 # 새 table top = 0.630 → 새 object z = 0.630 + 0.165 = 0.795
 TARGET_OBJECT_POSITION = np.array([-0.1, 1.1, 0.795])
-TARGET_OBJECT_ROTATION = np.array([0.7071, 0.0, 0.0, 0.7071])  # w, x, y, z
+TARGET_OBJECT_ROTATION = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z identity (방향은 메시에 베이크)
 
 # Environment USD 위치 — robot이 환경 내 어디에 서 있을지를 결정
 ENV_OFFSET = np.array([2.0, 0.0, 0.0])

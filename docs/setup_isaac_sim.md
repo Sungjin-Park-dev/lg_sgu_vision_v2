@@ -132,6 +132,64 @@ Articulation root: /World/UR20/base_link    ← 또는 비슷한 경로
 
 ---
 
+## pipeline_ui.py — 물체 선택·이동·궤적 생성/테스트
+
+`joint_control.py`와 같은 워크셀을 띄우고, Omni.UI 3패널(Generate / Preview / Publish)로
+**물체를 고르고, 뷰포트 기즈모로 옮긴 뒤, 그 위치에서 궤적을 생성·미리보기**한다.
+
+```bash
+uv run scripts/isaac/pipeline_ui.py --object sample
+```
+
+### 워크플로
+
+1. **물체 선택** — Generate 패널 상단 `Object` 드롭다운에서 선택 → `Load Object`.
+   `/World/target_object` prim이 기본 pose로 (재)생성되고 `--object` 필드가 동기화된다.
+2. **위치 변경** — 뷰포트에서 물체 **루트 prim**(`/World/target_object`)을 선택하고
+   `W`(이동)/`E`(회전) 기즈모로 드래그. (Stage 트리에서 루트를 선택하면 확실하다.)
+3. **궤적 생성** — `Generate Trajectory`. 물체의 현재 월드 pose를 읽어 robot frame으로 변환
+   (`z -= 0.805`) 후 `plan_trajectory.py`에 `--object-position`/`--object-quat`로 전달.
+   stage에 물체가 없으면 생성을 막고 안내한다(stale pose 방지).
+4. **테스트** — Preview 패널 `Load & Preview` → `Play`. ghost UR20가 옮긴 물체를 향해
+   검사 궤적을 재생한다.
+
+### sample 외 물체 (source.usd 선행 변환)
+
+드롭다운은 `source.obj`가 있는 물체를 모두 보여주지만, 로드에는 `source.usd`가 필요하다.
+`sample`만 기본 제공되므로 다른 물체는 1회 변환한다(`omni.kit.asset_converter`):
+
+```bash
+uv run scripts/isaac/usd/build_object_usd.py --object curved_structure
+```
+
+### 방향 보정 (STP→OBJ 회전 베이크)
+
+**방향 규칙**: `config.TARGET_OBJECT["rotation"] = identity`. 즉 config는 회전을 적용하지 않고,
+**물체 방향은 전부 메시(`source.obj`)에 베이크**한다. 그래야 **viser(로컬 프레임)와
+Isaac(월드 프레임)이 회전 차이 없이 동일**하게 보인다("그냥 올리면 똑바로").
+
+STP→OBJ 변환 시 메시에 박힌 이상한 방향은 `normalize_mesh.py`(스케일·재중심만)로는 안 고쳐진다.
+Isaac에서 똑바로 안 서면:
+
+1. UI에서 물체 로드 → 뷰포트에서 `E`(회전) 기즈모로 똑바로 세운다.
+2. `Log Pose` 버튼 → 로그의 `--world-target-quat W X Y Z` 줄을 복사.
+3. 베이크: `uv run scripts/prep/reorient_mesh.py --object {obj} --world-target-quat W X Y Z`
+   (config가 identity라 target을 그대로 베이크). 단순 90° 뒤집기는 `--euler -90 0 0`도 가능.
+4. `uv run scripts/isaac/usd/build_object_usd.py --object {obj} --force` → source.usd 재생성.
+5. **viewpoint 재생성**(메시가 바뀌었으므로) → UI 재시작 → 기본 로드부터 똑바로 + viser와 동일.
+
+> **sample**: 이전 90°는 순수 z-yaw였어서 identity로 바꿔도 **똑바로 선 채 90°만 풀림**.
+> 기존 viewpoints는 그대로 유효(z회전 불변), trajectory만 재계획하면 됨. 특정 yaw로 두고
+> 싶으면 sample 메시도 같은 방식으로 베이크(단, `data/sample` 파일이 root 소유면 chown 필요).
+
+### 한계
+
+- **viewpoints.h5는 mesh-local** → 평행이동은 재계획만으로 충분. 단, `generate_viewpoints`의
+  bottom-facing 필터가 저장 전 회전을 반영하므로 **큰 회전은 viewpoint 재생성 권장**.
+- cuRobo 충돌월드의 `support` 받침대는 원위치 고정 → **테이블 위 소폭 이동 범위**에서 사용.
+
+---
+
 ## 동시 실행 흐름
 
 ### Mock hardware + Isaac Sim 시각화

@@ -15,7 +15,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PATH = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.usd"
@@ -44,8 +44,40 @@ def main():
         raise SystemExit(f"Cannot open {args.path}")
 
     print(f"Inspecting: {args.path}")
+    # Stage frame metadata — the usual culprit when a converted asset spawns rotated.
+    print(f"upAxis:         {UsdGeom.GetStageUpAxis(stage)}")
+    print(f"metersPerUnit:  {UsdGeom.GetStageMetersPerUnit(stage)}")
     default = stage.GetDefaultPrim()
-    print(f"Default prim: {default.GetPath() if default else '(none)'}\n")
+    print(f"Default prim: {default.GetPath() if default else '(none)'}")
+    if default:
+        xf = UsdGeom.Xformable(default)
+        ops = xf.GetOrderedXformOps()
+        if ops:
+            print("  default prim xformOps:")
+            for op in ops:
+                print(f"    {op.GetOpName():28s} = {op.Get()}")
+        else:
+            print("  default prim xformOps: (none — clean)")
+    print()
+
+    # 0. Every prim carrying a non-identity xformOp — finds rotations hiding in
+    #    child Xforms (the usual reason a converted asset spawns rotated).
+    print("=== prims with xformOps ===")
+    any_op = False
+    for prim in stage.Traverse():
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            continue
+        ops = xf.GetOrderedXformOps()
+        if not ops:
+            continue
+        any_op = True
+        print(f"  {prim.GetPath()}  [{prim.GetTypeName()}]")
+        for op in ops:
+            print(f"      {op.GetOpName():26s} = {op.Get()}")
+    if not any_op:
+        print("  (none anywhere — fully clean)")
+    print()
 
     # 1. Regular traverse (excludes instance masters, inactive, abstract)
     dump("stage.Traverse()", count_types(stage.Traverse()))

@@ -61,6 +61,20 @@ CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 GHOST_ROOT_PATH = "/World/UR20_preview"
 GHOST_USD_NAME = "ur20_ghost.usd"  # built by scripts/isaac/usd/build_ghost_usd.py
 
+# Matches joint_control.load_target_object (/World/{config.TARGET_OBJECT['name']}).
+TARGET_OBJECT_PRIM = "/World/target_object"
+
+
+def discover_objects() -> list[str]:
+    """Object names that have data/{object}/mesh/source.obj — Object dropdown candidates.
+
+    Mirrors viser viewpoint_app.discover_objects. Listing by source.obj (not
+    source.usd) shows every object; load_target_object reports which ones still
+    need `build_object_usd.py` to produce a source.usd.
+    """
+    data_root = PROJECT_ROOT / "data"
+    return [p.parent.parent.name for p in sorted(data_root.glob("*/mesh/source.obj"))]
+
 
 # =============================================================================
 # Preview ghost — references a pre-built physics-free ghost USD (cyan-tinted,
@@ -562,6 +576,12 @@ class PipelineWindow:
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
+        self._objects = discover_objects()
+        if default_object and default_object not in self._objects:
+            self._objects.insert(0, default_object)
+        if not self._objects:
+            self._objects = [default_object or "sample"]
+        self._object_combo = None
         self._build()
 
     # ------------------------------------------------------------------
@@ -599,6 +619,16 @@ class PipelineWindow:
         ui = self._ui
         with ui.CollapsableFrame("A. Generate Trajectory (plan_trajectory.py)", height=0):
             with ui.VStack(spacing=4):
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Object", width=80)
+                    default_idx = self._objects.index(self._default_object) \
+                        if self._default_object in self._objects else 0
+                    self._object_combo = ui.ComboBox(default_idx, *self._objects)
+                    ui.Button("Load Object", width=110, clicked_fn=self._on_load_object)
+                    ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose)
+                ui.Label("Select object root in viewport → W (move) / E (rotate) gizmo → Generate. "
+                         "Big rotations need viewpoint regen (h5 is rotation-specific).",
+                         height=28, word_wrap=True)
                 self._fields["object"]            = self._row("--object",              self._default_object)
                 self._fields["num_viewpoints"]    = self._row("--num-viewpoints",      124)
                 self._fields["viewpoints"]        = self._row("--viewpoints (h5)",     "")
@@ -670,6 +700,62 @@ class PipelineWindow:
             return m.get_value_as_float()
         raise TypeError(kind)
 
+    def _on_load_object(self):
+        """Swap /World/target_object to the dropdown selection at its default pose."""
+        idx = self._object_combo.model.get_item_value_model().get_value_as_int()
+        obj = self._objects[idx]
+        usd_path = PROJECT_ROOT / "data" / obj / "mesh" / "source.usd"
+        if not usd_path.exists():
+            self._append_log(
+                f"[object] '{obj}' has no source.usd — build it once, then retry:\n"
+                f"  uv run scripts/isaac/usd/build_object_usd.py --object {obj}")
+            return
+        self._append_log(f"[object] loading '{obj}' ...")
+        try:
+            urctl.load_target_object(obj)
+        except Exception as e:
+            self._append_log(f"[object] load failed: {e}")
+            return
+        self._fields["object"].set_value(obj)
+        self._append_log(
+            f"[object] loaded '{obj}'. Move it with the viewport gizmo (W/E), then Generate.")
+
+    def _on_log_object_pose(self):
+        """Print the current object world orientation — feed it to reorient_mesh.py."""
+        pose = self._read_object_world_pose()
+        if pose is None:
+            self._append_log("[object] no target prim on stage — Load Object first.")
+            return
+        (rx, ry, rz), (w, x, y, z) = pose
+        obj = self._get_field("object", str).strip() or "<name>"
+        self._append_log(
+            f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
+            f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}  "
+            f"(world z = {rz + urctl.MOUNT_HEIGHT:.4f})\n"
+            f"[object] bake upright: uv run scripts/prep/reorient_mesh.py --object {obj} "
+            f"--world-target-quat {w:.6f} {x:.6f} {y:.6f} {z:.6f}")
+
+    def _read_object_world_pose(self):
+        """World pose of /World/target_object → (pos_robot (x,y,z), quat (w,x,y,z)) or None.
+
+        Reads the live transform (gizmo edits included) and converts world→robot
+        frame: x/y and rotation unchanged, z -= MOUNT_HEIGHT (config.py frame note).
+        """
+        import omni.usd
+        from pxr import UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not prim or not prim.IsValid():
+            return None
+        m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0)
+        t = m.ExtractTranslation()
+        q = m.ExtractRotationQuat()  # Gf.Quatd, (w,x,y,z) via GetReal/GetImaginary
+        w = float(q.GetReal())
+        x, y, z = (float(v) for v in q.GetImaginary())
+        pos_robot = (float(t[0]), float(t[1]), float(t[2]) - urctl.MOUNT_HEIGHT)
+        return pos_robot, (w, x, y, z)
+
     def _on_generate(self):
         if self._gen_runner.running:
             self._append_log("[generate] already running")
@@ -681,6 +767,22 @@ class PipelineWindow:
         spacing     = self._get_field("spacing", float)
         suffix      = self._get_field("output_suffix", str).strip() or "dp"
 
+        # Read the object's live world pose (gizmo-moved) and pass it to the
+        # planner. No silent fallback: if there's no target prim, abort so we
+        # never plan against a stale config pose.
+        pose = self._read_object_world_pose()
+        if pose is None:
+            self._append_log(
+                "[generate] no target object on stage — pick one in the Object "
+                "dropdown and click 'Load Object' first.")
+            return
+        pos_robot, quat_wxyz = pose
+
+        if viewpoints and obj and obj not in viewpoints:
+            self._append_log(
+                f"[generate] warning: --viewpoints path doesn't mention object '{obj}' "
+                "— make sure the h5 matches the selected object.")
+
         cmd = [
             self._uv, "run", "scripts/pipeline/plan_trajectory.py",
             "--object", obj,
@@ -690,6 +792,8 @@ class PipelineWindow:
         ]
         if viewpoints:
             cmd += ["--viewpoints", viewpoints]
+        cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
+        cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
 
         self._btn_generate.enabled = False
         self._append_log("[generate] $ " + " ".join(cmd))

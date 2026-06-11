@@ -153,7 +153,12 @@ def load_workcell(usd_path: Path) -> None:
 
 
 def load_target_object(object_name: str | None) -> None:
-    """Place target object USD (config.TARGET_OBJECT) on the table top."""
+    """Place target object USD (config.TARGET_OBJECT) on the table top.
+
+    Re-callable: if the target prim already exists it is deleted first, so the
+    Pipeline UI can swap objects at runtime. The visual is placed at the default
+    world pose; the user repositions it afterward with the viewport gizmo.
+    """
     if object_name is None:
         return
 
@@ -165,17 +170,39 @@ def load_target_object(object_name: str | None) -> None:
 
     usd_path = _config.get_mesh_path(object_name, filename="source.usd")
     if not usd_path.exists():
-        carb.log_warn(f"Target mesh USD not found: {usd_path}")
+        carb.log_warn(
+            f"Target mesh USD not found: {usd_path}\n"
+            f"Build it once: uv run scripts/isaac/usd/build_object_usd.py --object {object_name}"
+        )
         return
 
-    prims.create_prim(
-        prim_path=f"/World/{_config.TARGET_OBJECT['name']}",
-        prim_type="Xform",
-        usd_path=str(usd_path),
-        position=np.array([-0.1, 1.1, 0.795]),
-        orientation=_config.TARGET_OBJECT["rotation"],
-        scale=np.array([1.0, 1.0, 1.0]),
+    prim_path = f"/World/{_config.TARGET_OBJECT['name']}"
+    if prims.is_prim_path_valid(prim_path):
+        prims.delete_prim(prim_path)
+
+    # Reference the USD, then author the LOCAL transform directly via USD ops.
+    # We deliberately do NOT pass position/orientation/scale to create_prim:
+    # that path sets the *world* pose through XFormPrim, which composes through
+    # the physics/Fabric backend while the sim is playing. The boot-time load
+    # runs before simulation_context.play() (clean), but the UI "Load Object"
+    # button runs while playing → the object spawned with a wrong rotation.
+    # Authoring local USD ops is play-state independent, so boot and button
+    # loads are now identical. /World is at the origin, so local == world here.
+    prims.create_prim(prim_path=prim_path, prim_type="Xform", usd_path=str(usd_path))
+
+    import omni.usd
+    from pxr import Gf, UsdGeom
+
+    q = _config.TARGET_OBJECT["rotation"]  # (w, x, y, z)
+    M = Gf.Matrix4d()
+    M.SetTransform(
+        Gf.Rotation(Gf.Quatd(float(q[0]), float(q[1]), float(q[2]), float(q[3]))),
+        Gf.Vec3d(-0.1, 1.1, 0.795),
     )
+    stage = omni.usd.get_context().get_stage()
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
+    xf.ClearXformOpOrder()
+    xf.AddTransformOp().Set(M)
 
 
 def find_articulation_root() -> str:
