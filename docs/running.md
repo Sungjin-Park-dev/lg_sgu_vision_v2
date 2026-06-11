@@ -47,7 +47,7 @@ docker exec -it ros-jazzy bash
 uv run scripts/pipeline/generate_viewpoints.py --object sample
 
 # 재질 RGB 필터 + 옵션
-uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "170,163,158" \
+uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "0,255,0" \
     --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25
 ```
 
@@ -188,7 +188,7 @@ USD가 없으면 GUI URDF Importer로 먼저 변환. [setup_isaac_sim.md](setup_
 ```bash
 # 셸 C — 오프라인 계산
 uv run scripts/pipeline/generate_viewpoints.py --object sample \
-    --material-rgb "170,163,158" --cluster-method coacd+dbscan \
+    --material-rgb "0,255,0" --cluster-method coacd+dbscan \
     --normal-weight 0.05 --coacd-threshold 0.25
 uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124
 

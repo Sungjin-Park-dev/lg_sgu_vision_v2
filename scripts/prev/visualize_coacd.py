@@ -12,10 +12,10 @@ CoACD Convex Decomposition 시각화
     uv run scripts/prev/visualize_coacd.py --object sample --threshold 0.05
 
     # 재질 필터 (target mesh)
-    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "170,163,158"
+    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "0,255,0"
 
     # threshold 비교
-    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "170,163,158" --compare
+    uv run scripts/prev/visualize_coacd.py --object sample --material-rgb "0,255,0" --compare
 
     uv run scripts/prev/visualize_coacd.py --object glass --compare
 
@@ -181,7 +181,7 @@ def main():
     parser = argparse.ArgumentParser(description='CoACD Convex Decomposition 시각화')
     parser.add_argument('--object', type=str, required=True, help='오브젝트 이름')
     parser.add_argument('--material-rgb', type=str, default=None,
-                        help='Target material RGB (e.g. "170,163,158")')
+                        help='Target material RGB (e.g. "0,255,0")')
     parser.add_argument('--color-tolerance', type=float, default=5.0)
     parser.add_argument('--threshold', type=float, default=0.05,
                         help='CoACD concavity threshold (기본: 0.05)')

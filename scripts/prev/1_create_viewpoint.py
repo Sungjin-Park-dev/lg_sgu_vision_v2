@@ -13,7 +13,7 @@
     # 특정 재질만 선택하여 뷰포인트 생성
     omni_python scripts/1_create_viewpoint.py \
         --object sample \
-        --material-rgb "170,163,158" \
+        --material-rgb "0,255,0" \
         --visualize
 
     # 전체 메시에서 뷰포인트 생성

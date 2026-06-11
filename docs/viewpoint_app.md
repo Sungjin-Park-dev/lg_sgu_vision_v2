@@ -50,7 +50,7 @@ uv run scripts/viser/viewpoint_app.py --viewpoints data/sample/viewpoint/124/vie
 |----------|------|------|------|
 | `surface spacing (mm)` | 5–40 | 12 | **[surface] 뷰포인트 밀도** (12mm≈60% 오버랩). 클수록 개수↓ (`count ≈ area/(2·spacing²)`, 제곱 반비례라 조금만 키워도 확 줄어듦) |
 | `coacd_threshold` | 0.05–0.5 | 0.25 | |
-| `max span (mm)` | 20–150 | 80 | **[agglomerative] 클러스터 최대 지름**. 작게 → 클러스터 많고 촘촘, 크게 → 적고 넓음. 지름 ≤ 이 값 보장 |
+| `max span (mm)` | 20–150 | 100 | **[agglomerative] 클러스터 최대 지름**. 작게 → 클러스터 많고 촘촘, 크게 → 적고 넓음. 지름 ≤ 이 값 보장 |
 | `eps (mm)` | 5–80 | 1.5×spacing | **[dbscan]** spacing 바꾸면 자동으로 `1.5×spacing`으로 따라감(surface). 슬라이더는 유지 → 수동 조절 가능, 다음 spacing 변경 시 다시 기본값. grid 모드에선 자동 추적 안 함 |
 | `min_samples` | 1–5 | 2 | [dbscan] |
 | `normal_weight` | 0.0–0.2 | 0.05 | [dbscan]; agglomerative distance 모드는 순수 위치 |
@@ -88,8 +88,9 @@ sub-cluster) → `plan_trajectory.py`가 바로 소비. (대상 디렉토리가 
   (CoACD 없이)은 CLI 사용.
 - **Sampling = surface/grid 토글** (순서는 자동 페어링). surface+zigzag 같은 교차 조합은
   CLI(`--sampling-mode`/`--ordering-mode`)로.
-- **material 필터 제외** — 전체 메시로 생성. `sample`은 비대상(초록) 영역도 포함됨
-  (정확히 하려면 CLI `--material-rgb "170,163,158"`, 또는 추후 material 드롭다운 추가).
+- **material 필터 = 오브젝트별 하드코딩** (`OBJECT_TARGET_MATERIAL`). 등록된 오브젝트는 그 재질
+  면만 샘플링하고, 미등록은 전체 메시. 예: `sample` → 초록(0,255,0) = 검사대상만(비대상 회색 제외).
+  표시 메시는 전체(맥락용), viewpoint만 대상 영역에 생성. 다른 재질을 쓰려면 CLI `--material-rgb`.
 - **간격(grid spacing / surface spacing)·bottom 필터**는 기본값 고정.
 
 ## h5 의존성 (Existing 로드)

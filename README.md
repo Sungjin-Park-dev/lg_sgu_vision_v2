@@ -44,7 +44,7 @@ uv pip install "./curobo[cu12-torch]"
 ```bash
 uv run scripts/pipeline/generate_viewpoints.py \
     --object sample \
-    --material-rgb "170,163,158" \
+    --material-rgb "0,255,0" \
     --cluster-method coacd+dbscan \
     --normal-weight 0.05 \
     --coacd-threshold 0.25 \

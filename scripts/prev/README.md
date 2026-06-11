@@ -31,7 +31,7 @@ cd /curobo/gtsp_trajectory
 ```bash
 # 1단계: 뷰포인트 생성
 omni_python scripts/1_create_viewpoint.py \
-    --object sample --material-rgb "170,163,158"
+    --object sample --material-rgb "0,255,0"
 
 # 2단계: 궤적 생성
 omni_python scripts/2_generate_trajectory.py \

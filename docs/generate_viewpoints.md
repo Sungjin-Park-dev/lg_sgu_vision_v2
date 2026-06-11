@@ -39,7 +39,7 @@ OBJ 로드 → (material RGB 필터)
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
 | `--object` | (필수) | 오브젝트 이름 |
-| `--material-rgb "R,G,B"` | None | 재질 RGB 필터 (예: `"170,163,158"`) |
+| `--material-rgb "R,G,B"` | None | 재질 RGB 필터 (예: `"0,255,0"`) |
 | `--color-tolerance` | 5.0 | RGB 매칭 허용 오차 |
 | `--row-spacing` | FOV_HEIGHT × (1-overlap) mm | [grid] 행 간격 |
 | `--col-spacing` | FOV_WIDTH × (1-overlap) mm | [grid] 열 간격 |

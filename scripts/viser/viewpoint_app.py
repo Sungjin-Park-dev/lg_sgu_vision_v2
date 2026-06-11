@@ -58,6 +58,14 @@ MESH_RGB = (180, 180, 180)
 
 EPS_SPACING_FACTOR = 1.5  # surface 모드 기본 eps = factor × spacing(mm)
 
+# 오브젝트별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
+# (CLI의 --material-rgb 와 동일 경로. 미지정 오브젝트는 전체 메시.)
+OBJECT_TARGET_MATERIAL = {
+    # 컨벤션: 초록(0,255,0) = 검사대상. 회색(170,163,158)은 비대상이라 제외.
+    # (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일. CLI --material-rgb "0,255,0" 와 동일.)
+    "sample": "0,255,0",
+}
+
 
 @dataclass(frozen=True)
 class ViewpointEntry:
@@ -254,7 +262,7 @@ class Studio:
                 "Sub-cluster", options=["agglomerative", "dbscan"], initial_value="agglomerative")
             # agglomerative 노브: 클러스터 최대 지름(mm). complete-linkage로 지름 ≤ 값 보장
             # → 멀리 떨어진 viewpoint가 한 클러스터로 묶이는 것 방지.
-            self.sl_maxspan = g.add_slider("max span (mm)", min=20, max=150, step=5, initial_value=80)
+            self.sl_maxspan = g.add_slider("max span (mm)", min=20, max=150, step=5, initial_value=100)
             # dbscan 노브 (eps는 surface spacing을 자동 추적)
             self.sl_eps = g.add_slider(
                 "eps (mm)", min=5, max=80, step=1,
@@ -360,7 +368,8 @@ class Studio:
             obj = p["obj"]
             sm = p["sampling_mode"]
             if obj not in self.mesh_cache:
-                self.mesh_cache[obj] = load_meshes(obj, None)  # entire mesh (no material filter)
+                mat = OBJECT_TARGET_MATERIAL.get(obj)  # 예: sample → 초록만. 미지정 시 전체 메시
+                self.mesh_cache[obj] = load_meshes(obj, mat)
             full_mesh, target_mesh, input_path = self.mesh_cache[obj]
 
             sp = p.get("surface_spacing_mm") if sm == "surface" else None
