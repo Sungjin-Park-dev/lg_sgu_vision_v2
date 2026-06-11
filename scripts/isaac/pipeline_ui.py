@@ -550,6 +550,7 @@ class PipelineWindow:
         self._log_lines: list[str] = []
         self._log_model = ui.SimpleStringModel("")
         self._csv_path_model = ui.SimpleStringModel("")
+        self._h5_path_model = ui.SimpleStringModel("")
 
         self._gen_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
@@ -579,6 +580,9 @@ class PipelineWindow:
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
+        # Object currently loaded in the scene (gizmo target). Tracked so Generate
+        # can validate the picked h5 against it and warn on mismatch.
+        self._current_object = default_object
         self._objects = discover_objects()
         if default_object and default_object not in self._objects:
             self._objects.insert(0, default_object)
@@ -701,14 +705,18 @@ class PipelineWindow:
                     self._object_combo = ui.ComboBox(default_idx, *self._objects)
                     ui.Button("Load Object", width=110, clicked_fn=self._on_load_object)
                     ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose)
-                ui.Label("Select object root in viewport → W (move) / E (rotate) gizmo → Generate. "
-                         "Big rotations need viewpoint regen (h5 is rotation-specific).",
-                         height=28, word_wrap=True)
-                self._fields["object"]            = self._row("--object",              self._default_object)
-                self._fields["num_viewpoints"]    = self._row("--num-viewpoints",      124)
-                self._fields["viewpoints"]        = self._row("--viewpoints (h5)",     "")
-                self._fields["spacing"]           = self._row("--spacing",             0.01)
-                self._fields["output_suffix"]     = self._row("--output-suffix",       "dp")
+                ui.Label("Load the object, move it with the viewport gizmo (W/E), then pick its "
+                         "viewpoints .h5 and Generate. Object name + viewpoint count are read "
+                         "from the h5 path; the object's live pose is read from the scene.",
+                         height=40, word_wrap=True)
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Viewpoints (h5)", width=110)
+                    ui.StringField(model=self._h5_path_model)
+                    ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5)
+                with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
+                    with ui.VStack(spacing=4):
+                        self._fields["spacing"]       = self._row("--spacing",       0.01)
+                        self._fields["output_suffix"] = self._row("--output-suffix", "dp")
                 with ui.HStack(height=28, spacing=6):
                     self._btn_generate = ui.Button("Generate Trajectory", clicked_fn=self._on_generate)
                     self._btn_cancel_gen = ui.Button("Cancel", clicked_fn=self._on_cancel_generate)
@@ -791,7 +799,7 @@ class PipelineWindow:
         except Exception as e:
             self._append_log(f"[object] load failed: {e}")
             return
-        self._fields["object"].set_value(obj)
+        self._current_object = obj
         self._append_log(
             f"[object] loaded '{obj}'. Move it with the viewport gizmo (W/E), then Generate.")
 
@@ -802,7 +810,7 @@ class PipelineWindow:
             self._append_log("[object] no target prim on stage — Load Object first.")
             return
         (rx, ry, rz), (w, x, y, z) = pose
-        obj = self._get_field("object", str).strip() or "<name>"
+        obj = (self._current_object or "").strip() or "<name>"
         self._append_log(
             f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
             f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}  "
@@ -831,16 +839,58 @@ class PipelineWindow:
         pos_robot = (float(t[0]), float(t[1]), float(t[2]) - urctl.MOUNT_HEIGHT)
         return pos_robot, (w, x, y, z)
 
+    @staticmethod
+    def _parse_h5_meta(h5_path: str):
+        """Derive (object, num_viewpoints) from a standard viewpoints path
+        ``data/{object}/viewpoint/{N}/file.h5``. Either may be None if the path
+        is off-layout."""
+        parts = Path(h5_path).parts
+        obj = None
+        num = None
+        if "data" in parts:
+            i = parts.index("data")
+            if i + 1 < len(parts):
+                obj = parts[i + 1]
+        if "viewpoint" in parts:
+            j = parts.index("viewpoint")
+            if j + 1 < len(parts) and parts[j + 1].isdigit():
+                num = int(parts[j + 1])
+        return obj, num
+
     def _on_generate(self):
         if self._gen_runner.running:
             self._append_log("[generate] already running")
             return
 
-        obj         = self._get_field("object", str).strip()
-        n_vp        = self._get_field("num_viewpoints", int)
-        viewpoints  = self._get_field("viewpoints", str).strip()
-        spacing     = self._get_field("spacing", float)
-        suffix      = self._get_field("output_suffix", str).strip() or "dp"
+        # Single input: the viewpoints .h5. Object name + viewpoint count come
+        # from its standard path (data/{object}/viewpoint/{N}/...); the object's
+        # live pose comes from the scene gizmo.
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[generate] pick a viewpoints .h5 first (Browse...).")
+            return
+        if not Path(h5).exists():
+            self._append_log(f"[generate] h5 not found: {h5}")
+            return
+
+        obj, n_vp = self._parse_h5_meta(h5)
+        if obj is None:
+            obj = (self._current_object or "").strip()
+            self._append_log(
+                f"[generate] couldn't read object from h5 path; using loaded object '{obj}'.")
+        if n_vp is None:
+            n_vp = 124
+            self._append_log(
+                f"[generate] couldn't read viewpoint count from h5 path; defaulting "
+                f"--num-viewpoints {n_vp} (affects output dir only).")
+        if self._current_object and obj and obj != self._current_object:
+            self._append_log(
+                f"[generate] WARNING: h5 object '{obj}' != loaded scene object "
+                f"'{self._current_object}'. Pose & collision mesh come from the SCENE "
+                "object — load the matching object or pick the matching h5.")
+
+        spacing = self._get_field("spacing", float)
+        suffix  = self._get_field("output_suffix", str).strip() or "dp"
 
         # Read the object's live world pose (gizmo-moved) and pass it to the
         # planner. No silent fallback: if there's no target prim, abort so we
@@ -853,20 +903,14 @@ class PipelineWindow:
             return
         pos_robot, quat_wxyz = pose
 
-        if viewpoints and obj and obj not in viewpoints:
-            self._append_log(
-                f"[generate] warning: --viewpoints path doesn't mention object '{obj}' "
-                "— make sure the h5 matches the selected object.")
-
         cmd = [
             self._uv, "run", "scripts/pipeline/plan_trajectory.py",
             "--object", obj,
             "--num-viewpoints", str(n_vp),
+            "--viewpoints", h5,
             "--spacing", str(spacing),
             "--output-suffix", suffix,
         ]
-        if viewpoints:
-            cmd += ["--viewpoints", viewpoints]
         cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
         cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
 
@@ -897,27 +941,11 @@ class PipelineWindow:
     # ------------------------------------------------------------------
     # File picker (shared by panels B and C)
     # ------------------------------------------------------------------
-    def _on_browse_csv(self):
-        """Open Omni file picker pre-rooted at data/{object}/trajectory/."""
-        # Pick a sensible starting directory: data/{object}/trajectory/{N}/ if it
-        # exists, else data/{object}/trajectory/, else data/, else PROJECT_ROOT.
-        current = self._csv_path_model.get_value_as_string().strip()
-        if current and Path(current).parent.is_dir():
-            start_dir = str(Path(current).parent)
-        else:
-            obj = self._get_field("object", str).strip() or "sample"
-            n_vp = self._get_field("num_viewpoints", int)
-            candidates = [
-                PROJECT_ROOT / "data" / obj / "trajectory" / str(n_vp),
-                PROJECT_ROOT / "data" / obj / "trajectory",
-                PROJECT_ROOT / "data",
-                PROJECT_ROOT,
-            ]
-            start_dir = str(next((p for p in candidates if p.is_dir()), PROJECT_ROOT))
-
+    def _open_file_picker(self, title: str, model, item_label: str, ext: str, start_dir: str):
+        """Open the Omni file picker filtered to `ext`, writing the pick into `model`."""
         def _on_apply(filename: str, dirname: str):
             full = os.path.join(dirname, filename) if filename else dirname
-            self._csv_path_model.set_value(full)
+            model.set_value(full)
             self._append_log(f"[browse] selected: {full}")
             try:
                 dialog.hide()
@@ -938,17 +966,40 @@ class PipelineWindow:
 
         try:
             dialog = FilePickerDialog(
-                "Select trajectory CSV",
+                title,
                 apply_button_label="Select",
                 click_apply_handler=_on_apply,
                 click_cancel_handler=_on_cancel,
-                item_filter_options=["CSV (*.csv)", "All Files (*.*)"],
-                item_filter_fn=lambda item: item.is_folder or item.path.endswith(".csv"),
+                item_filter_options=[item_label, "All Files (*.*)"],
+                item_filter_fn=lambda item: item.is_folder or item.path.endswith(ext),
                 current_directory=start_dir,
             )
             dialog.show()
         except Exception as e:
             self._append_log(f"[browse] picker open failed: {e}")
+
+    def _start_dir_for(self, model, *subdirs: str) -> str:
+        """Sensible picker start dir: the model's current parent if valid, else
+        the first existing of data/{object}/<subdirs...>, data/, PROJECT_ROOT."""
+        current = model.get_value_as_string().strip()
+        if current and Path(current).parent.is_dir():
+            return str(Path(current).parent)
+        obj = (self._current_object or "sample").strip() or "sample"
+        candidates = [PROJECT_ROOT / "data" / obj / sd for sd in subdirs]
+        candidates += [PROJECT_ROOT / "data", PROJECT_ROOT]
+        return str(next((p for p in candidates if p.is_dir()), PROJECT_ROOT))
+
+    def _on_browse_csv(self):
+        """Open Omni file picker pre-rooted at data/{object}/trajectory/."""
+        start_dir = self._start_dir_for(self._csv_path_model, "trajectory")
+        self._open_file_picker("Select trajectory CSV", self._csv_path_model,
+                               "CSV (*.csv)", ".csv", start_dir)
+
+    def _on_browse_h5(self):
+        """Open Omni file picker pre-rooted at data/{object}/viewpoint/."""
+        start_dir = self._start_dir_for(self._h5_path_model, "viewpoint")
+        self._open_file_picker("Select viewpoints .h5", self._h5_path_model,
+                               "HDF5 (*.h5)", ".h5", start_dir)
 
     # ------------------------------------------------------------------
     # Preview panel callbacks
