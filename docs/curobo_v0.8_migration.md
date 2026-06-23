@@ -2,7 +2,7 @@
 
 cuRobo v0.8.0 은 flat / inheritance‑free 아키텍처로 대대적으로 리팩토링되었고
 CHANGELOG 에 *"Major refactor breaks most existing api."* 라고 명시되어 있다.
-`scripts/pipeline/plan_trajectory.py` 가 사용하던 옛 진입점 (`curobo.wrap.reacher.*`,
+`scripts/core/plan_trajectory.py` 가 사용하던 옛 진입점 (`curobo.wrap.reacher.*`,
 `curobo.wrap.model.*`, `curobo.geom.types.WorldConfig`,
 `curobo.types.base.TensorDeviceType`, `curobo.types.robot.JointState`,
 `curobo.util_file.*`) 은 모두 사라졌다. 본 문서는 그 마이그레이션의 결과를 정리한다.
@@ -193,7 +193,7 @@ Phase 5: 287 waypoints, collisions=0
 
 ## 영향받는 파일
 
-- `scripts/pipeline/plan_trajectory.py` — 본 마이그레이션의 유일한 코드 변경 대상
+- `scripts/core/plan_trajectory.py` — 본 마이그레이션의 유일한 코드 변경 대상
 - `README.md` — cuRobo 설치 명령을 새 빌드 익스트라 (`./curobo[cu13-torch]`) 로 갱신
 - `data/sample/trajectory/124/trajectory_dp_s010.{csv,html,_anim.html}` — 새 API 로
   재생성된 참고 출력

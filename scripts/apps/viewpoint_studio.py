@@ -20,8 +20,8 @@ grid/bottom-filter tuning are not exposed (entire mesh, default grid). Found
 parameters can be persisted with **Save** for the downstream plan_trajectory step.
 
 Usage:
-    uv run scripts/viser/viewpoint_app.py --object sample
-    uv run scripts/viser/viewpoint_app.py --viewpoints data/sample/viewpoint/124/viewpoints.h5
+    uv run scripts/apps/viewpoint_studio.py --object sample
+    uv run scripts/apps/viewpoint_studio.py --viewpoints data/sample/viewpoint/124/viewpoints.h5
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # -> scripts/
 from common import config
 from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
-from pipeline.generate_viewpoints import (
+from core.generate_viewpoints import (
     load_meshes, prepare_grid, cluster_coacd, cluster_and_order,
     save_viewpoints_hdf5, ViewpointGenParams,
 )

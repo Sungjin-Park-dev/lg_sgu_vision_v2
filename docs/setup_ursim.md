@@ -135,7 +135,7 @@ Robot connected to reverse interface
 URSim 또는 mock hardware 어느 쪽이든 사용 가능:
 
 ```bash
-uv run scripts/ros2/move_to_start.py
+uv run scripts/robot/move_to_start.py
 ```
 
 목표 자세는 `scripts/common/config.py`의 `ROBOT_START_STATE` (radian 배열).
@@ -146,7 +146,7 @@ uv run scripts/ros2/move_to_start.py
 
 URSim 모드에서 `Position Tolerance` 위반(error_code=-4) 시:
 ```bash
-uv run scripts/ros2/move_to_start.py --duration 10 --max-vel 0.3
+uv run scripts/robot/move_to_start.py --duration 10 --max-vel 0.3
 ```
 
 천천히 이동시키면 controller가 트래킹 가능.
@@ -162,6 +162,6 @@ URSim 사용 시 동시에 띄우는 셸 구성:
 | **A** | `start_ursim.sh -m UR20` | URSim 컨테이너 (호스트 daemon에 띄움) |
 | **B** | `ur_control.launch.py ...` | ur_robot_driver |
 | **C** | `move_to_start.py`, `publish_trajectory.py` | 명령 전송 |
-| **D** | `joint_control.py` (Isaac Sim) | 시각화 — 옵션 |
+| **D** | `scene.py` (Isaac Sim) | 시각화 — 옵션 |
 
 각각 `docker exec -it ros-jazzy bash`로 별도 셸 진입.

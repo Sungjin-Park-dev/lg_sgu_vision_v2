@@ -11,7 +11,7 @@ UR20 비전 검사 파이프라인 실행 흐름. 환경 셋업은 [setup_docker
         ↓
 [3. 로봇 실행]       publish_trajectory.py  → ROS2 action goal
         ↓                                      ↑
-[4. 시각화 (선택)]   joint_control.py  └─ ur_robot_driver
+[4. 시각화 (선택)]   scene.py  └─ ur_robot_driver
                      (Isaac Sim)
 ```
 
@@ -44,10 +44,10 @@ docker exec -it ros-jazzy bash
 
 ```bash
 # 기본 (dbscan 클러스터링)
-uv run scripts/pipeline/generate_viewpoints.py --object sample
+uv run scripts/core/generate_viewpoints.py --object sample
 
 # 재질 RGB 필터 + 옵션
-uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "0,255,0" \
+uv run scripts/core/generate_viewpoints.py --object sample --material-rgb "0,255,0" \
     --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25
 ```
 
@@ -64,7 +64,7 @@ uv run scripts/pipeline/generate_viewpoints.py --object sample --material-rgb "0
 **셸 C** (venv + GPU 사용 — cuRobo):
 
 ```bash
-uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124
+uv run scripts/core/plan_trajectory.py --object sample --num-viewpoints 124
 ```
 
 옵션:
@@ -116,14 +116,14 @@ URSim은 별도 컨테이너로 띄움 + PolyScope에서 External Control 프로
 
 **셸 C**:
 ```bash
-uv run scripts/ros2/move_to_start.py
+uv run scripts/robot/move_to_start.py
 ```
 
 목표 자세: `scripts/common/config.py`의 `ROBOT_START_STATE`.
 
 기본값: `--duration 5.0`, `--max-vel 0.5`. tolerance 위반 시 더 천천히:
 ```bash
-uv run scripts/ros2/move_to_start.py --duration 10 --max-vel 0.3
+uv run scripts/robot/move_to_start.py --duration 10 --max-vel 0.3
 ```
 
 ### 3c. 궤적 전송
@@ -131,7 +131,7 @@ uv run scripts/ros2/move_to_start.py --duration 10 --max-vel 0.3
 **셸 C**:
 
 ```bash
-uv run scripts/pipeline/publish_trajectory.py \
+uv run scripts/core/publish_trajectory.py \
     --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
 ```
 
@@ -144,7 +144,7 @@ uv run scripts/pipeline/publish_trajectory.py \
 ### 3d. RViz 워크셀 마커 (선택)
 
 ```bash
-uv run scripts/ros2/publish_workcell_markers.py --object sample
+uv run scripts/robot/publish_workcell_markers.py --object sample
 ```
 
 `config.py`의 TABLE/WALLS/ROBOT_MOUNT/TARGET_OBJECT를 RViz에 마커로 표시.
@@ -156,7 +156,7 @@ uv run scripts/ros2/publish_workcell_markers.py --object sample
 **셸 B**:
 ```bash
 source /workspace/.venv/bin/activate
-uv run scripts/isaac/joint_control.py --object sample
+uv run scripts/isaac/scene.py --object sample
 ```
 
 - `--no-sync` — `uv sync`가 cuRobo path-install을 건드리지 않도록
@@ -187,10 +187,10 @@ USD가 없으면 GUI URDF Importer로 먼저 변환. [setup_isaac_sim.md](setup_
 
 ```bash
 # 셸 C — 오프라인 계산
-uv run scripts/pipeline/generate_viewpoints.py --object sample \
+uv run scripts/core/generate_viewpoints.py --object sample \
     --material-rgb "0,255,0" --cluster-method coacd+dbscan \
     --normal-weight 0.05 --coacd-threshold 0.25
-uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124
+uv run scripts/core/plan_trajectory.py --object sample --num-viewpoints 124
 
 # 셸 A — driver
 source /opt/ros/jazzy/setup.bash
@@ -200,13 +200,13 @@ ros2 launch ur_robot_driver ur_control.launch.py \
 # 셸 B — Isaac Sim 시각화 (선택)
 source /workspace/.venv/bin/activate
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-    scripts/isaac/joint_control.py --object sample
+    scripts/isaac/scene.py --object sample
 
 # 셸 C — 로봇 제어
 source /opt/ros/jazzy/setup.bash
-uv run scripts/ros2/publish_workcell_markers.py --object sample &
-uv run scripts/ros2/move_to_start.py
-uv run scripts/pipeline/publish_trajectory.py \
+uv run scripts/robot/publish_workcell_markers.py --object sample &
+uv run scripts/robot/move_to_start.py
+uv run scripts/core/publish_trajectory.py \
     --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
 ```
 

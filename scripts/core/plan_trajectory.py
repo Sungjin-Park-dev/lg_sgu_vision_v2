@@ -15,7 +15,7 @@ reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spa
     Phase 6: Time planning         — EE 선속도/각속도/joint 속도 제한 기반 continuous scan
 
 사용법:
-    uv run scripts/pipeline/plan_trajectory.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
+    uv run scripts/core/plan_trajectory.py --object sample --num-viewpoints 124 --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
 """
 
 import argparse

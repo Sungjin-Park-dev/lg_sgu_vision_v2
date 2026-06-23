@@ -23,7 +23,7 @@ Prerequisite — USD prepared at ur20_description/ur20/ur20.usd
 (generated via Isaac Sim's URDF Importer GUI with proper articulation root).
 
 Usage:
-    uv run scripts/isaac/joint_control.py --object sample
+    uv run scripts/isaac/scene.py --object sample
 
 Test with:
     ros2 topic pub /joint_states sensor_msgs/msg/JointState \
@@ -31,7 +31,7 @@ Test with:
         'wrist_1_joint','wrist_2_joint','wrist_3_joint'],
         position: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]}"
 
-Module API (used by pipeline_ui.py):
+Module API (used by isaac_pipeline.py):
     parse_args() -> argparse.Namespace
     start_sim(headless=False) -> SimulationApp
     load_workcell(usd_path) -> None

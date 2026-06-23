@@ -1,4 +1,4 @@
-# viewpoint_app.py (viser studio)
+# viewpoint_studio.py (viser studio)
 
 viser 기반 인터랙티브 스튜디오. 물체를 골라 **그 자리에서 viewpoint를 생성**하거나
 (파라미터 튜닝), 기존 `viewpoints*.h5`를 불러와 본다. 정적 plotly
@@ -7,8 +7,8 @@ HTML(`common/viewpoint_viz.py`)의 인터랙티브 대체 + 경로 순서 재생
 ## 실행
 
 ```bash
-uv run scripts/viser/viewpoint_app.py --object curved_structure   # 초기 물체 선택
-uv run scripts/viser/viewpoint_app.py --viewpoints data/sample/viewpoint/124/viewpoints.h5
+uv run scripts/apps/viewpoint_studio.py --object curved_structure   # 초기 물체 선택
+uv run scripts/apps/viewpoint_studio.py --viewpoints data/sample/viewpoint/124/viewpoints.h5
 ```
 
 `http://localhost:8080` 접속. `Ctrl+C`로 종료.

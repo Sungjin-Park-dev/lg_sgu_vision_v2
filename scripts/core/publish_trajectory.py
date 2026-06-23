@@ -5,7 +5,7 @@
 plan_trajectory.py가 생성한 trajectory.csv의 time 컬럼을 보존해 로봇에 전송한다.
 
 사용법:
-    uv run scripts/pipeline/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_ee_s0010.csv
+    uv run scripts/core/publish_trajectory.py --csv data/sample/trajectory/124/trajectory_dp_ee_s0010.csv
 """
 
 import argparse

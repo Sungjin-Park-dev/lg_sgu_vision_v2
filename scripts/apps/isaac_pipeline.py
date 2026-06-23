@@ -2,7 +2,7 @@
 """
 Omni UI panel for the trajectory pipeline inside Isaac Sim.
 
-Boots Isaac Sim with the same workcell as joint_control.py, then opens
+Boots Isaac Sim with the same workcell as scene.py, then opens
 an Omni UI window with four panels:
 
     A) Load object (dropdown + native viewport gizmo move)
@@ -23,7 +23,7 @@ ActionGraphSwitch is kept for the publish path (ensure-graph-enabled) but
 not toggled during preview.
 
 Usage:
-    uv run scripts/isaac/pipeline_ui.py --object sample
+    uv run scripts/apps/isaac_pipeline.py --object sample
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Reuse loaders from joint_control.py — same workcell, robot, camera.
-from isaac import joint_control as urctl  # noqa: E402
+# Reuse loaders from scene.py — same workcell, robot, camera.
+from isaac import scene as urctl  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -62,7 +62,7 @@ CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 GHOST_ROOT_PATH = "/World/UR20_preview"
 GHOST_USD_NAME = "ur20_ghost.usd"  # built by scripts/isaac/usd/build_ghost_usd.py
 
-# Matches joint_control.load_target_object (/World/{config.TARGET_OBJECT['name']}).
+# Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
 VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
 VIEWPOINTS_POINTS_PRIM = f"{VIEWPOINTS_ROOT_PRIM}/CameraPoints"
@@ -72,7 +72,7 @@ VIEWPOINT_POINT_WIDTH_M = 0.008
 def discover_objects() -> list[str]:
     """Object names that have data/{object}/mesh/source.obj — Object dropdown candidates.
 
-    Mirrors viser viewpoint_app.discover_objects. Listing by source.obj (not
+    Mirrors viewpoint_studio.discover_objects. Listing by source.obj (not
     source.usd) shows every object; load_target_object reports which ones still
     need `build_object_usd.py` to produce a source.usd.
     """
@@ -1033,7 +1033,7 @@ class PipelineWindow:
         pos_robot, quat_wxyz = pose
 
         cmd = [
-            self._uv, "run", "scripts/pipeline/plan_trajectory.py",
+            self._uv, "run", "scripts/core/plan_trajectory.py",
             "--object", obj,
             "--num-viewpoints", str(n_vp),
             "--viewpoints", h5,
@@ -1228,7 +1228,7 @@ class PipelineWindow:
 
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
-            f"exec {self._uv} run scripts/pipeline/publish_trajectory.py "
+            f"exec {self._uv} run scripts/core/publish_trajectory.py "
             f"--csv {csv!r}"
         )
         cmd = ["bash", "-c", shell_cmd]

@@ -6,16 +6,18 @@ UR20 로봇을 이용한 비전 검사 궤적 생성 시스템. cuRobo(IK/충돌
 
 ```
 scripts/
-  pipeline/          핵심 파이프라인
+  apps/              ★ 사용자 직접 실행 GUI
+    viewpoint_studio.py      뷰포인트 생성/튜닝/시각화 (viser)
+    isaac_pipeline.py        Isaac Sim 물체 선택+이동+궤적 생성/preview/publish
+  core/              headless 엔진 (apps가 라이브러리/서브프로세스로 사용)
     generate_viewpoints.py   뷰포인트 생성 + 클러스터링 + GTSP 순서
     plan_trajectory.py       DBSCAN+DP 기반 IK 해 선택 + MotionGen transit
     publish_trajectory.py    ROS2 궤적 전송
   prep/              mesh 전처리 (normalize_mesh, generate_normals)
-  viser/             viser 웹 프론트엔드 (view_meshes, viewpoint_app)
+  isaac/             Isaac Sim 씬/런타임 (scene, launch_sim, load_workcell, usd/)
+  robot/             실로봇 ROS2 유틸 (move_to_start, publish_workcell_markers)
   common/            config, math_utils, viewpoint_viz
-  ros2/              ROS2 유틸 (move_to_start, publish_workcell_markers)
-  isaac/             Isaac Sim 전용 (usd/ 하위: build_ghost_usd, inspect_usd)
-  prev/              이전 버전 스크립트
+  tools/             보조 뷰어 (view_meshes)
 data/{object}/       mesh/ viewpoint/ trajectory/ (gitignore)
 ```
 
@@ -42,7 +44,7 @@ uv pip install "./curobo[cu12-torch]"
 ### 1. 뷰포인트 생성
 
 ```bash
-uv run scripts/pipeline/generate_viewpoints.py \
+uv run scripts/core/generate_viewpoints.py \
     --object sample \
     --material-rgb "0,255,0" \
     --cluster-method coacd+dbscan \
@@ -63,7 +65,7 @@ uv run scripts/pipeline/generate_viewpoints.py \
 `viewpoints*.h5`를 불러와 확인 (메시·클러스터·경로·CoACD 파트 + 경로 순서 재생, Save):
 
 ```bash
-uv run scripts/viser/viewpoint_app.py --object curved_structure
+uv run scripts/apps/viewpoint_studio.py --object curved_structure
 # http://localhost:8080 접속 → Generate / Save
 ```
 
@@ -72,7 +74,7 @@ uv run scripts/viser/viewpoint_app.py --object curved_structure
 ### 2. IK 선택 + 궤적 생성
 
 ```bash
-uv run scripts/pipeline/plan_trajectory.py \
+uv run scripts/core/plan_trajectory.py \
     --object sample \
     --num-viewpoints 124 \
     --viewpoints data/sample/viewpoint/124/viewpoints_coacd+dbscan.h5
@@ -100,7 +102,7 @@ uv run --no-sync python -m urdf_usd_converter \
 
 # 시뮬레이션 + ROS2 bridge
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-    scripts/isaac/joint_control.py --object sample
+    scripts/isaac/scene.py --object sample
 ```
 
 자세한 절차·트러블슈팅: [docs/running.md](docs/running.md#isaac-sim-시뮬레이션).
