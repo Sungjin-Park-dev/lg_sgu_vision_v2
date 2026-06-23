@@ -1,5 +1,31 @@
 # Architecture
 
+## 디렉토리 구조와 3가지 워크플로
+
+사용자가 직접 실행하는 것은 `apps/`의 GUI 2개뿐이다. 나머지는 기능 역할별 폴더이며,
+`apps`가 `core` 엔진을 라이브러리(viewpoint_studio → generate_viewpoints)나
+서브프로세스(isaac_pipeline → plan/publish_trajectory)로 호출한다.
+
+| 워크플로 | 사용자가 실행 | 내부 엔진/지원 |
+|---------|--------------|---------------|
+| 1. 뷰포인트 생성 | `apps/viewpoint_studio.py` (viser) | `core/generate_viewpoints.py` |
+| 2. 포즈 조절 + 궤적 생성/preview | `apps/isaac_pipeline.py` (Isaac Sim) | `core/plan_trajectory.py`, `isaac/scene.py` |
+| 3. 실제 로봇 전송 | `apps/isaac_pipeline.py`의 Publish 패널, `robot/move_to_start.py` | `core/publish_trajectory.py` |
+
+```
+scripts/
+  apps/    viewpoint_studio.py  isaac_pipeline.py        ← 직접 실행 GUI
+  core/    generate_viewpoints  plan_trajectory  publish_trajectory   ← headless 엔진 (CLI + lib)
+  prep/    normalize_mesh  reorient_mesh  generate_normals
+  isaac/   scene  launch_sim  load_workcell  usd/
+  robot/   move_to_start  publish_workcell_markers
+  common/  config  math_utils  viewpoint_viz
+  tools/   view_meshes
+```
+
+모든 모듈은 `sys.path`에 `scripts/`를 넣고 `from core...`, `from common...`,
+`from isaac import scene`으로 임포트한다 (namespace package, `__init__.py` 불필요).
+
 ## 파이프라인
 
 ```

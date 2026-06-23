@@ -15,6 +15,8 @@ OBJ 로드 → (material RGB 필터)
 
 클러스터링은 항상 수행된다 (opt-out 없음). HTML 시각화는 항상 생성된다.
 
+> 단계별 흐름도(mermaid): [generate_viewpoints_pipeline.md](generate_viewpoints_pipeline.md).
+
 ## 배치 모드 (`--sampling-mode`)
 
 | 모드 | 설명 | 적합 |

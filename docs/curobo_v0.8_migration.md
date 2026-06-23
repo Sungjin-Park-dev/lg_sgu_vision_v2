@@ -198,5 +198,5 @@ Phase 5: 287 waypoints, collisions=0
 - `data/sample/trajectory/124/trajectory_dp_s010.{csv,html,_anim.html}` — 새 API 로
   재생성된 참고 출력
 
-`scripts/prev/` 의 옛 스크립트들도 같은 옛 API 를 쓰지만 운영에서 호출되지 않으므로
-이번 작업 범위에서 제외.
+당시 `scripts/prev/` 에 있던 옛 스크립트들도 같은 옛 API 를 썼지만 운영에서 호출되지
+않아 이 마이그레이션 범위에서 제외했다 (이후 `scripts/prev/` 는 삭제됨).

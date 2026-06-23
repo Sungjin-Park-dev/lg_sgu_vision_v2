@@ -69,7 +69,7 @@ uv run scripts/apps/viewpoint_studio.py --object curved_structure
 # http://localhost:8080 접속 → Generate / Save
 ```
 
-자세한 사용법: [docs/viewpoint_app.md](docs/viewpoint_app.md).
+자세한 사용법: [docs/viewpoint_studio.md](docs/viewpoint_studio.md).
 
 ### 2. IK 선택 + 궤적 생성
 
