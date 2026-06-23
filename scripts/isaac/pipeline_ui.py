@@ -3,11 +3,12 @@
 Omni UI panel for the trajectory pipeline inside Isaac Sim.
 
 Boots Isaac Sim with the same workcell as joint_control.py, then opens
-an Omni UI window with three panels:
+an Omni UI window with four panels:
 
-    A) plan_trajectory parameters + [Generate Trajectory]   (subprocess)
-    B) CSV preview with Play/Pause/Stop/Slider           (in-process animation)
-    C) publish_trajectory parameters + [Publish]         (subprocess)
+    A) Load object (dropdown + native viewport gizmo move)
+    B) plan_trajectory parameters + [Generate Trajectory]   (subprocess)
+    C) Ghost preview with Play/Pause/Stop/Slider            (in-process; sim, ROS-free)
+    D) publish_trajectory parameters + [Publish]            (subprocess; real mode only)
 
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
@@ -63,6 +64,9 @@ GHOST_USD_NAME = "ur20_ghost.usd"  # built by scripts/isaac/usd/build_ghost_usd.
 
 # Matches joint_control.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
+VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
+VIEWPOINTS_POINTS_PRIM = f"{VIEWPOINTS_ROOT_PRIM}/CameraPoints"
+VIEWPOINT_POINT_WIDTH_M = 0.008
 
 
 def discover_objects() -> list[str]:
@@ -536,7 +540,7 @@ class ActionGraphSwitch:
 # =============================================================================
 
 class PipelineWindow:
-    """Three-panel Omni UI window: Generate / Preview / Publish + Log."""
+    """Four-panel Omni UI window: Load / Generate / Preview / Publish + Log."""
 
     LOG_MAX_LINES = 500
 
@@ -577,6 +581,7 @@ class PipelineWindow:
         self._status_label: Optional["ui.Label"] = None
         self._mode_combo = None
         self._mode_label: Optional["ui.Label"] = None
+        self._publish_hint_label: Optional["ui.Label"] = None
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
@@ -610,12 +615,17 @@ class PipelineWindow:
     def _build(self):
         ui = self._ui
         with self._window.frame:
-            with ui.VStack(spacing=6):
-                self._build_panel_mode()
-                self._build_panel_generate()
-                self._build_panel_preview()
-                self._build_panel_publish()
-                self._build_log()
+            with ui.ScrollingFrame(
+                horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_AS_NEEDED,
+                vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
+            ):
+                with ui.VStack(height=0, spacing=6):
+                    self._build_panel_mode()
+                    self._build_panel_object()
+                    self._build_panel_generate()
+                    self._build_panel_preview()
+                    self._build_panel_publish()
+                    self._build_log()
 
     def _row(self, label: str, model, width: int = 180):
         ui = self._ui
@@ -649,9 +659,10 @@ class PipelineWindow:
                     self._mode_combo = ui.ComboBox(idx, "sim (Isaac only)", "real (ROS robot)")
                     self._mode_combo.model.add_item_changed_fn(self._on_mode_changed)
                     self._mode_label = ui.Label(self._mode_text(), width=120)
-                ui.Label("sim = no ROS, Generate+Preview only.  real = mirror /joint_states + "
-                         "Publish to robot (needs ur_robot_driver).",
-                         height=28, word_wrap=True)
+                # ui.Label("sim = Isaac only, no ROS — A Load, B Generate, C Preview.  "
+                #          "real = all of that + D Publish to the robot & mirror /joint_states "
+                #          "(needs ur_robot_driver).",
+                #          height=40, word_wrap=True)
 
     def _mode_text(self) -> str:
         return f"● {self._mode.upper()}"
@@ -691,12 +702,17 @@ class PipelineWindow:
             self._mode_label.style = {
                 "color": 0xFF33CC33 if self._mode == "real" else 0xFFFF6622
             }
+        if self._publish_hint_label is not None:
+            self._publish_hint_label.text = self._publish_hint_text()
+            self._publish_hint_label.style = {
+                "color": 0xFF33CC33 if self._mode == "real" else 0xFF2277EE
+            }
         if self._btn_publish is not None:
             self._btn_publish.enabled = (self._mode == "real") and not self._pub_runner.running
 
-    def _build_panel_generate(self):
+    def _build_panel_object(self):
         ui = self._ui
-        with ui.CollapsableFrame("A. Generate Trajectory (plan_trajectory.py)", height=0):
+        with ui.CollapsableFrame("A. Load Object", height=0):
             with ui.VStack(spacing=4):
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Object", width=80)
@@ -705,14 +721,25 @@ class PipelineWindow:
                     self._object_combo = ui.ComboBox(default_idx, *self._objects)
                     ui.Button("Load Object", width=110, clicked_fn=self._on_load_object)
                     ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose)
-                ui.Label("Load the object, move it with the viewport gizmo (W/E), then pick its "
-                         "viewpoints .h5 and Generate. Object name + viewpoint count are read "
-                         "from the h5 path; the object's live pose is read from the scene.",
-                         height=40, word_wrap=True)
+                # ui.Label("Pick an object and Load it, then move/rotate it with the viewport "
+                #          "gizmo (W = move, E = rotate). Its live pose is read at Generate time.",
+                #          height=28, word_wrap=True)
+
+    def _build_panel_generate(self):
+        ui = self._ui
+        with ui.CollapsableFrame("B. Generate Trajectory (plan_trajectory.py)", height=0):
+            with ui.VStack(spacing=4):
+                # ui.Label("Pick the object's viewpoints .h5 and Generate. Object name + viewpoint "
+                #          "count are read from the h5 path; the object's live pose comes from the "
+                #          "scene — load & place it in panel A first.",
+                #          height=40, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
                     ui.StringField(model=self._h5_path_model)
                     ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5)
+                with ui.HStack(height=28, spacing=6):
+                    ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints)
+                    ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints)
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
@@ -723,8 +750,11 @@ class PipelineWindow:
 
     def _build_panel_preview(self):
         ui = self._ui
-        with ui.CollapsableFrame("B. Preview Trajectory", height=0):
+        with ui.CollapsableFrame("C. Preview in Simulation", height=0):
             with ui.VStack(spacing=4):
+                # ui.Label("Ghost playback inside Isaac — visual only, never touches the real "
+                #          "robot or ROS. Available in both sim and real mode.",
+                #          height=28, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("CSV path", width=80)
                     ui.StringField(model=self._csv_path_model)
@@ -743,8 +773,10 @@ class PipelineWindow:
 
     def _build_panel_publish(self):
         ui = self._ui
-        with ui.CollapsableFrame("C. Publish to Robot (publish_trajectory.py)", height=0):
+        with ui.CollapsableFrame("D. Publish to Real Robot (publish_trajectory.py)", height=0):
             with ui.VStack(spacing=4):
+                # self._publish_hint_label = ui.Label(self._publish_hint_text(),
+                #                                      height=28, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("CSV path", width=80)
                     ui.StringField(model=self._csv_path_model)
@@ -752,6 +784,12 @@ class PipelineWindow:
                 with ui.HStack(height=28, spacing=6):
                     self._btn_publish = ui.Button("Publish to Robot", clicked_fn=self._on_publish)
                     self._btn_cancel_pub = ui.Button("Cancel Publish", clicked_fn=self._on_cancel_publish)
+
+    def _publish_hint_text(self) -> str:
+        if self._mode == "real":
+            return "● REAL mode — sends the CSV to the live robot (ur_robot_driver required)."
+        return ("⛔ Disabled in SIM mode — this is the only step that needs REAL. "
+                "Switch Run mode to 'real' to publish to the robot.")
 
     def _build_log(self):
         ui = self._ui
@@ -856,6 +894,97 @@ class PipelineWindow:
             if j + 1 < len(parts) and parts[j + 1].isdigit():
                 num = int(parts[j + 1])
         return obj, num
+
+    @staticmethod
+    def _load_camera_viewpoint_points(h5_path: str):
+        """Return camera viewpoint points in the target object's local frame."""
+        import h5py
+        from common import config as _config
+
+        with h5py.File(h5_path, "r") as f:
+            if "viewpoints" not in f:
+                raise ValueError("missing 'viewpoints' group")
+            grp = f["viewpoints"]
+            if "positions" not in grp or "normals" not in grp:
+                raise ValueError("expected viewpoints/positions and viewpoints/normals")
+
+            positions = np.array(grp["positions"], dtype=np.float64)
+            normals = np.array(grp["normals"], dtype=np.float64)
+            if positions.ndim != 2 or positions.shape[1] != 3:
+                raise ValueError(f"positions must be shaped (N, 3), got {positions.shape}")
+            if normals.shape != positions.shape:
+                raise ValueError(
+                    f"normals shape {normals.shape} does not match positions {positions.shape}")
+
+            wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
+            if "metadata" in f and "camera_spec" in f["metadata"]:
+                cs = f["metadata"]["camera_spec"]
+                if "working_distance_mm" in cs.attrs:
+                    wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
+
+        n = np.linalg.norm(normals, axis=1, keepdims=True)
+        safe_normals = np.divide(
+            normals, n,
+            out=np.zeros_like(normals),
+            where=n > 1e-12,
+        )
+        return positions + safe_normals * wd_m, wd_m
+
+    def _on_show_viewpoints(self):
+        """Visualize camera viewpoints from the selected h5 as object-local USD points."""
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[viewpoints] pick a viewpoints .h5 first (Browse...).")
+            return
+        if not Path(h5).exists():
+            self._append_log(f"[viewpoints] h5 not found: {h5}")
+            return
+
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not target_prim or not target_prim.IsValid():
+            self._append_log("[viewpoints] no target object on stage — Load Object first.")
+            return
+
+        try:
+            points_local, wd_m = self._load_camera_viewpoint_points(h5)
+        except Exception as e:
+            self._append_log(f"[viewpoints] load failed: {e}")
+            return
+
+        self._delete_viewpoint_points(log=False)
+
+        UsdGeom.Xform.Define(stage, VIEWPOINTS_ROOT_PRIM)
+        points = UsdGeom.Points.Define(stage, VIEWPOINTS_POINTS_PRIM)
+        points.CreatePointsAttr(Vt.Vec3fArray([
+            Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
+            for p in points_local
+        ]))
+        points.CreateWidthsAttr(Vt.FloatArray(
+            [VIEWPOINT_POINT_WIDTH_M] * len(points_local)
+        ))
+        points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.0, 0.85, 1.0)]))
+        points.CreateDisplayOpacityAttr(Vt.FloatArray([0.9]))
+
+        self._append_log(
+            f"[viewpoints] displayed {len(points_local)} camera points under "
+            f"{VIEWPOINTS_ROOT_PRIM} (working distance={wd_m * 1000:.1f} mm)")
+
+    def _delete_viewpoint_points(self, log: bool):
+        from isaacsim.core.utils import prims
+
+        if prims.is_prim_path_valid(VIEWPOINTS_ROOT_PRIM):
+            prims.delete_prim(VIEWPOINTS_ROOT_PRIM)
+            if log:
+                self._append_log(f"[viewpoints] cleared {VIEWPOINTS_ROOT_PRIM}")
+        elif log:
+            self._append_log("[viewpoints] nothing to clear")
+
+    def _on_clear_viewpoints(self):
+        self._delete_viewpoint_points(log=True)
 
     def _on_generate(self):
         if self._gen_runner.running:
@@ -1192,6 +1321,22 @@ def main():
     # Apply the initial mode now that the graph exists and playback has started:
     # default sim → graph tick OFF from frame 0 (no /joint_states, no publish).
     window.apply_mode(args.mode)
+
+    # Stand the robot at the configured start pose instead of the all-zero USD
+    # default. Sim mode only — in real mode the action graph mirrors the live
+    # /joint_states, which must win. One physics step first so the articulation
+    # view is bound before set_start_pose initializes it.
+    if args.mode == "sim":
+        from common import config as _cfg
+        simulation_context.step(render=False)
+        try:
+            urctl.set_start_pose(articulation_root, JOINT_NAMES, _cfg.ROBOT_START_STATE)
+            window._append_log(
+                "[start-pose] robot set to ROBOT_START_STATE "
+                f"{np.rad2deg(_cfg.ROBOT_START_STATE).round(1).tolist()} deg")
+        except Exception as e:  # noqa: BLE001 — pose is cosmetic, never fatal
+            window._append_log(
+                f"[start-pose] failed ({e}); robot stays at USD default")
 
     last_t = None
     import time as _time

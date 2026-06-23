@@ -16,8 +16,8 @@ DATA_ROOT = PROJECT_ROOT / "data"
 CAMERA_FOV_WIDTH_MM = 41.0
 CAMERA_FOV_HEIGHT_MM = 30.0
 
-# 작업 거리 (mm) - 카메라에서 표면까지의 거리
-CAMERA_WORKING_DISTANCE_MM = 110.0
+# 작업 거리 (mm) - camera_optical_frame에서 검사 표면까지의 거리
+CAMERA_WORKING_DISTANCE_MM = 45.0
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.7
@@ -135,9 +135,9 @@ ROBOT_MOUNT = {
 DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
 DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20_with_camera.urdf"
 
-# 툴 오프셋: tool0/wrist3에서 camera_optical_frame까지의 거리 (미터)
+# 툴 오프셋: flange/camera_mount에서 camera_optical_frame까지의 거리 (미터)
 # End-Effector로부터 카메라 초점까지의 실제 거리로 변경해야 합니다.
-TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.234
+TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.346
 
 
 # ============================================================================

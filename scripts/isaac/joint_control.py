@@ -37,6 +37,7 @@ Module API (used by pipeline_ui.py):
     load_workcell(usd_path) -> None
     load_target_object(object_name) -> None
     find_articulation_root() -> str
+    set_start_pose(articulation_root, joint_names, positions) -> None
     setup_inspection_camera() -> str | None
     build_action_graph(articulation_root, inspection_cam) -> str   # graph path
 """
@@ -60,6 +61,8 @@ MOUNT_PATH = "/World/Mount"
 TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
 ACTION_GRAPH_PATH = "/ActionGraph"
+CAMERA_MOUNT_NAME = "camera_mount"
+CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 
 # 워크셀 치수 (load_workcell.py 검증 완료)
 MOUNT_HEIGHT = 0.805
@@ -240,8 +243,39 @@ def find_articulation_root() -> str:
     return STAGE_PATH
 
 
+def set_start_pose(articulation_root: str, joint_names, positions) -> None:
+    """Stand the articulation at `positions` (radians, in `joint_names` order).
+
+    Must be called after SimulationContext.play() (and at least one step) so the
+    physics view is bound. It does two things:
+      1. set_joint_positions — teleports the joint *state* to the pose, and
+      2. apply_action       — sets the PD drive *targets* to the same pose.
+    Both are required: set_joint_positions only teleports, so without (2) the
+    position drives would pull the joints back to 0 on the next physics step.
+    Joints are matched by name via get_dof_index, so the articulation's internal
+    DOF ordering is handled automatically.
+    """
+    from isaacsim.core.prims import SingleArticulation
+    from isaacsim.core.utils.types import ArticulationAction
+
+    art = SingleArticulation(prim_path=articulation_root)
+    art.initialize()
+    indices = np.array([art.get_dof_index(n) for n in joint_names], dtype=np.int32)
+    q = np.asarray(positions, dtype=np.float64)
+    art.set_joint_positions(q, joint_indices=indices)
+    art.get_articulation_controller().apply_action(
+        ArticulationAction(joint_positions=q, joint_indices=indices)
+    )
+    print(f"Start pose set: {np.rad2deg(q).round(1).tolist()} deg")
+
+
 def setup_inspection_camera() -> str | None:
-    """Add an InspectionCamera under SG8S, reusing the existing camera transform."""
+    """Add an InspectionCamera under the camera optical frame.
+
+    Prefer the local camera_optical_frame prim. Fall back to camera_mount, then
+    the legacy SG8S prim so older USD files still publish camera topics while
+    the asset is being migrated.
+    """
     import omni.usd
     from pxr import Gf, UsdGeom
 
@@ -250,21 +284,31 @@ def setup_inspection_camera() -> str | None:
 
     stage = omni.usd.get_context().get_stage()
 
-    sg8s_path = None
+    camera_frame_path = None
+    camera_mount_path = None
+    legacy_sg8s_path = None
     for prim in stage.Traverse():
         p = str(prim.GetPath())
         if not p.startswith(STAGE_PATH):
             continue
-        if "SG8S" in prim.GetName():
-            sg8s_path = p
+        if prim.GetName() == CAMERA_OPTICAL_FRAME_NAME:
+            camera_frame_path = p
             break
+        if prim.GetName() == CAMERA_MOUNT_NAME:
+            camera_mount_path = p
+        if legacy_sg8s_path is None and "SG8S" in prim.GetName():
+            legacy_sg8s_path = p
 
-    if sg8s_path is None:
-        print("WARNING: SG8S prim not found — skipping inspection camera setup")
+    camera_frame_path = camera_frame_path or camera_mount_path or legacy_sg8s_path
+    if camera_frame_path is None:
+        print(
+            f"WARNING: {CAMERA_OPTICAL_FRAME_NAME} prim not found — "
+            "skipping inspection camera setup"
+        )
         return None
 
     existing_cam = None
-    for prim in stage.GetPrimAtPath(sg8s_path).GetAllChildren():
+    for prim in stage.GetPrimAtPath(camera_frame_path).GetAllChildren():
         for desc in [prim] + list(prim.GetAllChildren()):
             if desc.IsA(UsdGeom.Camera):
                 existing_cam = desc
@@ -273,16 +317,31 @@ def setup_inspection_camera() -> str | None:
             break
 
     if existing_cam is None:
-        print(f"WARNING: No existing Camera found under {sg8s_path} — using identity local pose")
-        local = Gf.Matrix4d(1.0)
+        print(
+            f"WARNING: No existing Camera found under {camera_frame_path} — "
+            "using default local pose"
+        )
+        frame_prim = stage.GetPrimAtPath(camera_frame_path)
+        if frame_prim.GetName() == CAMERA_OPTICAL_FRAME_NAME:
+            # The planner's camera_optical_frame uses +Z as the viewing axis.
+            # UsdGeom.Camera looks down local -Z, so rotate the camera 180 deg
+            # about Y to align its optical axis with the planner frame.
+            local = Gf.Matrix4d(
+                -1.0, 0.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0, 0.0,
+                 0.0, 0.0, -1.0, 0.0,
+                 0.0, 0.0, 0.0, 1.0,
+            )
+        else:
+            local = Gf.Matrix4d(1.0)
     else:
         print(f"Reusing transform from existing camera: {existing_cam.GetPath()}")
         xcache = UsdGeom.XformCache()
         cam_world = xcache.GetLocalToWorldTransform(existing_cam)
-        sg8s_world = xcache.GetLocalToWorldTransform(stage.GetPrimAtPath(sg8s_path))
-        local = cam_world * sg8s_world.GetInverse()
+        frame_world = xcache.GetLocalToWorldTransform(stage.GetPrimAtPath(camera_frame_path))
+        local = cam_world * frame_world.GetInverse()
 
-    inspection_cam_path = f"{sg8s_path}/InspectionCamera"
+    inspection_cam_path = f"{camera_frame_path}/InspectionCamera"
     cam = UsdGeom.Camera.Define(stage, inspection_cam_path)
     UsdGeom.Xformable(cam).ClearXformOpOrder()
     UsdGeom.Xformable(cam).AddTransformOp().Set(Gf.Matrix4d(local))
