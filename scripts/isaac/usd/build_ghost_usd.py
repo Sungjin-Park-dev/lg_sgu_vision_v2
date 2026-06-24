@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Build a visual-only "ghost" copy of the robot USD.
+"""Build a visual-only "ghost" copy of the camera-equipped robot USD.
 
 Strips every UsdPhysics/PhysxSchema applied API from each prim so the
 resulting file can be referenced into a stage alongside the original robot
 without perturbing the original's PhysX scene initialization. Joint prims
-keep their type (so PreviewPlayer can extract the FK chain at runtime) but
-are marked `jointEnabled=False`. Every Gprim gets a cyan tint + 30%
-opacity baked in.
+keep their type so PreviewPlayer can extract the FK chain at runtime, but
+are marked `jointEnabled=False`.
 
 This is a one-shot file builder — re-run it if the source USD changes.
 
@@ -21,19 +20,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-# Source the camera-less inner robot — the wrapper "ur20_with_camera.usd"
-# pulls a sensor payload from a non-local S3 URL that we don't need for the
-# ghost (we only want the arm geometry).
-DEFAULT_SOURCE = PROJECT_ROOT / "ur20_description" / "ur20" / "ur20.usd"
-DEFAULT_OUTPUT = PROJECT_ROOT / "ur20_description" / "ur20_ghost.usd"
+DEFAULT_SOURCE = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.usd"
+DEFAULT_OUTPUT = PROJECT_ROOT / "ur20_description" / "ur20_with_camera_ghost.usd"
 
-# Substrings that mark an applied schema as physics-related.
 PHYSICS_NAME_PARTS = ("Physics", "Physx")
-GHOST_TINT = (0.2, 0.8, 0.9)   # cyan, MoveIt-ghost vibe
+GHOST_TINT = (0.2, 0.8, 0.9)
 GHOST_OPACITY = 0.30
+GHOST_MATERIAL_NAME = "GhostPreviewMaterial"
 
 
 def is_physics_schema(name: str) -> bool:
@@ -56,6 +52,47 @@ def tint_gprim(prim: Usd.Prim) -> None:
     gp = UsdGeom.Gprim(prim)
     gp.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*GHOST_TINT)]))
     gp.CreateDisplayOpacityAttr(Vt.FloatArray([GHOST_OPACITY]))
+
+
+def define_ghost_material(stage: Usd.Stage) -> UsdShade.Material:
+    root = stage.GetDefaultPrim()
+    if not root or not root.IsValid():
+        roots = list(stage.GetPseudoRoot().GetChildren())
+        if not roots:
+            raise RuntimeError("Stage has no root prim")
+        root = roots[0]
+
+    material_path = root.GetPath().AppendPath(f"Looks/{GHOST_MATERIAL_NAME}")
+    material = UsdShade.Material.Define(stage, material_path)
+    shader = UsdShade.Shader.Define(stage, material_path.AppendPath("PreviewSurface"))
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*GHOST_TINT))
+    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(GHOST_OPACITY)
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.55)
+    shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+    material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    return material
+
+
+def force_ghost_material(prim: Usd.Prim, material: UsdShade.Material) -> bool:
+    if not (prim.IsA(UsdGeom.Gprim) or prim.GetTypeName() == "GeomSubset"):
+        return False
+    binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+    binding_api.UnbindAllBindings()
+    binding_api.Bind(material)
+    if prim.IsA(UsdGeom.Gprim):
+        tint_gprim(prim)
+    return True
+
+
+def hide_collision_visuals(prim: Usd.Prim) -> bool:
+    path = str(prim.GetPath()).lower()
+    if "/collisions" not in path and "/collision" not in path:
+        return False
+    if prim.IsA(UsdGeom.Imageable):
+        UsdGeom.Imageable(prim).MakeInvisible()
+        return True
+    return False
 
 
 def disable_joint(prim: Usd.Prim) -> None:
@@ -96,16 +133,19 @@ def main():
     if n_expanded:
         print(f"[ghost-usd] expanded {n_expanded} instance(s) into regular prims")
 
-    n_stripped = n_tinted = n_jdisabled = 0
+    ghost_material = define_ghost_material(stage)
+
+    n_stripped = n_bound = n_hidden = n_jdisabled = 0
     type_counts: dict = {}
     for prim in stage.Traverse():
         t = prim.GetTypeName()
         type_counts[t] = type_counts.get(t, 0) + 1
         if strip_physics_apis(prim):
             n_stripped += 1
-        if prim.IsA(UsdGeom.Gprim):
-            tint_gprim(prim)
-            n_tinted += 1
+        if force_ghost_material(prim, ghost_material):
+            n_bound += 1
+        if hide_collision_visuals(prim):
+            n_hidden += 1
         if prim.IsA(UsdPhysics.Joint):
             disable_joint(prim)
             n_jdisabled += 1
@@ -114,7 +154,9 @@ def main():
     flat.Export(str(args.output))
     print(f"[ghost-usd] wrote {args.output}")
     print(f"           stripped APIs from {n_stripped} prims, "
-          f"tinted {n_tinted} gprims, disabled {n_jdisabled} joints")
+          f"bound ghost material to {n_bound} prims, "
+          f"hid {n_hidden} collision visual prims, "
+          f"disabled {n_jdisabled} joints")
     print(f"[ghost-usd] prim types seen ({sum(type_counts.values())} total):")
     for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
         print(f"             {c:4d}  {t or '(empty/abstract)'}")

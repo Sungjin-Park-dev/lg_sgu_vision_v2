@@ -153,7 +153,14 @@ def load_viewpoints(h5_path: Path):
         if "metadata" in f and "camera_spec" in f["metadata"]:
             cs = f["metadata"]["camera_spec"]
             if "working_distance_mm" in cs.attrs:
-                wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
+                h5_wd_mm = float(cs.attrs["working_distance_mm"])
+                cfg_wd_mm = float(config.CAMERA_WORKING_DISTANCE_MM)
+                if abs(h5_wd_mm - cfg_wd_mm) > 1e-6:
+                    print(
+                        f"  WARNING: viewpoints h5 working_distance_mm={h5_wd_mm:.1f}, "
+                        f"current config={cfg_wd_mm:.1f}. Using h5 metadata."
+                    )
+                wd_m = h5_wd_mm / 1000.0
 
     return positions, normals, path_order, cluster_id, wd_m
 

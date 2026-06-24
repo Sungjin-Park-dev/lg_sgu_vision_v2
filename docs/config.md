@@ -6,11 +6,11 @@
 
 | 파라미터 | 값 | 설명 |
 |---------|-----|------|
-| `CAMERA_FOV_WIDTH_MM` | 41.0 | 시야각 너비 (mm) |
-| `CAMERA_FOV_HEIGHT_MM` | 30.0 | 시야각 높이 (mm) |
-| `CAMERA_WORKING_DISTANCE_MM` | 110.0 | 작업 거리 (mm) |
-| `CAMERA_OVERLAP_RATIO` | 0.5 | 뷰포인트 간 중첩률 |
-| `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` | 0.234 | tool0 → 카메라 초점 거리 (m) |
+| `CAMERA_FOV_WIDTH_MM` | 50.0 | 시야각 너비 (mm) |
+| `CAMERA_FOV_HEIGHT_MM` | 50.0 | 시야각 높이 (mm) |
+| `CAMERA_WORKING_DISTANCE_MM` | 250.0 | 작업 거리 (mm) |
+| `CAMERA_OVERLAP_RATIO` | 0.7 | 뷰포인트 간 중첩률 |
+| `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` | 0.346 | tool0 → 카메라 초점 거리 (m) |
 
 ## 로봇 설정
 

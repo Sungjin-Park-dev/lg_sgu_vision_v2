@@ -13,14 +13,10 @@ an Omni UI window with four panels:
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
 
-Preview overlays a pre-built physics-free "ghost" UR20 (built once via
-scripts/isaac/usd/build_ghost_usd.py → ur20_description/ur20_ghost.usd,
-cyan-tinted, no rigid bodies, no articulation) at /World/UR20_preview and
-poses each link by writing one xformOp per frame via FK. The real
-/World/UR20 articulation is never touched by preview, so the Action Graph
-and any external /joint_states publisher keep running uninterrupted.
-ActionGraphSwitch is kept for the publish path (ensure-graph-enabled) but
-not toggled during preview.
+Preview overlays a pre-built physics-free ghost UR20 with the camera attached
+(built via scripts/isaac/usd/build_ghost_usd.py) at /World/UR20_preview and
+poses each link by writing one xformOp per frame via FK. The real /World/UR20
+articulation is never touched by preview.
 
 Usage:
     uv run scripts/apps/isaac_pipeline.py --object sample
@@ -29,12 +25,14 @@ Usage:
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
@@ -60,13 +58,24 @@ JOINT_NAMES = [
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
 GHOST_ROOT_PATH = "/World/UR20_preview"
-GHOST_USD_NAME = "ur20_ghost.usd"  # built by scripts/isaac/usd/build_ghost_usd.py
+GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 
 # Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
 VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
 VIEWPOINTS_POINTS_PRIM = f"{VIEWPOINTS_ROOT_PRIM}/CameraPoints"
 VIEWPOINT_POINT_WIDTH_M = 0.008
+COLLISION_SPHERES_SCOPE_NAME = "CuRoboCollisionSpheres"
+FOV_PLANE_SCOPE_NAME = "CameraFovPlane"
+FOV_PLANE_OUTLINE_WIDTH_M = 0.003
+FOV_PLANE_CENTERLINE_WIDTH_M = 0.002
+CAMERA_COLLISION_LINKS = {
+    "tool0",
+    "camera_cable_frame",
+    "camera_frame_1",
+    "camera_frame_2",
+    "camera_link",
+}
 
 
 def discover_objects() -> list[str]:
@@ -81,8 +90,7 @@ def discover_objects() -> list[str]:
 
 
 # =============================================================================
-# Preview ghost — references a pre-built physics-free ghost USD (cyan-tinted,
-# 30% opacity, all UsdPhysics/PhysxSchema APIs stripped, joints disabled).
+# Preview ghost — references a pre-built physics-free ghost USD.
 # PreviewPlayer poses link xforms via FK; we never touch PhysX at runtime.
 # =============================================================================
 
@@ -338,7 +346,7 @@ def load_trajectory_csv(csv_path: str):
 
 
 # =============================================================================
-# Preview player — drives ArticulationController.apply_action from the CSV.
+# Preview player — applies CSV waypoints to the ghost via FK.
 # =============================================================================
 
 @dataclass
@@ -557,6 +565,7 @@ class PipelineWindow:
         self._h5_path_model = ui.SimpleStringModel("")
 
         self._gen_runner = SubprocessRunner()
+        self._ik_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
         # Keep ActionGraphSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
@@ -575,9 +584,13 @@ class PipelineWindow:
         self._fields: dict = {}
         self._btn_generate = None
         self._btn_cancel_gen = None
+        self._btn_check_ik = None
+        self._btn_cancel_ik = None
         self._btn_publish = None
         self._btn_cancel_pub = None
         self._slider_model: Optional["ui.SimpleFloatModel"] = None
+        self._slider: Optional["ui.FloatSlider"] = None
+        self._updating_slider = False
         self._status_label: Optional["ui.Label"] = None
         self._mode_combo = None
         self._mode_label: Optional["ui.Label"] = None
@@ -740,6 +753,12 @@ class PipelineWindow:
                 with ui.HStack(height=28, spacing=6):
                     ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints)
                     ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints)
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_check_ik = ui.Button(
+                        "Check IK Reachability",
+                        clicked_fn=self._on_check_ik_reachability,
+                    )
+                    self._btn_cancel_ik = ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik)
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
@@ -764,11 +783,17 @@ class PipelineWindow:
                     ui.Button("Play", clicked_fn=self._on_play)
                     ui.Button("Pause", clicked_fn=self._on_pause)
                     ui.Button("Stop", clicked_fn=self._on_stop)
+                with ui.HStack(height=28, spacing=6):
+                    ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres)
+                    ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres)
+                with ui.HStack(height=28, spacing=6):
+                    ui.Button("Show FOV Plane", clicked_fn=self._on_show_fov_plane)
+                    ui.Button("Clear FOV Plane", clicked_fn=self._on_clear_fov_plane)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("t", width=20)
                     self._slider_model = ui.SimpleFloatModel(0.0)
-                    slider = ui.FloatSlider(self._slider_model, min=0.0, max=1.0)
-                    slider.model.add_value_changed_fn(self._on_slider)
+                    self._slider = ui.FloatSlider(self._slider_model, min=0.0, max=1.0)
+                    self._slider.model.add_value_changed_fn(self._on_slider)
                 self._status_label = ui.Label("t=0.00s / 0.00s  (no CSV)")
 
     def _build_panel_publish(self):
@@ -930,6 +955,38 @@ class PipelineWindow:
         )
         return positions + safe_normals * wd_m, wd_m
 
+    def _draw_camera_viewpoint_points(self, points_local, colors=None, opacity: float = 0.9):
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        self._delete_viewpoint_points(log=False)
+
+        UsdGeom.Xform.Define(stage, VIEWPOINTS_ROOT_PRIM)
+        points = UsdGeom.Points.Define(stage, VIEWPOINTS_POINTS_PRIM)
+        points.CreatePointsAttr(Vt.Vec3fArray([
+            Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
+            for p in points_local
+        ]))
+        points.CreateWidthsAttr(Vt.FloatArray(
+            [VIEWPOINT_POINT_WIDTH_M] * len(points_local)
+        ))
+
+        if colors is None:
+            points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.0, 0.85, 1.0)]))
+        elif len(colors) == len(points_local):
+            color_primvar = points.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex)
+            color_primvar.Set(Vt.Vec3fArray([
+                Gf.Vec3f(float(c[0]), float(c[1]), float(c[2]))
+                for c in colors
+            ]))
+        else:
+            raise ValueError(
+                f"color count {len(colors)} does not match point count {len(points_local)}"
+            )
+
+        points.CreateDisplayOpacityAttr(Vt.FloatArray([float(opacity)]))
+
     def _on_show_viewpoints(self):
         """Visualize camera viewpoints from the selected h5 as object-local USD points."""
         h5 = self._h5_path_model.get_value_as_string().strip()
@@ -941,7 +998,6 @@ class PipelineWindow:
             return
 
         import omni.usd
-        from pxr import Gf, UsdGeom, Vt
 
         stage = omni.usd.get_context().get_stage()
         target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
@@ -954,20 +1010,15 @@ class PipelineWindow:
         except Exception as e:
             self._append_log(f"[viewpoints] load failed: {e}")
             return
+        from common import config as _config
+        cfg_wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
+        if abs(wd_m - cfg_wd_m) > 1e-9:
+            self._append_log(
+                f"[viewpoints] WARNING: h5 working distance={wd_m * 1000:.1f} mm, "
+                f"current config={cfg_wd_m * 1000:.1f} mm; using h5 metadata."
+            )
 
-        self._delete_viewpoint_points(log=False)
-
-        UsdGeom.Xform.Define(stage, VIEWPOINTS_ROOT_PRIM)
-        points = UsdGeom.Points.Define(stage, VIEWPOINTS_POINTS_PRIM)
-        points.CreatePointsAttr(Vt.Vec3fArray([
-            Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
-            for p in points_local
-        ]))
-        points.CreateWidthsAttr(Vt.FloatArray(
-            [VIEWPOINT_POINT_WIDTH_M] * len(points_local)
-        ))
-        points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.0, 0.85, 1.0)]))
-        points.CreateDisplayOpacityAttr(Vt.FloatArray([0.9]))
+        self._draw_camera_viewpoint_points(points_local)
 
         self._append_log(
             f"[viewpoints] displayed {len(points_local)} camera points under "
@@ -985,6 +1036,406 @@ class PipelineWindow:
 
     def _on_clear_viewpoints(self):
         self._delete_viewpoint_points(log=True)
+
+    def _apply_ik_reachability_result(self, h5_path: str, result_path: Path):
+        if not result_path.exists():
+            self._append_log(f"[ik] result JSON not found: {result_path}")
+            return
+
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            counts = np.array(result["success_counts"], dtype=np.int32)
+            points_local, wd_m = self._load_camera_viewpoint_points(h5_path)
+        except Exception as e:
+            self._append_log(f"[ik] result load failed: {e}")
+            return
+
+        if len(counts) != len(points_local):
+            self._append_log(
+                f"[ik] result/viewpoint count mismatch: {len(counts)} vs {len(points_local)}"
+            )
+            return
+
+        colors = [
+            (0.05, 0.95, 0.20) if count > 0 else (1.0, 0.05, 0.02)
+            for count in counts
+        ]
+        try:
+            self._draw_camera_viewpoint_points(points_local, colors=colors, opacity=0.95)
+        except Exception as e:
+            self._append_log(f"[ik] display failed: {e}")
+            return
+
+        reachable_count = int((counts > 0).sum())
+        total = len(counts)
+        self._append_log(
+            f"[ik] reachability displayed under {VIEWPOINTS_ROOT_PRIM}: "
+            f"{reachable_count}/{total} reachable "
+            f"({100.0 * reachable_count / max(total, 1):.1f}%), "
+            f"working distance={wd_m * 1000:.1f} mm"
+        )
+
+    def _on_check_ik_reachability(self):
+        if self._ik_runner.running:
+            self._append_log("[ik] check already running")
+            return
+
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[ik] pick a viewpoints .h5 first (Browse...).")
+            return
+        if not Path(h5).exists():
+            self._append_log(f"[ik] h5 not found: {h5}")
+            return
+
+        obj, n_vp = self._parse_h5_meta(h5)
+        if obj is None:
+            obj = (self._current_object or "").strip()
+            if not obj:
+                self._append_log(
+                    "[ik] couldn't read object from h5 path and no object is loaded."
+                )
+                return
+            self._append_log(f"[ik] couldn't read object from h5 path; using '{obj}'.")
+        if self._current_object and obj != self._current_object:
+            self._append_log(
+                f"[ik] WARNING: h5 object '{obj}' != loaded scene object "
+                f"'{self._current_object}'. IK/collision mesh uses '{obj}'."
+            )
+
+        pose = self._read_object_world_pose()
+        if pose is None:
+            self._append_log(
+                "[ik] no target object on stage — pick one in the Object dropdown "
+                "and click 'Load Object' first."
+            )
+            return
+        pos_robot, quat_wxyz = pose
+
+        result_path = Path("/tmp") / (
+            f"isaac_pipeline_ik_{os.getpid()}_{int(time.time() * 1000)}.json"
+        )
+        cmd = [
+            self._uv, "run", "scripts/core/check_viewpoint_ik.py",
+            "--object", obj,
+            "--viewpoints", h5,
+            "--output", str(result_path),
+        ]
+        if n_vp is not None:
+            cmd += ["--num-viewpoints", str(n_vp)]
+        cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
+        cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
+
+        if self._btn_check_ik is not None:
+            self._btn_check_ik.enabled = False
+        self._append_log("[ik] $ " + " ".join(cmd))
+
+        def on_line(line: str):
+            self._append_log(line)
+
+        def on_exit(rc: int):
+            self._append_log(f"[ik] exit code = {rc}")
+            if self._btn_check_ik is not None:
+                self._btn_check_ik.enabled = True
+            if rc == 0:
+                self._apply_ik_reachability_result(h5, result_path)
+
+        self._ik_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
+
+    def _on_cancel_ik(self):
+        if self._ik_runner.running:
+            self._append_log("[ik] terminating...")
+            self._ik_runner.terminate()
+
+    @staticmethod
+    def _find_prim_by_name(stage, robot_root: str, prim_name: str):
+        root = stage.GetPrimAtPath(robot_root)
+        if not root or not root.IsValid():
+            return None
+        for prim in stage.Traverse():
+            p = str(prim.GetPath())
+            if f"/{COLLISION_SPHERES_SCOPE_NAME}/" in p:
+                continue
+            if f"/{FOV_PLANE_SCOPE_NAME}/" in p:
+                continue
+            if p.startswith(robot_root) and prim.GetName() == prim_name:
+                return prim
+        return None
+
+    def _delete_fov_plane(self, log: bool):
+        import omni.usd
+        from isaacsim.core.utils import prims
+
+        stage = omni.usd.get_context().get_stage()
+        paths = [
+            str(prim.GetPath())
+            for prim in stage.Traverse()
+            if prim.GetName() == FOV_PLANE_SCOPE_NAME
+        ]
+        for path in sorted(paths, key=len, reverse=True):
+            prims.delete_prim(path)
+        if log:
+            self._append_log(
+                f"[fov] cleared {len(paths)} FOV plane scope(s)"
+                if paths else "[fov] nothing to clear"
+            )
+
+    def _on_show_fov_plane(self):
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+        from common import config as _config
+
+        stage = omni.usd.get_context().get_stage()
+        robot_root = GHOST_ROOT_PATH
+        if not stage.GetPrimAtPath(robot_root).IsValid():
+            self._append_log(f"[fov] ghost robot not found: {robot_root}")
+            return
+
+        camera_frame = self._find_prim_by_name(
+            stage, robot_root, urctl.CAMERA_OPTICAL_FRAME_NAME,
+        )
+        if camera_frame is None or not camera_frame.IsValid():
+            self._append_log(
+                f"[fov] {urctl.CAMERA_OPTICAL_FRAME_NAME} not found under {robot_root}"
+            )
+            return
+
+        fov_w_m = float(_config.CAMERA_FOV_WIDTH_MM) / 1000.0
+        fov_h_m = float(_config.CAMERA_FOV_HEIGHT_MM) / 1000.0
+        wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
+        if fov_w_m <= 0.0 or fov_h_m <= 0.0 or wd_m <= 0.0:
+            self._append_log(
+                "[fov] invalid camera spec: "
+                f"FOV={_config.CAMERA_FOV_WIDTH_MM}x{_config.CAMERA_FOV_HEIGHT_MM} mm, "
+                f"WD={_config.CAMERA_WORKING_DISTANCE_MM} mm"
+            )
+            return
+
+        self._delete_fov_plane(log=False)
+
+        half_w = fov_w_m * 0.5
+        half_h = fov_h_m * 0.5
+        corners = [
+            Gf.Vec3f(-half_w, -half_h, wd_m),
+            Gf.Vec3f( half_w, -half_h, wd_m),
+            Gf.Vec3f( half_w,  half_h, wd_m),
+            Gf.Vec3f(-half_w,  half_h, wd_m),
+        ]
+        scope_path = f"{camera_frame.GetPath()}/{FOV_PLANE_SCOPE_NAME}"
+        UsdGeom.Xform.Define(stage, scope_path)
+
+        plane = UsdGeom.Mesh.Define(stage, f"{scope_path}/Plane")
+        plane.CreatePointsAttr(Vt.Vec3fArray(corners))
+        plane.CreateFaceVertexCountsAttr(Vt.IntArray([4]))
+        plane.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 3]))
+        plane.CreateDoubleSidedAttr(True)
+        plane.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.78, 0.05)]))
+        plane.CreateDisplayOpacityAttr(Vt.FloatArray([0.22]))
+
+        outline_points = corners + [corners[0]]
+        outline = UsdGeom.BasisCurves.Define(stage, f"{scope_path}/Outline")
+        outline.CreateTypeAttr(UsdGeom.Tokens.linear)
+        outline.CreateCurveVertexCountsAttr(Vt.IntArray([len(outline_points)]))
+        outline.CreatePointsAttr(Vt.Vec3fArray(outline_points))
+        outline.CreateWidthsAttr(Vt.FloatArray([FOV_PLANE_OUTLINE_WIDTH_M]))
+        outline.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        outline.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.38, 0.0)]))
+        outline.CreateDisplayOpacityAttr(Vt.FloatArray([0.95]))
+
+        center_line = UsdGeom.BasisCurves.Define(stage, f"{scope_path}/WorkingDistance")
+        center_line.CreateTypeAttr(UsdGeom.Tokens.linear)
+        center_line.CreateCurveVertexCountsAttr(Vt.IntArray([2]))
+        center_line.CreatePointsAttr(Vt.Vec3fArray([
+            Gf.Vec3f(0.0, 0.0, 0.0),
+            Gf.Vec3f(0.0, 0.0, wd_m),
+        ]))
+        center_line.CreateWidthsAttr(Vt.FloatArray([FOV_PLANE_CENTERLINE_WIDTH_M]))
+        center_line.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        center_line.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.0, 0.85, 1.0)]))
+        center_line.CreateDisplayOpacityAttr(Vt.FloatArray([0.95]))
+
+        self._append_log(
+            f"[fov] displayed {_config.CAMERA_FOV_WIDTH_MM:.1f}x"
+            f"{_config.CAMERA_FOV_HEIGHT_MM:.1f} mm plane at "
+            f"WD={_config.CAMERA_WORKING_DISTANCE_MM:.1f} mm under {camera_frame.GetPath()}"
+        )
+
+    def _on_clear_fov_plane(self):
+        self._delete_fov_plane(log=True)
+
+    @staticmethod
+    def _load_collision_spheres():
+        import yaml
+        from common import config as _config
+
+        robot_cfg_path = (
+            _config.PROJECT_ROOT
+            / "ur20_description"
+            / _config.DEFAULT_ROBOT_CONFIG
+        )
+        with open(robot_cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        kin = cfg["robot_cfg"]["kinematics"]
+        urdf_path = (
+            _config.PROJECT_ROOT
+            / "ur20_description"
+            / Path(kin["urdf_path"]).name
+        )
+        return robot_cfg_path, urdf_path, kin["collision_link_names"], kin["collision_spheres"]
+
+    @staticmethod
+    def _find_link_prim(stage, robot_root: str, link_name: str):
+        return PipelineWindow._find_prim_by_name(stage, robot_root, link_name)
+
+    @staticmethod
+    def _rpy_xyz_to_np(rpy, xyz) -> np.ndarray:
+        roll, pitch, yaw = (float(v) for v in rpy)
+        x, y, z = (float(v) for v in xyz)
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=np.float64)
+        ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=np.float64)
+        rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=np.float64)
+        T = np.eye(4)
+        T[:3, :3] = rz @ ry @ rx
+        T[:3, 3] = [x, y, z]
+        return T
+
+    @classmethod
+    def _load_fixed_urdf_edges(cls, urdf_path: Path):
+        import xml.etree.ElementTree as ET
+
+        root = ET.parse(urdf_path).getroot()
+        edges = {}
+        for joint in root.findall("joint"):
+            if joint.get("type") != "fixed":
+                continue
+            parent = joint.find("parent")
+            child = joint.find("child")
+            if parent is None or child is None:
+                continue
+            origin = joint.find("origin")
+            xyz = (origin.get("xyz", "0 0 0").split() if origin is not None else ["0", "0", "0"])
+            rpy = (origin.get("rpy", "0 0 0").split() if origin is not None else ["0", "0", "0"])
+            edges[child.get("link")] = (
+                parent.get("link"),
+                cls._rpy_xyz_to_np(rpy, xyz),
+            )
+        return edges
+
+    def _link_prim_or_fixed_frame(self, stage, robot_root: str, link_name: str,
+                                  fixed_edges: dict):
+        from pxr import UsdGeom
+
+        link_prim = self._find_link_prim(stage, robot_root, link_name)
+        if link_prim is not None and link_prim.IsValid():
+            return link_prim
+
+        chain = []
+        current = link_name
+        anchor_prim = None
+        while current in fixed_edges:
+            parent, T_parent_current = fixed_edges[current]
+            chain.append((current, T_parent_current))
+            anchor_prim = self._find_link_prim(stage, robot_root, parent)
+            if anchor_prim is not None and anchor_prim.IsValid():
+                break
+            current = parent
+        if anchor_prim is None or not anchor_prim.IsValid():
+            return None
+
+        T_anchor_link = np.eye(4)
+        for _, T_parent_child in reversed(chain):
+            T_anchor_link = T_anchor_link @ T_parent_child
+
+        frame_root = f"{anchor_prim.GetPath()}/{COLLISION_SPHERES_SCOPE_NAME}/frames"
+        UsdGeom.Xform.Define(stage, frame_root)
+        frame = UsdGeom.Xform.Define(stage, f"{frame_root}/{link_name}")
+        xf = UsdGeom.Xformable(frame)
+        xf.ClearXformOpOrder()
+        xf.AddTransformOp(opSuffix="urdfFixedFrame").Set(_np_to_gf(T_anchor_link))
+        return frame.GetPrim()
+
+    def _delete_collision_spheres(self, log: bool):
+        import omni.usd
+        from isaacsim.core.utils import prims
+
+        stage = omni.usd.get_context().get_stage()
+        paths = [
+            str(prim.GetPath())
+            for prim in stage.Traverse()
+            if prim.GetName() == COLLISION_SPHERES_SCOPE_NAME
+        ]
+        for path in sorted(paths, key=len, reverse=True):
+            prims.delete_prim(path)
+        if log:
+            self._append_log(
+                f"[spheres] cleared {len(paths)} collision sphere scope(s)"
+                if paths else "[spheres] nothing to clear"
+            )
+
+    def _on_show_collision_spheres(self):
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        robot_root = GHOST_ROOT_PATH
+        if not stage.GetPrimAtPath(robot_root).IsValid():
+            self._append_log(f"[spheres] ghost robot not found: {robot_root}")
+            return
+
+        try:
+            cfg_path, urdf_path, collision_link_names, collision_spheres = (
+                self._load_collision_spheres()
+            )
+            fixed_edges = self._load_fixed_urdf_edges(urdf_path)
+        except Exception as e:
+            self._append_log(f"[spheres] load failed: {e}")
+            return
+
+        self._delete_collision_spheres(log=False)
+
+        n_spheres = 0
+        missing_links = []
+        for link_name in collision_link_names:
+            link_prim = self._link_prim_or_fixed_frame(
+                stage, robot_root, link_name, fixed_edges,
+            )
+            if link_prim is None or not link_prim.IsValid():
+                missing_links.append(link_name)
+                continue
+
+            scope_path = f"{link_prim.GetPath()}/{COLLISION_SPHERES_SCOPE_NAME}"
+            UsdGeom.Xform.Define(stage, scope_path)
+            is_camera = link_name in CAMERA_COLLISION_LINKS
+            color = Gf.Vec3f(1.0, 0.42, 0.08) if is_camera else Gf.Vec3f(0.2, 1.0, 0.35)
+            opacity = 0.38 if is_camera else 0.22
+
+            for i, sphere_cfg in enumerate(collision_spheres[link_name]):
+                center = sphere_cfg["center"]
+                radius = float(sphere_cfg["radius"])
+                sphere = UsdGeom.Sphere.Define(stage, f"{scope_path}/s_{i:03d}")
+                sphere.CreateRadiusAttr(radius)
+                sphere.CreateDisplayColorAttr(Vt.Vec3fArray([color]))
+                sphere.CreateDisplayOpacityAttr(Vt.FloatArray([opacity]))
+                xf = UsdGeom.Xformable(sphere)
+                xf.ClearXformOpOrder()
+                xf.AddTranslateOp().Set(Gf.Vec3d(
+                    float(center[0]), float(center[1]), float(center[2])
+                ))
+                n_spheres += 1
+
+        msg = (
+            f"[spheres] displayed {n_spheres} cuRobo collision spheres from "
+            f"{cfg_path.name} under {robot_root}"
+        )
+        if missing_links:
+            msg += f" (missing links: {', '.join(missing_links)})"
+        self._append_log(msg)
+
+    def _on_clear_collision_spheres(self):
+        self._delete_collision_spheres(log=True)
 
     def _on_generate(self):
         if self._gen_runner.running:
@@ -1156,9 +1607,12 @@ class PipelineWindow:
 
     def _on_stop(self):
         self._preview.stop()
+        self._set_slider_value(0.0)
         self._refresh_status()
 
     def _on_slider(self, model):
+        if self._updating_slider:
+            return
         if not self._preview.loaded:
             return
         self._preview.seek(model.get_value_as_float())
@@ -1167,8 +1621,20 @@ class PipelineWindow:
     def _update_slider_bounds(self):
         if self._slider_model is None:
             return
-        # omni.ui.FloatSlider min/max are widget-level; we just clamp via seek().
-        self._slider_model.set_value(0.0)
+        duration = max(float(self._preview.state.duration), 1e-6)
+        if self._slider is not None:
+            self._slider.min = 0.0
+            self._slider.max = duration
+        self._set_slider_value(0.0)
+
+    def _set_slider_value(self, value: float):
+        if self._slider_model is None:
+            return
+        self._updating_slider = True
+        try:
+            self._slider_model.set_value(float(value))
+        finally:
+            self._updating_slider = False
 
     def _refresh_status(self):
         if self._status_label is None:
@@ -1189,7 +1655,7 @@ class PipelineWindow:
         if self._preview.state.playing:
             self._preview.step(dt)
             if self._slider_model is not None:
-                self._slider_model.set_value(self._preview.state.t)
+                self._set_slider_value(self._preview.state.t)
             self._refresh_status()
 
     # ------------------------------------------------------------------
@@ -1255,6 +1721,7 @@ class PipelineWindow:
     # ------------------------------------------------------------------
     def pump(self, dt: float):
         self._gen_runner.pump()
+        self._ik_runner.pump()
         self._pub_runner.pump()
         self.step_preview(dt)
 

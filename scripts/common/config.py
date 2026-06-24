@@ -13,11 +13,11 @@ DATA_ROOT = PROJECT_ROOT / "data"
 # ============================================================================
 
 # 카메라 시야각 (mm)
-CAMERA_FOV_WIDTH_MM = 41.0
-CAMERA_FOV_HEIGHT_MM = 30.0
+CAMERA_FOV_WIDTH_MM = 50.0
+CAMERA_FOV_HEIGHT_MM = 50.0
 
 # 작업 거리 (mm) - camera_optical_frame에서 검사 표면까지의 거리
-CAMERA_WORKING_DISTANCE_MM = 45.0
+CAMERA_WORKING_DISTANCE_MM = 250.0
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.7
