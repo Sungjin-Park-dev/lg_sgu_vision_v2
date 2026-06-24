@@ -3,11 +3,12 @@
 
 Two ways to put viewpoints on screen, both object-centric:
 
-  * **Generate** — pick an object, tune clustering parameters (coacd+dbscan), and
+  * **Generate** — pick an object, tune clustering parameters, and
     regenerate viewpoints in-process via the ``generate_viewpoints.py`` seam
     (``load_meshes`` / ``prepare_grid`` / ``cluster_coacd`` / ``cluster_and_order``).
-    CoACD is cached per (object, threshold) so tuning eps/normal_weight/min_samples
-    is fast (~2s); changing the threshold re-runs CoACD (~6s).
+    Viewpoints are generated with surface sampling only. Surface spacing is derived
+    from camera FOV and overlap; CoACD is cached per (object, spacing, threshold)
+    so tuning sub-cluster parameters is fast (~2s).
   * **Existing h5** — load a previously saved ``viewpoints*.h5`` for the object.
 
 Rendered elements (same as the static plotly export, ``common/viewpoint_viz.py``):
@@ -15,9 +16,10 @@ translucent mesh, per-cluster markers, intra-cluster path lines, inter-cluster
 transitions, and — for generated results — translucent CoACD part overlays.
 Layers toggle independently; a playback slider scrubs/auto-plays the visit order.
 
-Scope: clustering method is fixed to ``coacd+dbscan``; material filtering and
-grid/bottom-filter tuning are not exposed (entire mesh, default grid). Found
-parameters can be persisted with **Save** for the downstream plan_trajectory step.
+Scope: sampling is fixed to ``surface`` and ordering to ``lawnmower`` in this app.
+Grid sampling remains available in ``generate_viewpoints.py`` for CLI/batch use.
+Material filtering and bottom-filter tuning are not exposed. Found parameters can
+be persisted with **Save** for the downstream plan_trajectory step.
 
 Usage:
     uv run scripts/apps/viewpoint_studio.py --object sample
@@ -47,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # -> scripts/
 from common import config
 from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
 from core.generate_viewpoints import (
-    load_meshes, prepare_grid, cluster_coacd, cluster_and_order,
+    load_meshes, prepare_grid as prepare_viewpoints, cluster_coacd, cluster_and_order,
     save_viewpoints_hdf5, ViewpointGenParams,
 )
 
@@ -55,8 +57,15 @@ HIGHLIGHT_RGB = (255, 235, 59)   # moving playback marker
 TRAIL_RGB = (255, 205, 0)        # visited path so far
 TRANSITION_RGB = (150, 150, 150)  # inter-cluster lines
 MESH_RGB = (180, 180, 180)
+SURFACE_RGB = (255, 255, 255)
 
-EPS_SPACING_FACTOR = 1.5  # surface 모드 기본 eps = factor × spacing(mm)
+EPS_SPACING_FACTOR = 1.5  # dbscan 기본 eps = factor × FOV-derived spacing(mm)
+DBSCAN_MIN_SAMPLES = 2
+DBSCAN_NORMAL_WEIGHT = 0.0
+OVERLAP_MIN_PCT = 20
+OVERLAP_MAX_PCT = 90
+SUBCLUSTER_METHODS = ["agglomerative", "dbscan"]
+DEFAULT_SUBCLUSTER_METHOD = "agglomerative"
 
 # 오브젝트별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
 # (CLI의 --material-rgb 와 동일 경로. 미지정 오브젝트는 전체 메시.)
@@ -65,6 +74,29 @@ OBJECT_TARGET_MATERIAL = {
     # (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일. CLI --material-rgb "0,255,0" 와 동일.)
     "sample": "0,255,0",
 }
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def default_overlap_pct() -> int:
+    pct = config.CAMERA_OVERLAP_RATIO * 100.0
+    return int(round(_clamp(pct, OVERLAP_MIN_PCT, OVERLAP_MAX_PCT)))
+
+
+def fov_spacing_mm(overlap_pct: float) -> tuple[float, float, float]:
+    """Return (row, col, isotropic_surface) spacing in mm from FOV and overlap."""
+    overlap_ratio = _clamp(overlap_pct, OVERLAP_MIN_PCT, OVERLAP_MAX_PCT) / 100.0
+    row_mm = config.CAMERA_FOV_HEIGHT_MM * (1.0 - overlap_ratio)
+    col_mm = config.CAMERA_FOV_WIDTH_MM * (1.0 - overlap_ratio)
+    return row_mm, col_mm, min(row_mm, col_mm)
+
+
+def eps_default_mm(surface_spacing_mm: float) -> int:
+    eps = EPS_SPACING_FACTOR * surface_spacing_mm
+    eps = _clamp(eps, 5.0, 80.0)
+    return int(eps + 0.5)
 
 
 @dataclass(frozen=True)
@@ -221,17 +253,17 @@ class Studio:
         self.data_root = data_root
 
         self.layers: dict[str, list] = {
-            "mesh": [], "markers": [], "paths": [], "transitions": [], "coacd": [],
+            "mesh": [], "surface": [], "markers": [], "paths": [], "transitions": [], "coacd": [],
         }
         self.play: dict[str, object] = {"highlight": None, "visited": None}
         self.data: dict | None = None
         self.pb_pos = 0.0
         self.step_slider = None
 
-        # caches (per object / per (object, sampling_mode[, threshold]))
+        # caches (per object / per (object, surface spacing[, threshold]))
         self.mesh_cache: dict[str, tuple] = {}   # obj -> (full_mesh, target_mesh, input_path)
-        self.grid_cache: dict[tuple, dict] = {}  # (obj, sampling_mode) -> grid dict
-        self.coacd_cache: dict[tuple, tuple] = {}  # (obj, sampling_mode, threshold) -> (ids, parts)
+        self.surface_cache: dict[tuple, dict] = {}  # (obj, spacing) -> prepare_viewpoints result
+        self.coacd_cache: dict[tuple, tuple] = {}  # (obj, spacing, threshold) -> (ids, parts)
         self.last: dict | None = None            # last generated result, for Save
         self.generating = False
         self._existing: dict[str, ViewpointEntry] = {}
@@ -247,28 +279,29 @@ class Studio:
 
         with g.add_folder("Layers"):
             self.cb_mesh = g.add_checkbox("Mesh", initial_value=True)
+            self.cb_surface = g.add_checkbox("Surface points", initial_value=True)
             self.cb_markers = g.add_checkbox("Markers", initial_value=True)
             self.cb_paths = g.add_checkbox("Cluster paths", initial_value=True)
             self.cb_transitions = g.add_checkbox("Transitions", initial_value=True)
             self.cb_coacd = g.add_checkbox("CoACD parts", initial_value=False)
 
-        with g.add_folder("Generate (coacd + sub-cluster)"):
-            self.sampling_dd = g.add_dropdown(
-                "Sampling", options=["surface", "grid"], initial_value="surface")
-            self.sl_spacing = g.add_slider(
-                "surface spacing (mm)", min=5, max=40, step=1, initial_value=12)
+        with g.add_folder("Generate (surface + coacd + sub-cluster)"):
+            initial_overlap = default_overlap_pct()
+            _, _, initial_spacing = fov_spacing_mm(initial_overlap)
+            self.sl_overlap = g.add_slider(
+                "FOV overlap (%)", min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT,
+                step=1, initial_value=initial_overlap)
+            self.fov_status = g.add_markdown("")
             self.sl_threshold = g.add_slider("coacd_threshold", min=0.05, max=0.5, step=0.05, initial_value=0.25)
             self.submethod_dd = g.add_dropdown(
-                "Sub-cluster", options=["agglomerative", "dbscan"], initial_value="agglomerative")
+                "Sub-cluster", options=SUBCLUSTER_METHODS, initial_value=DEFAULT_SUBCLUSTER_METHOD)
             # agglomerative 노브: 클러스터 최대 지름(mm). complete-linkage로 지름 ≤ 값 보장
             # → 멀리 떨어진 viewpoint가 한 클러스터로 묶이는 것 방지.
-            self.sl_maxspan = g.add_slider("max span (mm)", min=20, max=150, step=5, initial_value=100)
-            # dbscan 노브 (eps는 surface spacing을 자동 추적)
+            self.sl_maxspan = g.add_slider("max span (mm)", min=50, max=500, step=10, initial_value=250)
+            # dbscan 노브 (eps는 FOV-derived surface spacing을 자동 추적)
             self.sl_eps = g.add_slider(
                 "eps (mm)", min=5, max=80, step=1,
-                initial_value=int(round(EPS_SPACING_FACTOR * 12)))  # auto-tracks spacing (surface)
-            self.sl_ms = g.add_slider("min_samples", min=1, max=5, step=1, initial_value=2)
-            self.sl_nw = g.add_slider("normal_weight", min=0.0, max=0.2, step=0.01, initial_value=0.05)
+                initial_value=eps_default_mm(initial_spacing))
             self.btn_generate = g.add_button("Generate")
             self.btn_save = g.add_button("Save h5")
             self.gen_status = g.add_markdown("Idle.")
@@ -284,24 +317,45 @@ class Studio:
         # callbacks
         self.object_dd.on_update(lambda _: self._on_object_change())
         self.existing_dd.on_update(lambda _: self._on_existing_change())
-        for cb in (self.cb_mesh, self.cb_markers, self.cb_paths, self.cb_transitions, self.cb_coacd):
+        for cb in (self.cb_mesh, self.cb_surface, self.cb_markers,
+                   self.cb_paths, self.cb_transitions, self.cb_coacd):
             cb.on_update(lambda _: self._apply_visibility())
         self.btn_generate.on_click(lambda _: self._on_generate())
         self.btn_save.on_click(lambda _: self._on_save())
-        self.sl_spacing.on_update(lambda _: self._on_spacing_change())
+        self.submethod_dd.on_update(lambda _: self._apply_subcluster_visibility())
+        self.sl_overlap.on_update(lambda _: self._on_overlap_change())
+        self._apply_subcluster_visibility()
+        self._refresh_fov_status()
 
-    def _on_spacing_change(self) -> None:
-        """surface 모드에서 spacing이 바뀌면 eps 기본값(=factor×spacing)을 따라가게.
+    def _current_overlap_pct(self) -> float:
+        return float(self.sl_overlap.value)
 
-        eps 슬라이더는 유지되므로, 이후 사용자가 수동으로 다시 조절할 수 있다.
-        grid 모드에선 spacing이 무의미하므로 동기화하지 않는다.
-        """
-        if str(self.sampling_dd.value) != "surface":
-            return
-        new_eps = EPS_SPACING_FACTOR * float(self.sl_spacing.value)
-        # eps 슬라이더 범위로 클램프
-        new_eps = max(5.0, min(80.0, new_eps))
-        self.sl_eps.value = int(round(new_eps))
+    def _current_spacing(self) -> tuple[float, float, float]:
+        return fov_spacing_mm(self._current_overlap_pct())
+
+    def _refresh_fov_status(self) -> None:
+        row_mm, col_mm, surface_mm = self._current_spacing()
+        self.fov_status.content = (
+            f"FOV `{config.CAMERA_FOV_WIDTH_MM:.0f}×{config.CAMERA_FOV_HEIGHT_MM:.0f} mm` · "
+            f"overlap `{self._current_overlap_pct():.0f}%` · "
+            f"surface spacing `{surface_mm:.1f} mm` "
+            f"(row `{row_mm:.1f}`, col `{col_mm:.1f}`)"
+        )
+
+    def _on_overlap_change(self) -> None:
+        """FOV overlap이 바뀌면 surface spacing과 dbscan eps 기본값을 같이 갱신한다."""
+        _, _, surface_mm = self._current_spacing()
+        self.sl_eps.value = eps_default_mm(surface_mm)
+        self._refresh_fov_status()
+
+    def _apply_subcluster_visibility(self) -> None:
+        """Show only controls relevant to the selected sub-clustering method."""
+        method = str(self.submethod_dd.value)
+        is_agglomerative = method == "agglomerative"
+        is_dbscan = method == "dbscan"
+
+        self.sl_maxspan.visible = is_agglomerative
+        self.sl_eps.visible = is_dbscan
 
     def _make_step_slider(self, n: int) -> None:
         if self.step_slider is not None:
@@ -345,80 +399,97 @@ class Studio:
             self.btn_generate.disabled = True
         except Exception:  # noqa: BLE001
             pass
-        self.gen_status.content = "⏳ Generating… (CoACD may take ~6s on first threshold)"
-        sampling = str(self.sampling_dd.value)
+        self.gen_status.content = "⏳ Generating…"
         submethod = str(self.submethod_dd.value)  # 'agglomerative' | 'dbscan'
+        if submethod not in SUBCLUSTER_METHODS:
+            submethod = DEFAULT_SUBCLUSTER_METHOD
+        method = f"coacd+{submethod}"
+        row_spacing_mm, col_spacing_mm, surface_spacing_mm = self._current_spacing()
         p = {
             "obj": self.object_dd.value,
-            "sampling_mode": sampling,
-            "ordering_mode": "graph" if sampling == "surface" else "zigzag",
-            "surface_spacing_mm": float(self.sl_spacing.value) if sampling == "surface" else None,
+            "sampling_mode": "surface",
+            "ordering_mode": "lawnmower",
+            "surface_overlap_pct": self._current_overlap_pct(),
+            "surface_spacing_mm": surface_spacing_mm,
+            "row_spacing_mm": row_spacing_mm,
+            "col_spacing_mm": col_spacing_mm,
             "submethod": submethod,
-            "method": f"coacd+{submethod}",
+            "method": method,
             "threshold": float(self.sl_threshold.value),
             "max_span_mm": float(self.sl_maxspan.value),
             "eps_mm": float(self.sl_eps.value),
-            "normal_weight": float(self.sl_nw.value),
-            "min_samples": int(self.sl_ms.value),
+            "normal_weight": DBSCAN_NORMAL_WEIGHT,
+            "min_samples": DBSCAN_MIN_SAMPLES,
         }
         threading.Thread(target=self._generate_worker, args=(p,), daemon=True).start()
 
     def _generate_worker(self, p: dict) -> None:
         try:
             obj = p["obj"]
-            sm = p["sampling_mode"]
             if obj not in self.mesh_cache:
                 mat = OBJECT_TARGET_MATERIAL.get(obj)  # 예: sample → 초록만. 미지정 시 전체 메시
                 self.mesh_cache[obj] = load_meshes(obj, mat)
             full_mesh, target_mesh, input_path = self.mesh_cache[obj]
 
-            sp = p.get("surface_spacing_mm") if sm == "surface" else None
-            gkey = (obj, sm, sp)
-            if gkey not in self.grid_cache:
-                self.grid_cache[gkey] = prepare_grid(
-                    target_mesh, ViewpointGenParams(sampling_mode=sm, surface_spacing_mm=sp))
-            grid = self.grid_cache[gkey]
+            sp = p["surface_spacing_mm"]
+            gkey = (obj, round(sp, 4))
+            if gkey not in self.surface_cache:
+                self.surface_cache[gkey] = prepare_viewpoints(
+                    target_mesh,
+                    ViewpointGenParams(
+                        sampling_mode="surface",
+                        ordering_mode="lawnmower",
+                        surface_spacing_mm=sp,
+                        row_spacing_mm=p["row_spacing_mm"],
+                        col_spacing_mm=p["col_spacing_mm"],
+                    ),
+                )
+            surface = self.surface_cache[gkey]
 
-            ckey = (obj, sm, sp, round(p["threshold"], 4))
+            ckey = (obj, round(sp, 4), round(p["threshold"], 4))
             if ckey not in self.coacd_cache:
-                self.coacd_cache[ckey] = cluster_coacd(target_mesh, grid["positions"], p["threshold"])
+                self.coacd_cache[ckey] = cluster_coacd(target_mesh, surface["positions"], p["threshold"])
             cached = self.coacd_cache[ckey]
 
             method = p["method"]  # coacd+agglomerative | coacd+dbscan
             common = dict(
-                positions=grid["positions"], normals=grid["normals"],
-                camera_positions=grid["camera_positions"], target_mesh=target_mesh,
-                row_spacing_m=grid["row_spacing_m"], grid_row_index=grid["grid_row_index"],
-                cam_axis1=grid["cam_axis1"], cam_axis2=grid["cam_axis2"],
-                original_path_length_mm=grid["original_path_length_mm"],
+                positions=surface["positions"], normals=surface["normals"],
+                camera_positions=surface["camera_positions"], target_mesh=target_mesh,
+                row_spacing_m=surface["row_spacing_m"], col_spacing_m=surface["col_spacing_m"],
+                grid_row_index=surface["grid_row_index"],
+                cam_axis1=surface["cam_axis1"], cam_axis2=surface["cam_axis2"],
+                original_path_length_mm=surface["original_path_length_mm"],
                 threshold=p["threshold"], normal_weight=p["normal_weight"],
                 precomputed_coacd=cached, ordering_mode=p["ordering_mode"],
             )
             if p["submethod"] == "agglomerative":
                 result = cluster_and_order(method, method, **common, max_span_mm=p["max_span_mm"])
-            else:
+            elif p["submethod"] == "dbscan":
                 result = cluster_and_order(
                     method, method, **common,
                     eps_m=p["eps_mm"] / 1000.0, min_samples=p["min_samples"])
+            else:
+                raise ValueError(f"Unsupported sub-cluster method in studio: {p['submethod']}")
 
             data = _scene_dict(
-                grid["positions"], grid["normals"], grid["camera_positions"],
+                surface["positions"], surface["normals"], surface["camera_positions"],
                 result["cluster_ids"], result["cluster_order"], result["path_order"],
                 str(input_path), config.CAMERA_WORKING_DISTANCE_MM / 1000.0,
             )
-            self.last = {"obj": obj, "grid": grid, "result": result,
+            self.last = {"obj": obj, "surface": surface, "result": result,
                          "params": p, "n": data["n"], "input_path": input_path}
-            red = (1 - result["path_length_mm"] / grid["original_path_length_mm"]) * 100
-            smlabel = f"{sm} {sp:.0f}mm" if sp is not None else sm
-            knob = (f"span={p['max_span_mm']:.0f}mm" if p["submethod"] == "agglomerative"
-                    else f"eps={p['eps_mm']:.0f} ms={p['min_samples']}")
-            sub = p["submethod"]
+            red = (1 - result["path_length_mm"] / surface["original_path_length_mm"]) * 100
+            smlabel = f"surface {p['surface_overlap_pct']:.0f}% overlap · {sp:.1f}mm"
+            if p["submethod"] == "agglomerative":
+                knob = f"span={p['max_span_mm']:.0f}mm"
+            else:
+                knob = f"eps={p['eps_mm']:.0f}mm"
             self._set_scene(
                 full_mesh, data, coacd_parts=result.get("coacd_parts"),
-                source=f"gen · {smlabel} · {sub} · t={p['threshold']} {knob} nw={p['normal_weight']}",
+                source=f"gen · {smlabel} · {method} · t={p['threshold']} {knob}",
             )
             self.gen_status.content = (
-                f"**Done** · {smlabel} · coacd+{sub} ({knob}) · {data['n']} vp · "
+                f"**Done** · {smlabel} · {method} ({knob}) · {data['n']} vp · "
                 f"{result['num_clusters']} clusters · "
                 f"{len(result.get('coacd_parts') or [])} CoACD parts · "
                 f"path {result['path_length_mm']:.0f} mm ({red:.1f}% reduction)")
@@ -437,16 +508,16 @@ class Studio:
             self.gen_status.content = "Generate first, then Save."
             return
         L = self.last
-        obj, grid, result, p = L["obj"], L["grid"], L["result"], L["params"]
-        clmethod = p.get("method", "coacd+dbscan")
+        obj, surface, result, p = L["obj"], L["surface"], L["result"], L["params"]
+        clmethod = p.get("method", "coacd+agglomerative")
         out = str(config.get_viewpoint_path(obj, L["n"], filename=f"viewpoints_{clmethod}.h5"))
         camera_spec = {
             "fov_width_mm": config.CAMERA_FOV_WIDTH_MM,
             "fov_height_mm": config.CAMERA_FOV_HEIGHT_MM,
             "working_distance_mm": config.CAMERA_WORKING_DISTANCE_MM,
         }
-        sm = p.get("sampling_mode", "grid")
-        om = p.get("ordering_mode", "zigzag")
+        sm = p.get("sampling_mode", "surface")
+        om = p.get("ordering_mode", "lawnmower")
         sp = p.get("surface_spacing_mm")
         metadata = {
             "timestamp": datetime.now().isoformat(),
@@ -454,32 +525,36 @@ class Studio:
             "method": f"{sm}+{om}",
             "sampling_mode": sm,
             "ordering_mode": om,
-            "row_spacing_mm": grid["row_spacing_m"] * 1000.0,
-            "col_spacing_mm": grid["col_spacing_m"] * 1000.0,
+            "row_spacing_mm": surface["row_spacing_m"] * 1000.0,
+            "col_spacing_mm": surface["col_spacing_m"] * 1000.0,
             "total_path_length_mm": result["path_length_mm"],
         }
         if sp is not None:
             metadata["surface_spacing_mm"] = sp
+            metadata["surface_overlap_pct"] = p.get("surface_overlap_pct")
         cluster_meta = {
             "clustering_method": clmethod,
             "num_clusters": result["num_clusters"],
             "clustered_path_length_mm": result["path_length_mm"],
-            "original_path_length_mm": grid["original_path_length_mm"],
+            "original_path_length_mm": surface["original_path_length_mm"],
             "clustering_timestamp": datetime.now().isoformat(),
             "coacd_threshold": p["threshold"],
         }
         if p.get("submethod") == "agglomerative":
             cluster_meta["max_span_mm"] = p["max_span_mm"]
-            cluster_meta["normal_weight"] = p["normal_weight"]
-        else:
+        elif p.get("submethod") == "dbscan":
             cluster_meta["dbscan_eps_mm"] = p["eps_mm"]
             cluster_meta["dbscan_min_samples"] = p["min_samples"]
             cluster_meta["dbscan_normal_weight"] = p["normal_weight"]
-        pca_data = {"center": grid["pca_center"], "axis1": grid["pca_axis1"], "axis2": grid["pca_axis2"]}
+        pca_data = {
+            "center": surface["pca_center"],
+            "axis1": surface["pca_axis1"],
+            "axis2": surface["pca_axis2"],
+        }
         try:
             save_viewpoints_hdf5(
-                grid["positions"], grid["normals"], out, metadata, camera_spec,
-                result["path_order"], pca_data, grid["row_index"],
+                surface["positions"], surface["normals"], out, metadata, camera_spec,
+                result["path_order"], pca_data, surface["row_index"],
                 cluster_id=result["cluster_ids"], cluster_order=result["cluster_order"],
                 cluster_direction=result["cluster_direction"], cluster_metadata=cluster_meta,
             )
@@ -508,7 +583,8 @@ class Studio:
 
     def _apply_visibility(self) -> None:
         toggles = {
-            "mesh": self.cb_mesh, "markers": self.cb_markers, "paths": self.cb_paths,
+            "mesh": self.cb_mesh, "surface": self.cb_surface,
+            "markers": self.cb_markers, "paths": self.cb_paths,
             "transitions": self.cb_transitions, "coacd": self.cb_coacd,
         }
         for key, cb in toggles.items():
@@ -518,6 +594,7 @@ class Studio:
     def _build_scene(self, full_mesh, data: dict, coacd_parts) -> None:
         self._clear_layers()
         srv = self.server
+        surf = data["positions"]
         cam = data["camera_positions"]
         cid = data["cluster_id"]
         corder = data["cluster_order"]
@@ -537,6 +614,10 @@ class Studio:
             if idx.size == 0:
                 continue
             rgb = palette[rank]
+            self.layers["surface"].append(srv.scene.add_point_cloud(
+                f"/scene/surface/c{c}", points=surf[idx],
+                colors=np.tile(np.array(rgb, dtype=np.uint8), (len(idx), 1)),
+                point_size=0.0025, point_shape="circle"))
             self.layers["markers"].append(srv.scene.add_point_cloud(
                 f"/scene/markers/c{c}", points=cam[idx],
                 colors=np.tile(np.array(rgb, dtype=np.uint8), (len(idx), 1)),

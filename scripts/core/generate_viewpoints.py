@@ -461,37 +461,69 @@ def _nn_path_length(points: np.ndarray) -> float:
     return total
 
 
+def farthest_point_sample_indices(points: np.ndarray, count: int) -> np.ndarray:
+    """Greedy farthest-point sampling over candidate points.
+
+    The candidates are already sampled on the mesh surface. FPS then picks a
+    deterministic subset that maximizes spacing in 3D Euclidean distance. This is
+    not geodesic FPS, but is a strong practical improvement over pure random or
+    weak rejection sampling for inspection viewpoint coverage.
+    """
+    n = len(points)
+    if count >= n:
+        return np.arange(n, dtype=np.int32)
+    if count <= 0:
+        return np.empty(0, dtype=np.int32)
+
+    pts = np.asarray(points, dtype=np.float64)
+    selected = np.empty(count, dtype=np.int32)
+
+    centroid = pts.mean(axis=0)
+    selected[0] = int(np.argmin(np.sum((pts - centroid) ** 2, axis=1)))
+
+    min_dist2 = np.full(n, np.inf, dtype=np.float64)
+    for i in range(1, count):
+        last = pts[selected[i - 1]]
+        diff = pts - last
+        dist2 = np.einsum("ij,ij->i", diff, diff)
+        min_dist2 = np.minimum(min_dist2, dist2)
+        selected[i] = int(np.argmax(min_dist2))
+
+    return selected
+
+
 def generate_surface_viewpoints(
     mesh: trimesh.Trimesh,
     spacing_m: float,
     verbose: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """표면 직접 균일 샘플링(Poisson-disk blue-noise)으로 뷰포인트를 생성한다.
+    """표면 직접 균일 샘플링(Farthest Point Sampling)으로 뷰포인트를 생성한다.
 
     PCA 평면 투영 그리드와 달리 메시 표면 위에서 직접 균일 분포를 뽑아,
     곡면·측벽도 표면적 기준으로 고르게 덮는다(평면 투영의 곡면 누락 문제 해결).
 
     Args:
         mesh: 대상 메시
-        spacing_m: 샘플 간 최소 거리(=Poisson-disk radius, 미터)
+        spacing_m: 목표 표면 간격(미터). 목표 개수는 area / spacing²로 계산한다.
 
     Returns:
         generate_grid_viewpoints와 동일한 7-튜플
         (positions, normals, path_order, row_index, center, axis1, axis2).
-        path_order/row_index는 placeholder(그래프 순서가 별도로 대체).
+        path_order/row_index는 placeholder(cluster ordering이 별도로 대체).
     """
-    # 목표 개수 기반 균등 샘플링(radius 미지정). trimesh의 sample_surface_even은
-    # 내부적으로 radius=sqrt(area/(2*count))로 균등 분산하므로, 원하는 표면 간격
-    # spacing_m을 얻으려면 count = area / (2 * spacing_m^2)로 역산한다.
-    # (radius 직접 지정 방식은 culling이 saturation에 못 미쳐 under-pack 됨.)
-    count = max(16, int(mesh.area / (2.0 * max(spacing_m, 1e-6) ** 2)))
+    count = max(16, int(mesh.area / max(spacing_m, 1e-6) ** 2))
+    oversample_factor = 20
+    candidate_count = max(count, count * oversample_factor)
     if verbose:
-        print(f"Generating surface viewpoints (Poisson-disk, even)...")
+        print(f"Generating surface viewpoints (FPS over area-weighted candidates)...")
         print(f"  Surface area: {mesh.area:.6f} m2, target spacing: {spacing_m * 1000:.1f} mm")
         print(f"  Target count: {count}")
+        print(f"  Candidate count: {candidate_count}")
 
-    samples, face_indices = trimesh.sample.sample_surface_even(mesh, count, seed=42)
-    samples = np.asarray(samples)
+    candidates, candidate_faces = trimesh.sample.sample_surface(mesh, candidate_count, seed=42)
+    keep = farthest_point_sample_indices(candidates, count)
+    samples = np.asarray(candidates[keep])
+    face_indices = np.asarray(candidate_faces[keep])
 
     normals = mesh.face_normals[face_indices]
     norms = np.linalg.norm(normals, axis=1, keepdims=True)
@@ -501,10 +533,10 @@ def generate_surface_viewpoints(
     positions = samples.astype(np.float32)
     N = len(positions)
     if verbose:
-        print(f"  Generated: {N} viewpoints (≈{spacing_m * 1000:.1f} mm apart)")
+        print(f"  Generated: {N} viewpoints (target spacing ≈ {spacing_m * 1000:.1f} mm)")
 
     center, axis1, axis2 = compute_pca_axes(samples.astype(np.float64))
-    path_order = np.arange(N, dtype=np.int32)   # placeholder (graph 순서가 대체)
+    path_order = np.arange(N, dtype=np.int32)   # placeholder (cluster ordering이 대체)
     row_index = np.zeros(N, dtype=np.int32)     # placeholder
 
     return positions, normals, path_order, row_index, center, axis1, axis2
@@ -1062,11 +1094,11 @@ def order_cluster_graph(
     max_2opt_n: int = 120,
     max_2opt_passes: int = 30,
 ) -> list:
-    """한 클러스터의 surface-intrinsic open-path 순서(로컬 인덱스 permutation).
+    """한 클러스터의 nearest-neighbor open-path 순서(로컬 인덱스 permutation).
 
-    전역 PCA 평면 대신 클러스터 평균 법선의 탄젠트 평면에 투영 → Delaunay/kNN
-    인접 그래프 → nearest-neighbor + 2-opt open path. 절대 tangent-정렬
-    baseline보다 길어지지 않도록 가드.
+    전역 PCA 평면 대신 클러스터 평균 법선의 탄젠트 평면을 사용해 시작 극단점과
+    tangent-정렬 baseline을 잡고, 카메라 위치 기준 nearest-neighbor + 2-opt로
+    경로를 만든다. 절대 tangent-정렬 baseline보다 길어지지 않도록 가드한다.
 
     Returns: list[int] — 방문 순서(permutation). sorted_indices = [idx[i] for i in perm].
     """
@@ -1088,49 +1120,7 @@ def order_cluster_graph(
     major = 0 if spread[0] >= spread[1] else 1
     tangent_sorted = list(np.argsort(P2[:, major]))
 
-    # 2. 인접 그래프 (Delaunay → kNN 폴백)
-    neighbors: Optional[dict] = None
-    try:
-        from scipy.spatial import Delaunay, QhullError
-        try:
-            tri = Delaunay(P2)
-            nb: dict = {i: set() for i in range(n)}
-            for simplex in tri.simplices:
-                for a_i in simplex:
-                    for b_i in simplex:
-                        if a_i != b_i:
-                            nb[int(a_i)].add(int(b_i))
-            if any(nb.values()):
-                neighbors = {k: tuple(s) for k, s in nb.items()}
-        except QhullError:
-            neighbors = None
-    except Exception:  # noqa: BLE001
-        neighbors = None
-
-    if neighbors is None:
-        # kNN 폴백 (3D 거리 기준)
-        try:
-            from scipy.spatial import cKDTree
-            k = min(n, 8)
-            tree = cKDTree(P)
-            _, idx = tree.query(P, k=k)
-            nb = {i: set() for i in range(n)}
-            for i in range(n):
-                for j in np.atleast_1d(idx[i]):
-                    j = int(j)
-                    if j != i:
-                        nb[i].add(j)
-                        nb[j].add(i)
-            if any(nb.values()):
-                neighbors = {kk: tuple(s) for kk, s in nb.items()}
-        except Exception:  # noqa: BLE001
-            neighbors = None
-
-    if neighbors is None:
-        # 완전 병리적(전부 공선 등) → tangent 정렬로 단락
-        return tangent_sorted
-
-    # 3. nearest-neighbor seed (극단점에서 시작) + 2-opt
+    # 2. nearest-neighbor seed (극단점에서 시작) + 2-opt
     start = int(np.argmin(P2[:, major]))
     visited = np.zeros(n, dtype=bool)
     order = [start]
@@ -1147,7 +1137,7 @@ def order_cluster_graph(
     if n <= max_2opt_n:
         order = _two_opt_open(order, P, max_2opt_passes)
 
-    # 4. anti-explosion 가드: tangent-정렬 baseline보다 길면 폴백
+    # 3. anti-explosion 가드: tangent-정렬 baseline보다 길면 폴백
     def _plen(seq: list) -> float:
         return float(np.sum(np.linalg.norm(np.diff(P[seq], axis=0), axis=1))) if len(seq) > 1 else 0.0
 
@@ -1156,17 +1146,100 @@ def order_cluster_graph(
     return order
 
 
+def order_cluster_lawnmower(
+    surface_positions_sub: np.ndarray,
+    camera_positions_sub: np.ndarray,
+    normals_sub: np.ndarray,
+    row_spacing_m: float,
+) -> list:
+    """한 클러스터를 tangent-plane lawnmower 패턴으로 정렬한다.
+
+    row/scan 축은 표면점 기준으로 잡고, 두 가능한 시작 방향 중 실제 카메라
+    위치 경로가 짧은 쪽을 선택한다. 따라서 coverage row는 surface 기준,
+    이동 비용은 working-distance가 반영된 camera 기준이 된다.
+    """
+    S = np.asarray(surface_positions_sub, dtype=np.float64)
+    C = np.asarray(camera_positions_sub, dtype=np.float64)
+    n = len(S)
+    if n <= 2:
+        return list(range(n))
+    if not np.all(np.isfinite(S)) or not np.all(np.isfinite(C)):
+        return order_cluster_graph(camera_positions_sub, normals_sub)
+
+    spacing = max(float(row_spacing_m), 1e-6)
+
+    # 1. 평균 법선 tangent frame으로 표면점을 2D 투영
+    mean_n = np.asarray(normals_sub, dtype=np.float64).mean(axis=0)
+    u, v = _tangent_basis(mean_n)
+    Sc = S - S.mean(axis=0)
+    P2 = np.column_stack([Sc @ u, Sc @ v])
+    if not np.all(np.isfinite(P2)):
+        return order_cluster_graph(camera_positions_sub, normals_sub)
+
+    # 2. tangent 2D 안에서 PCA: 긴 축=scan, 짧은 축=row
+    P2c = P2 - P2.mean(axis=0)
+    try:
+        cov = np.cov(P2c, rowvar=False)
+        vals, vecs = np.linalg.eigh(cov)
+        order = np.argsort(vals)[::-1]
+        scan_axis = vecs[:, order[0]]
+        row_axis = vecs[:, order[1]]
+    except Exception:  # noqa: BLE001
+        spread = P2.max(axis=0) - P2.min(axis=0)
+        scan_axis = np.array([1.0, 0.0]) if spread[0] >= spread[1] else np.array([0.0, 1.0])
+        row_axis = np.array([-scan_axis[1], scan_axis[0]])
+
+    scan = P2c @ scan_axis
+    row = P2c @ row_axis
+
+    # 3. FOV-derived spacing으로 row binning
+    row_span = float(row.max() - row.min())
+    if row_span < spacing * 0.5:
+        row_bins = np.zeros(n, dtype=np.int32)
+    else:
+        row_bins = np.floor((row - row.min()) / spacing + 0.5).astype(np.int32)
+
+    rows = []
+    for rb in np.unique(row_bins):
+        idx = np.where(row_bins == rb)[0]
+        if idx.size == 0:
+            continue
+        rows.append((float(row[idx].mean()), idx))
+    rows.sort(key=lambda item: item[0])
+
+    if not rows:
+        return order_cluster_graph(camera_positions_sub, normals_sub)
+
+    def _make(reverse_first: bool) -> list:
+        out = []
+        for r, (_, idx) in enumerate(rows):
+            local = idx[np.argsort(scan[idx], kind="stable")]
+            if (r % 2 == 1) ^ reverse_first:
+                local = local[::-1]
+            out.extend(int(i) for i in local)
+        return out
+
+    def _plen(seq: list) -> float:
+        return float(np.sum(np.linalg.norm(np.diff(C[seq], axis=0), axis=1))) if len(seq) > 1 else 0.0
+
+    forward = _make(False)
+    reverse = _make(True)
+    return reverse if _plen(reverse) < _plen(forward) else forward
+
+
 def compute_cluster_internal_order(
     cluster_ids: np.ndarray,
+    surface_positions: np.ndarray,
     camera_positions: np.ndarray,
     normals: np.ndarray,
     row_spacing_m: float,
+    col_spacing_m: Optional[float] = None,
     grid_row_index: Optional[np.ndarray] = None,
     global_axis1: Optional[np.ndarray] = None,
     global_axis2: Optional[np.ndarray] = None,
     ordering_mode: str = 'zigzag',
 ) -> dict:
-    """각 클러스터의 내부 zigzag 순서를 사전 계산.
+    """각 클러스터의 내부 방문 순서를 사전 계산.
 
     TSP 전에 호출하여 클러스터별 start/end point를 확보한다.
 
@@ -1177,9 +1250,11 @@ def compute_cluster_internal_order(
 
     Args:
         cluster_ids: (N,) 클러스터 ID
+        surface_positions: (N, 3) 표면 위치
         camera_positions: (N, 3) 카메라 위치
         normals: (N, 3) 법선
         row_spacing_m: 행 간격 (미터)
+        col_spacing_m: 열 간격 (미터). lawnmower row 간격은 min(row, col)을 사용.
         grid_row_index: (N,) 그리드 생성 시 할당된 원본 행 인덱스. None이면 양자화로 추정.
         global_axis1: (3,) 전역 행 방향 축. grid_row_index 사용 시 전달 (proj1 계산용, 행 구분에는 미사용).
         global_axis2: (3,) 전역 열 방향 축. grid_row_index 사용 시 행 내 정렬에 사용.
@@ -1202,8 +1277,14 @@ def compute_cluster_internal_order(
 
         if len(indices) < 3:
             sorted_indices = list(indices)
+        elif ordering_mode == 'lawnmower':
+            spacing = min(row_spacing_m, col_spacing_m) if col_spacing_m is not None else row_spacing_m
+            perm = order_cluster_lawnmower(
+                surface_positions[indices], camera_positions[indices], normals[indices], spacing,
+            )
+            sorted_indices = [indices[i] for i in perm]
         elif ordering_mode == 'graph':
-            # surface-intrinsic: 평균 법선 탄젠트 + Delaunay/kNN + open-path TSP.
+            # 평균 법선 tangent 기준 시작점 + camera-space NN + open-path 2-opt.
             # order_cluster_graph는 permutation을 직접 반환(argsort 불필요).
             perm = order_cluster_graph(camera_positions[indices], normals[indices])
             sorted_indices = [indices[i] for i in perm]
@@ -1416,12 +1497,13 @@ Examples:
     # --- Sampling / Ordering ---
     parser.add_argument('--sampling-mode', type=str, default='grid',
                         choices=['grid', 'surface'],
-                        help='뷰포인트 배치: grid(PCA 평면 투영) | surface(표면 Poisson-disk, 곡면 커버리지). 기본: grid')
+                        help='뷰포인트 배치: grid(PCA 평면 투영) | surface(표면 FPS, 곡면 커버리지). 기본: grid')
     parser.add_argument('--surface-spacing', type=float, default=None,
-                        help='[surface] Poisson radius mm (기본: FOV 작은 축)')
+                        help='[surface] FPS 목표 표면 간격 mm (기본: FOV 작은 축)')
     parser.add_argument('--ordering-mode', type=str, default='zigzag',
-                        choices=['zigzag', 'graph'],
-                        help='클러스터 내부 순서: zigzag(전역 PCA) | graph(탄젠트 Delaunay/TSP). 기본: zigzag')
+                        choices=['zigzag', 'graph', 'lawnmower'],
+                        help='클러스터 내부 순서: zigzag(전역 PCA) | graph(NN+2opt) | '
+                             'lawnmower(탄젠트 row sweep). 기본: zigzag')
 
     # --- Comparison ---
     parser.add_argument('--compare', action='store_true',
@@ -1468,9 +1550,9 @@ class ViewpointGenParams:
     coacd_threshold: float = 0.05
     target_size: int = 12                     # [agglomerative ward] 클러스터당 목표 점 개수
     max_span_mm: Optional[float] = None       # [agglomerative] 클러스터 최대 지름 mm (지정 시 complete-linkage)
-    sampling_mode: str = 'grid'               # 'grid'(PCA 그리드 투영) | 'surface'(Poisson-disk)
-    surface_spacing_mm: Optional[float] = None  # surface 모드 Poisson radius (None이면 FOV 작은 축)
-    ordering_mode: str = 'zigzag'             # 'zigzag'(전역 PCA) | 'graph'(탄젠트 Delaunay/TSP)
+    sampling_mode: str = 'grid'               # 'grid'(PCA 그리드 투영) | 'surface'(FPS)
+    surface_spacing_mm: Optional[float] = None  # surface 모드 FPS 목표 간격 (None이면 FOV 작은 축)
+    ordering_mode: str = 'zigzag'             # 'zigzag' | 'graph' | 'lawnmower'
 
 
 @dataclass
@@ -1553,7 +1635,7 @@ def load_meshes(object_name, material_rgb=None, color_tolerance=5.0):
 
 
 def cluster_and_order(label, method, *, positions, normals, camera_positions, target_mesh,
-                      row_spacing_m, grid_row_index, cam_axis1, cam_axis2,
+                      row_spacing_m, col_spacing_m, grid_row_index, cam_axis1, cam_axis2,
                       original_path_length_mm, **kwargs):
     """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환."""
     t_total_start = time.perf_counter()
@@ -1566,7 +1648,10 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
             kwargs.get('min_samples', 2), kwargs.get('normal_weight', 0.0),
         )
     elif method == 'coacd':
-        cids, coacd_parts = cluster_coacd(target_mesh, positions, kwargs['threshold'])
+        if kwargs.get('precomputed_coacd') is not None:
+            cids, coacd_parts = kwargs['precomputed_coacd']
+        else:
+            cids, coacd_parts = cluster_coacd(target_mesh, positions, kwargs['threshold'])
     elif method == 'coacd+dbscan':
         cids, coacd_parts, coacd_ids = cluster_coacd_dbscan(
             target_mesh, positions, normals, camera_positions,
@@ -1601,7 +1686,8 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
 
     t0 = time.perf_counter()
     c_internal = compute_cluster_internal_order(
-        cids, camera_positions, normals, row_spacing_m,
+        cids, positions, camera_positions, normals, row_spacing_m,
+        col_spacing_m=col_spacing_m,
         grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
         ordering_mode=kwargs.get('ordering_mode', 'zigzag'),
     )
@@ -1659,13 +1745,13 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
     wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
 
     if params.sampling_mode == 'surface':
-        # 4'. 표면 직접 균일 샘플링 (Poisson-disk) — 곡면 커버리지
+        # 4'. 표면 직접 균일 샘플링 (FPS) — 곡면 커버리지
         spacing_m = (params.surface_spacing_mm / 1000.0) if params.surface_spacing_mm \
             else min(row_spacing_m, col_spacing_m)
         positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = \
             generate_surface_viewpoints(target_mesh, spacing_m)
         camera_positions = positions + normals * wd_m
-        # 전역 zigzag 생략(그래프 순서가 담당). axis/row는 placeholder.
+        # 전역 zigzag 생략(cluster ordering이 담당). axis/row는 placeholder.
         grid_row_index = row_index.copy()
         cam_axis1, cam_axis2 = pca_axis1, pca_axis2
     else:
@@ -1733,7 +1819,8 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
     common = dict(
         positions=grid['positions'], normals=grid['normals'],
         camera_positions=grid['camera_positions'], target_mesh=target_mesh,
-        row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
+        row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
+        grid_row_index=grid['grid_row_index'],
         cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
         original_path_length_mm=grid['original_path_length_mm'],
         ordering_mode=params.ordering_mode,
@@ -1899,7 +1986,8 @@ def main():
         common = dict(
             positions=grid['positions'], normals=grid['normals'],
             camera_positions=grid['camera_positions'], target_mesh=target_mesh,
-            row_spacing_m=grid['row_spacing_m'], grid_row_index=grid['grid_row_index'],
+            row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
+            grid_row_index=grid['grid_row_index'],
             cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
             original_path_length_mm=grid['original_path_length_mm'],
             ordering_mode=params.ordering_mode,
