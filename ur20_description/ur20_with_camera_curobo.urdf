@@ -1,0 +1,544 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="ur">
+  <ros2_control name="ur" type="system">
+    <hardware>
+      <plugin>ur_robot_driver/URPositionHardwareInterface</plugin>
+      <param name="robot_ip">0.0.0.0</param>
+      <param name="script_filename" />
+      <param name="output_recipe_filename" />
+      <param name="input_recipe_filename" />
+      <param name="headless_mode">False</param>
+      <param name="reverse_port">50001</param>
+      <param name="script_sender_port">50002</param>
+      <param name="reverse_ip">0.0.0.0</param>
+      <param name="script_command_port">50004</param>
+      <param name="trajectory_port">50003</param>
+      <param name="tf_prefix" />
+      <param name="non_blocking_read">True</param>
+      <param name="servoj_gain">2000</param>
+      <param name="servoj_lookahead_time">0.03</param>
+      <param name="use_tool_communication">False</param>
+      <param name="kinematics/hash">calib_4890363623803256388</param>
+      <param name="tool_voltage">0</param>
+      <param name="tool_parity">0</param>
+      <param name="tool_baud_rate">115200</param>
+      <param name="tool_stop_bits">1</param>
+      <param name="tool_rx_idle_chars">1.5</param>
+      <param name="tool_tx_idle_chars">3.5</param>
+      <param name="tool_device_name">/tmp/ttyUR</param>
+      <param name="tool_tcp_port">54321</param>
+      <param name="keep_alive_count">2</param>
+    </hardware>
+    <joint name="shoulder_pan_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="shoulder_lift_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">-1.57</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="elbow_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="wrist_1_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">-1.57</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="wrist_2_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="wrist_3_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <sensor name="tcp_fts_sensor">
+      <state_interface name="force.x" />
+      <state_interface name="force.y" />
+      <state_interface name="force.z" />
+      <state_interface name="torque.x" />
+      <state_interface name="torque.y" />
+      <state_interface name="torque.z" />
+    </sensor>
+    <sensor name="tcp_pose">
+      <state_interface name="position.x" />
+      <state_interface name="position.y" />
+      <state_interface name="position.z" />
+      <state_interface name="orientation.x" />
+      <state_interface name="orientation.y" />
+      <state_interface name="orientation.z" />
+      <state_interface name="orientation.w" />
+    </sensor>
+    <gpio name="speed_scaling">
+      <state_interface name="speed_scaling_factor" />
+      <param name="initial_speed_scaling_factor">1</param>
+      <command_interface name="target_speed_fraction_cmd" />
+      <command_interface name="target_speed_fraction_async_success" />
+    </gpio>
+    <gpio name="gpio">
+      <command_interface name="standard_digital_output_cmd_0" />
+      <command_interface name="standard_digital_output_cmd_1" />
+      <command_interface name="standard_digital_output_cmd_2" />
+      <command_interface name="standard_digital_output_cmd_3" />
+      <command_interface name="standard_digital_output_cmd_4" />
+      <command_interface name="standard_digital_output_cmd_5" />
+      <command_interface name="standard_digital_output_cmd_6" />
+      <command_interface name="standard_digital_output_cmd_7" />
+      <command_interface name="standard_digital_output_cmd_8" />
+      <command_interface name="standard_digital_output_cmd_9" />
+      <command_interface name="standard_digital_output_cmd_10" />
+      <command_interface name="standard_digital_output_cmd_11" />
+      <command_interface name="standard_digital_output_cmd_12" />
+      <command_interface name="standard_digital_output_cmd_13" />
+      <command_interface name="standard_digital_output_cmd_14" />
+      <command_interface name="standard_digital_output_cmd_15" />
+      <command_interface name="standard_digital_output_cmd_16" />
+      <command_interface name="standard_digital_output_cmd_17" />
+      <command_interface name="standard_analog_output_cmd_0" />
+      <command_interface name="standard_analog_output_cmd_1" />
+      <command_interface name="analog_output_domain_cmd" />
+      <command_interface name="tool_voltage_cmd" />
+      <command_interface name="io_async_success" />
+      <state_interface name="digital_output_0" />
+      <state_interface name="digital_output_1" />
+      <state_interface name="digital_output_2" />
+      <state_interface name="digital_output_3" />
+      <state_interface name="digital_output_4" />
+      <state_interface name="digital_output_5" />
+      <state_interface name="digital_output_6" />
+      <state_interface name="digital_output_7" />
+      <state_interface name="digital_output_8" />
+      <state_interface name="digital_output_9" />
+      <state_interface name="digital_output_10" />
+      <state_interface name="digital_output_11" />
+      <state_interface name="digital_output_12" />
+      <state_interface name="digital_output_13" />
+      <state_interface name="digital_output_14" />
+      <state_interface name="digital_output_15" />
+      <state_interface name="digital_output_16" />
+      <state_interface name="digital_output_17" />
+      <state_interface name="digital_input_0" />
+      <state_interface name="digital_input_1" />
+      <state_interface name="digital_input_2" />
+      <state_interface name="digital_input_3" />
+      <state_interface name="digital_input_4" />
+      <state_interface name="digital_input_5" />
+      <state_interface name="digital_input_6" />
+      <state_interface name="digital_input_7" />
+      <state_interface name="digital_input_8" />
+      <state_interface name="digital_input_9" />
+      <state_interface name="digital_input_10" />
+      <state_interface name="digital_input_11" />
+      <state_interface name="digital_input_12" />
+      <state_interface name="digital_input_13" />
+      <state_interface name="digital_input_14" />
+      <state_interface name="digital_input_15" />
+      <state_interface name="digital_input_16" />
+      <state_interface name="digital_input_17" />
+      <state_interface name="standard_analog_output_0" />
+      <state_interface name="standard_analog_output_1" />
+      <state_interface name="standard_analog_input_0" />
+      <state_interface name="standard_analog_input_1" />
+      <state_interface name="analog_io_type_0" />
+      <state_interface name="analog_io_type_1" />
+      <state_interface name="analog_io_type_2" />
+      <state_interface name="analog_io_type_3" />
+      <state_interface name="tool_mode" />
+      <state_interface name="tool_output_voltage" />
+      <state_interface name="tool_output_current" />
+      <state_interface name="tool_temperature" />
+      <state_interface name="tool_analog_input_0" />
+      <state_interface name="tool_analog_input_1" />
+      <state_interface name="tool_analog_input_type_0" />
+      <state_interface name="tool_analog_input_type_1" />
+      <state_interface name="robot_mode" />
+      <state_interface name="robot_status_bit_0" />
+      <state_interface name="robot_status_bit_1" />
+      <state_interface name="robot_status_bit_2" />
+      <state_interface name="robot_status_bit_3" />
+      <state_interface name="safety_mode" />
+      <state_interface name="safety_status_bit_0" />
+      <state_interface name="safety_status_bit_1" />
+      <state_interface name="safety_status_bit_2" />
+      <state_interface name="safety_status_bit_3" />
+      <state_interface name="safety_status_bit_4" />
+      <state_interface name="safety_status_bit_5" />
+      <state_interface name="safety_status_bit_6" />
+      <state_interface name="safety_status_bit_7" />
+      <state_interface name="safety_status_bit_8" />
+      <state_interface name="safety_status_bit_9" />
+      <state_interface name="safety_status_bit_10" />
+      <state_interface name="program_running" />
+    </gpio>
+    <gpio name="payload">
+      <command_interface name="mass" />
+      <command_interface name="cog.x" />
+      <command_interface name="cog.y" />
+      <command_interface name="cog.z" />
+      <command_interface name="payload_async_success" />
+    </gpio>
+    <gpio name="resend_robot_program">
+      <command_interface name="resend_robot_program_cmd" />
+      <command_interface name="resend_robot_program_async_success" />
+    </gpio>
+    <gpio name="hand_back_control">
+      <command_interface name="hand_back_control_cmd" />
+      <command_interface name="hand_back_control_async_success" />
+    </gpio>
+    <gpio name="zero_ftsensor">
+      <command_interface name="zero_ftsensor_cmd" />
+      <command_interface name="zero_ftsensor_async_success" />
+    </gpio>
+    <gpio name="freedrive_mode">
+      <command_interface name="async_success" />
+      <command_interface name="enable" />
+      <command_interface name="abort" />
+    </gpio>
+    <gpio name="tool_contact">
+      <command_interface name="tool_contact_set_state" />
+      <state_interface name="tool_contact_result" />
+      <state_interface name="tool_contact_state" />
+    </gpio>
+    <gpio name="system_interface">
+      <state_interface name="initialized" />
+    </gpio>
+    <gpio name="force_mode">
+      <command_interface name="task_frame_x" />
+      <command_interface name="task_frame_y" />
+      <command_interface name="task_frame_z" />
+      <command_interface name="task_frame_rx" />
+      <command_interface name="task_frame_ry" />
+      <command_interface name="task_frame_rz" />
+      <command_interface name="selection_vector_x" />
+      <command_interface name="selection_vector_y" />
+      <command_interface name="selection_vector_z" />
+      <command_interface name="selection_vector_rx" />
+      <command_interface name="selection_vector_ry" />
+      <command_interface name="selection_vector_rz" />
+      <command_interface name="wrench_x" />
+      <command_interface name="wrench_y" />
+      <command_interface name="wrench_z" />
+      <command_interface name="wrench_rx" />
+      <command_interface name="wrench_ry" />
+      <command_interface name="wrench_rz" />
+      <command_interface name="limits_x" />
+      <command_interface name="limits_y" />
+      <command_interface name="limits_z" />
+      <command_interface name="limits_rx" />
+      <command_interface name="limits_ry" />
+      <command_interface name="limits_rz" />
+      <command_interface name="type" />
+      <command_interface name="damping" />
+      <command_interface name="gain_scaling" />
+      <command_interface name="disable_cmd" />
+      <command_interface name="force_mode_async_success" />
+    </gpio>
+    <gpio name="trajectory_passthrough">
+      <command_interface name="setpoint_positions_0" />
+      <command_interface name="setpoint_positions_1" />
+      <command_interface name="setpoint_positions_2" />
+      <command_interface name="setpoint_positions_3" />
+      <command_interface name="setpoint_positions_4" />
+      <command_interface name="setpoint_positions_5" />
+      <command_interface name="setpoint_velocities_0" />
+      <command_interface name="setpoint_velocities_1" />
+      <command_interface name="setpoint_velocities_2" />
+      <command_interface name="setpoint_velocities_3" />
+      <command_interface name="setpoint_velocities_4" />
+      <command_interface name="setpoint_velocities_5" />
+      <command_interface name="setpoint_accelerations_0" />
+      <command_interface name="setpoint_accelerations_1" />
+      <command_interface name="setpoint_accelerations_2" />
+      <command_interface name="setpoint_accelerations_3" />
+      <command_interface name="setpoint_accelerations_4" />
+      <command_interface name="setpoint_accelerations_5" />
+      <command_interface name="transfer_state" />
+      <command_interface name="time_from_start" />
+      <command_interface name="abort" />
+    </gpio>
+    <gpio name="get_robot_software_version">
+      <state_interface name="get_version_major">
+        <param name="initial_value">1</param>
+      </state_interface>
+      <state_interface name="get_version_minor" />
+      <state_interface name="get_version_build" />
+      <state_interface name="get_version_bugfix" />
+    </gpio>
+  </ros2_control>
+  <link name="base_link" />
+  <link name="base_link_inertia">
+    <visual>
+      <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/base.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/base.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="4.0" />
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <inertia ixx="0.0061063308908" ixy="0.0" ixz="0.0" iyy="0.0061063308908" iyz="0.0" izz="0.01125" />
+    </inertial>
+  </link>
+  <link name="shoulder_link">
+    <visual>
+      <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/shoulder.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/shoulder.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="16.343" />
+      <origin rpy="1.570796326794897 0 0" xyz="0.0 -0.0062 -0.061" />
+      <inertia ixx="0.08866" ixy="-0.00011" ixz="-0.00011" iyy="0.07632" iyz="0.0072" izz="0.08418" />
+    </inertial>
+  </link>
+  <link name="upper_arm_link">
+    <visual>
+      <origin rpy="1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0.26" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/upperarm.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0.26" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/upperarm.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="29.632" />
+      <origin rpy="0 0 0" xyz="-0.3394 0.0 0.2098" />
+      <inertia ixx="0.1467" ixy="0.00019" ixz="-0.05163" iyy="4.6659" iyz="4e-05" izz="4.6348" />
+    </inertial>
+  </link>
+  <link name="forearm_link">
+    <visual>
+      <origin rpy="1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0.043" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/forearm.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0.043" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/forearm.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="7.879" />
+      <origin rpy="0 0 0" xyz="-0.4053 0.0 0.0604" />
+      <inertia ixx="0.02612" ixy="-5e-05" ixz="-0.02898" iyy="0.75763" iyz="-1e-05" izz="0.75327" />
+    </inertial>
+  </link>
+  <link name="wrist_1_link">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 -0.0775" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/wrist1.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 -0.0775" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/wrist1.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="3.054" />
+      <origin rpy="1.570796326794897 0 0" xyz="0.0 -0.0393 -0.0026" />
+      <inertia ixx="0.00555" ixy="-1e-05" ixz="-2e-05" iyy="0.00537" iyz="0.00036" izz="0.00402" />
+    </inertial>
+  </link>
+  <link name="wrist_2_link">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 -0.0749" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/wrist2.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 -0.0749" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/wrist2.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="3.126" />
+      <origin rpy="-1.570796326794897 0 0" xyz="0.0 0.0379 -0.0024" />
+      <inertia ixx="0.00586" ixy="-1e-05" ixz="-2e-05" iyy="0.00578" iyz="-0.00037" izz="0.00427" />
+    </inertial>
+  </link>
+  <link name="wrist_3_link">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 -0.07" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/visual/wrist3.dae" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 -0.07" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/ur20/collision/wrist3.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.926" />
+      <origin rpy="0 0 0" xyz="0.0 0.0 -0.0293" />
+      <inertia ixx="0.00092" ixy="0.0" ixz="0.0" iyy="0.00091" iyz="0.0" izz="0.00117" />
+    </inertial>
+  </link>
+  <joint name="base_link-base_link_inertia" type="fixed">
+    <parent link="base_link" />
+    <child link="base_link_inertia" />
+    <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+  </joint>
+  <joint name="shoulder_pan_joint" type="revolute">
+    <parent link="base_link_inertia" />
+    <child link="shoulder_link" />
+    <origin rpy="0 0 0" xyz="0 0 0.2363" />
+    <axis xyz="0 0 1" />
+    <limit effort="738.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="2.0943951023931953" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <joint name="shoulder_lift_joint" type="revolute">
+    <parent link="shoulder_link" />
+    <child link="upper_arm_link" />
+    <origin rpy="1.570796327 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="738.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="2.0943951023931953" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link" />
+    <child link="forearm_link" />
+    <origin rpy="0 0 0" xyz="-0.862 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="433.0" lower="-3.141592653589793" upper="3.141592653589793" velocity="2.6179938779914944" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <joint name="wrist_1_joint" type="revolute">
+    <parent link="forearm_link" />
+    <child link="wrist_1_link" />
+    <origin rpy="0 0 0" xyz="-0.7287 0 0.201" />
+    <axis xyz="0 0 1" />
+    <limit effort="107.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.6651914291880923" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <joint name="wrist_2_joint" type="revolute">
+    <parent link="wrist_1_link" />
+    <child link="wrist_2_link" />
+    <origin rpy="1.570796327 0 0" xyz="0 -0.1593 -3.267297616249225e-11" />
+    <axis xyz="0 0 1" />
+    <limit effort="107.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.6651914291880923" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <joint name="wrist_3_joint" type="revolute">
+    <parent link="wrist_2_link" />
+    <child link="wrist_3_link" />
+    <origin rpy="1.570796326589793 3.141592653589793 3.141592653589793" xyz="0 0.1543 -3.1647459019915597e-11" />
+    <axis xyz="0 0 1" />
+    <limit effort="107.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.6651914291880923" />
+    <dynamics damping="0" friction="0" />
+  </joint>
+  <link name="ft_frame" />
+  <joint name="wrist_3_link-ft_frame" type="fixed">
+    <parent link="wrist_3_link" />
+    <child link="ft_frame" />
+    <origin rpy="3.141592653589793 0 0" xyz="0 0 0" />
+  </joint>
+  <link name="base" />
+  <joint name="base_link-base_fixed_joint" type="fixed">
+    <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
+    <parent link="base_link" />
+    <child link="base" />
+  </joint>
+  <link name="flange" />
+  <joint name="wrist_3-flange" type="fixed">
+    <parent link="wrist_3_link" />
+    <child link="flange" />
+    <origin rpy="0 -1.5707963267948966 -1.5707963267948966" xyz="0 0 0" />
+  </joint>
+  <link name="tool0" />
+  <joint name="flange-tool0" type="fixed">
+    <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0 0 0" />
+    <parent link="flange" />
+    <child link="tool0" />
+  </joint>
+  <link name="camera_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/camera/camera_body.obj" scale="1 1 1" />
+      </geometry>
+      <material name="camera_grey">
+        <color rgba="0.2 0.2 0.2 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://ur_description/meshes/camera/camera_body.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="camera_optical_frame" />
+  <joint name="camera_mount_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="flange" />
+    <child link="camera_link" />
+  </joint>
+  <joint name="camera_optical_joint" type="fixed">
+    <origin xyz="0.346 0 0" rpy="1.5707963268 -0.0000000000 1.5707963268" />
+    <parent link="camera_link" />
+    <child link="camera_optical_frame" />
+  </joint>
+</robot>
