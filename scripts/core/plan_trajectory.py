@@ -68,6 +68,14 @@ ENABLE_CONTINUITY_SEEDING = False
 # viewpoint만 남겨 정직하게 검사한다.
 DROP_UNREACHABLE_VIEWPOINTS = True
 
+# DP는 충돌을 보지 않고 joint 비용만으로 대표 해를 고른다. 그런데 IK의 world(물체) 충돌은
+# soft cost(activation 10mm)라 물체를 살짝 파고드는 해도 success로 돌아온다 → 한 viewpoint에
+# 충돌/비충돌 분기가 섞여 있으면 DP가 더 싼 '충돌' 분기를 골라 최종 충돌검사에서 거부된다
+# (sample/74에서 발생). 그래서 DP 이전에, 최종검사와 '동일한' hard 충돌검사로 각 viewpoint의
+# 대표 해에서 충돌 자세를 제거한다. wrist_3 잠금 뒤에 검사해 실제 최종 자세와 일치시키고,
+# 충돌-free 해가 0개가 된 viewpoint는 empty와 똑같이 unreachable로 드롭한다.
+FILTER_COLLIDING_REPS = True
+
 # Reconfig transit(충돌회피 joint-to-joint) 계획 강건화 (#1)
 # plan_cspace는 timeout이 없고 max_attempts 회 재시도 후 실패하는 단순 루프라(성공 시 즉시 break),
 # '실패 판정에 걸리는 시간'이 max_attempts에 거의 선형 비례한다(이 하드웨어에서 ~0.33s/attempt).
@@ -1704,7 +1712,38 @@ def main():
             print(f"  Continuity seeding: +{added} solutions, "
                   f"{filled}/{len(empty_idxs)} empty viewpoints filled")
 
-    # 못 가는(empty) viewpoint 제거 — IK 해가 없으면 carry-forward로 메우지 않고 경로에서 뺀다.
+    # 충돌하는 대표 해 제거 (DP는 충돌을 안 보므로). 최종검사와 동일한 batch_collision_check로
+    # wrist_3 잠금 후 자세를 검사 → 충돌 자세를 후보에서 빼 DP가 충돌-free만 고르게 한다.
+    # 충돌-free가 0개가 된 viewpoint는 아래 empty-drop이 unreachable로 처리한다.
+    if FILTER_COLLIDING_REPS:
+        spans = []   # (vp, flat_start, count)
+        flat = []
+        for i, r in enumerate(representatives):
+            if len(r) > 0:
+                spans.append((i, sum(len(f) for f in flat), len(r)))
+                flat.append(r)
+        if flat:
+            isc_flat, _ = batch_collision_check(
+                np.concatenate(flat, axis=0), robot_cfg, world_config,
+            )
+            n_removed, n_emptied = 0, 0
+            for vp, start, cnt in spans:
+                free_mask = ~isc_flat[start:start + cnt]
+                removed = cnt - int(free_mask.sum())
+                if removed > 0:
+                    n_removed += removed
+                    representatives[vp] = representatives[vp][free_mask]
+                    if len(representatives[vp]) == 0:
+                        n_emptied += 1
+            if n_removed > 0:
+                print(f"  Collision-filtered reps: removed {n_removed} colliding solutions "
+                      f"(margin={config.COLLISION_MARGIN*1000:.0f}mm), "
+                      f"{n_emptied} viewpoints emptied → unreachable")
+            else:
+                print(f"  Collision-filtered reps: 0 colliding (all candidates collision-free)")
+
+    # 못 가는(empty) viewpoint 제거 — IK 해가 없거나 충돌 필터로 비워진 viewpoint는
+    # carry-forward로 메우지 않고 경로에서 뺀다.
     # orig_idx: 남은 viewpoint의 '원본' 인덱스(드롭 후에도 로그를 원래 번호로 표기하기 위함).
     orig_idx = np.arange(len(representatives))
     n_dropped_empty = 0
