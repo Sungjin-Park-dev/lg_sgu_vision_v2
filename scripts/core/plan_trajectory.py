@@ -92,6 +92,14 @@ EE_ANGULAR_SPEED_DEG_S = 20.0
 MAX_JOINT_VEL_RAD_S = 0.3
 MIN_SEGMENT_DT_S = 0.05
 
+# reconfig transit(재배치)은 검사 스캔이 아니라 단순 repositioning이다. 스캔과 똑같이 EE
+# arc-length로 resample하고 EE 선속도(50mm/s)로 시간 매기면, base를 크게 돌릴 때 팔 끝이
+# 자유공간에 그리는 긴 호(수 m)를 기어가느라 사이클의 대부분을 먹는다(curved/100에서 139°
+# transit 1개가 5.25m 호 → 525 waypoint → 105s = 전체의 63%). 그래서 transit 구간은
+# (1) joint-space L∞로 sparse하게 resample하고, (2) joint 속도 한계로만 시간을 매긴다
+# (EE 선속도/각속도/corner slowdown 무시). 139° transit이 ~8s로 줄어든다.
+TRANSIT_RESAMPLE_SPACING_RAD = 0.05   # ~2.9°, transit resample 간격(가장 빨리 도는 joint 기준)
+
 CORNER_SLOWDOWN_ENABLED = True
 CORNER_ANGLE_THRESHOLD_DEG = 30.0
 CORNER_MAX_SLOWDOWN = 2.5
@@ -871,28 +879,68 @@ def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip):
     return runs, skipped
 
 
-def _dense_path_for_run(selected, transit_segments, run_idx, dense_step_rad):
-    """한 run(viewpoint 인덱스 리스트)을 joint-space dense path 로 전개."""
-    segs = []
-    for a, cur in enumerate(run_idx):
-        segs.append(selected[cur:cur + 1])
-        if a == len(run_idx) - 1:
-            break
+def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad):
+    """한 run을 'scan' / 'transit' dense sub-path 들로 분할한다.
+
+    인접 viewpoint 간 전이를 두 종류로 구분한다:
+        - transit edge (nxt==cur+1 이고 cur in transit_segments) → MotionGen 재배치 경로.
+          별도 'transit' 세그먼트로 떼어낸다(joint 속도로 빠르게 지나갈 구간).
+        - 그 외(small jump / skip 재연결) → 직선 보간으로 잇는 실제 스캔 이동. 연속된
+          스캔 이동은 하나의 'scan' 세그먼트로 모은다(EE arc-length로 resample할 구간).
+
+    각 세그먼트는 시작/끝 viewpoint config 를 모두 포함하므로, 인접 세그먼트는 경계
+    config 를 공유한다(_stitch_pieces 가 중복 제거).
+
+    Returns:
+        list[(kind, dense (K,6))], kind ∈ {"scan", "transit"}
+    """
+    segments = []
+    scan_buf = [selected[run_idx[0]:run_idx[0] + 1]]   # 첫 viewpoint 로 시작
+    for a in range(len(run_idx) - 1):
+        cur = run_idx[a]
         nxt = run_idx[a + 1]
         if nxt == cur + 1 and cur in transit_segments:
-            transit = transit_segments[cur]
-            if len(transit) > 2:
-                segs.append(transit[1:-1])
+            # 현재까지 모은 스캔 이동을 flush (selected[cur]에서 끝남)
+            buf = np.concatenate(scan_buf, axis=0)
+            if len(buf) >= 1:
+                segments.append(("scan", buf))
+            # transit 전체(양 끝 = selected[cur]≈transit[0], selected[nxt]≈transit[-1] 포함)
+            segments.append(("transit", transit_segments[cur]))
+            # 다음 스캔 버퍼는 selected[nxt]에서 새로 시작
+            scan_buf = [selected[nxt:nxt + 1]]
         else:
-            # consecutive small jump 또는 skip 재연결(둘 다 L∞ <= thr) → 직선 보간
             interior = _linear_interior(selected[cur], selected[nxt], dense_step_rad)
             if interior is not None:
-                segs.append(interior)
-    return np.concatenate(segs, axis=0)
+                scan_buf.append(interior)
+            scan_buf.append(selected[nxt:nxt + 1])
+    buf = np.concatenate(scan_buf, axis=0)
+    if len(buf) >= 1:
+        segments.append(("scan", buf))
+    return segments
+
+
+def _stitch_pieces(pieces, masks, dup_tol_rad=5e-3):
+    """resample된 sub-path 들을 이어붙인다. 인접 piece 가 공유하는 경계 waypoint 는
+    한 번만 남긴다(중복 제거). pieces/masks 는 길이가 같은 list."""
+    out_j, out_m = [], []
+    for p, m in zip(pieces, masks):
+        if len(p) == 0:
+            continue
+        if out_j and len(p) >= 1 and \
+                float(np.max(np.abs(p[0] - out_j[-1][-1]))) <= dup_tol_rad:
+            p, m = p[1:], m[1:]
+        if len(p) == 0:
+            continue
+        out_j.append(p)
+        out_m.append(m)
+    if not out_j:
+        return np.zeros((0, 6), dtype=np.float64), np.zeros((0,), dtype=bool)
+    return np.concatenate(out_j, axis=0), np.concatenate(out_m, axis=0)
 
 
 def interpolate_and_resample(selected, transit_segments, robot_cfg,
                              mode="ee", spacing=0.01, dense_step_rad=0.02,
+                             transit_spacing_rad=TRANSIT_RESAMPLE_SPACING_RAD,
                              reconfig_threshold_rad=np.deg2rad(RECONFIG_THRESHOLD_DEG),
                              max_skip=TRANSIT_FAIL_SKIP_MAX):
     """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
@@ -906,15 +954,19 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
         transit_segments: dict {idx: (T, 6)} 성공한 transit 경로
         robot_cfg: cuRobo robot config dict (mode='ee'일 때 FK 용)
         mode: "ee" (EE position arc-length, meters) | "joint" (cumulative L∞, radians)
-        spacing: 최종 spacing (mode에 따라 m 또는 rad)
+        spacing: 스캔 구간 최종 spacing (mode에 따라 m 또는 rad)
         dense_step_rad: dense path 구성 시 joint-space L∞ step (radians)
+        transit_spacing_rad: transit(재배치) 구간 joint-space resample 간격 (radians).
+            transit은 검사가 아니므로 EE 기준이 아니라 joint 기준으로 sparse하게 재분할한다.
         reconfig_threshold_rad: 직선 보간 허용 임계값(이보다 크면 transit 필요)
         max_skip: transit 실패 시 run 내부에서 건너뛸 수 있는 최대 viewpoint 수
 
     Returns:
-        resampled: (M, 6) uniform-spaced trajectory (가장 긴 안전 run)
-        dropped:   list[int] — 채택 run 에 포함되지 않아 드롭된 viewpoint 인덱스
-        runs_info: dict — {"runs": [(start,end,len)...], "kept": (start,end,len)}
+        resampled:  (M, 6) uniform-spaced trajectory (가장 긴 안전 run)
+        is_transit: (M,) bool — 각 waypoint가 transit(재배치) 구간인지. compute_trajectory_times
+                    가 이 구간을 joint 속도로만(검사 EE 속도 무시) 시간 매기는 데 쓴다.
+        dropped:    list[int] — 채택 run 에 포함되지 않아 드롭된 viewpoint 인덱스
+        runs_info:  dict — {"runs": [(start,end,len)...], "kept": (start,end,len)}
     """
     N = len(selected)
     runs, _ = _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip)
@@ -933,15 +985,29 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
             "이을 수 없는 reconfig. transit 성공(#1) 또는 reconfig 감소(#3)가 필요합니다."
         )
 
-    dense_path = _dense_path_for_run(selected, transit_segments, kept, dense_step_rad)
-
-    if mode == "ee":
-        resampled = _resample_uniform_ee(dense_path, robot_cfg, spacing)
-    elif mode == "joint":
-        resampled = _resample_uniform_joint(dense_path, spacing)
-    else:
+    if mode not in ("ee", "joint"):
         raise ValueError(f"Unknown resample mode: {mode!r} (expected 'ee' or 'joint')")
-    return resampled, dropped, runs_info
+
+    # 스캔 / transit 세그먼트를 분리해 각각에 맞는 기준으로 resample 한다.
+    #   scan    → EE arc-length(또는 joint, mode에 따라). 검사 spacing 그대로.
+    #   transit → joint-space L∞ arc-length(sparse). EE 호 길이와 무관하게 재배치.
+    segments = _typed_segments_for_run(selected, transit_segments, kept, dense_step_rad)
+    pieces, masks = [], []
+    for kind, dense in segments:
+        if kind == "transit":
+            rs = _resample_uniform_joint(dense, transit_spacing_rad)
+            mk = np.ones((len(rs),), dtype=bool)
+        elif mode == "ee":
+            rs = _resample_uniform_ee(dense, robot_cfg, spacing)
+            mk = np.zeros((len(rs),), dtype=bool)
+        else:  # mode == "joint"
+            rs = _resample_uniform_joint(dense, spacing)
+            mk = np.zeros((len(rs),), dtype=bool)
+        pieces.append(rs)
+        masks.append(mk)
+
+    resampled, is_transit = _stitch_pieces(pieces, masks)
+    return resampled, is_transit, dropped, runs_info
 
 
 def batch_collision_check(trajectory, robot_cfg, world_scene):
@@ -1086,11 +1152,15 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
                              min_segment_dt=0.05,
                              corner_slowdown_enabled=True,
                              corner_angle_threshold_rad=np.deg2rad(30.0),
-                             corner_max_slowdown=2.5):
+                             corner_max_slowdown=2.5,
+                             is_transit=None):
     """Continuous scan용 누적 time 생성.
 
-    각 segment 시간은 EE 선속도, EE 각속도, joint 속도 제한을 모두 만족하는
-    최소 시간으로 정한다.
+    스캔 segment 시간은 EE 선속도, EE 각속도, joint 속도 제한을 모두 만족하는 최소 시간으로
+    정한다. 단 transit(재배치) segment(is_transit로 표시)는 검사가 아니므로 EE 선속도/각속도/
+    corner slowdown을 적용하지 않고 **joint 속도 한계로만** 시간을 매긴다. 그래야 base를 크게
+    돌리며 팔 끝이 자유공간에 그리는 긴 호를 50mm/s로 기어가지 않고, joint 속도로 빠르게
+    지나간다(예: 139° transit 105s → ~8s).
     """
     n = len(joints)
     times = np.zeros((n,), dtype=np.float64)
@@ -1100,6 +1170,7 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
             "max_linear_speed_mm_s": 0.0,
             "max_angular_speed_deg_s": 0.0,
             "max_joint_speed_rad_s": 0.0,
+            "transit_time": 0.0,
         }
 
     if corner_slowdown_enabled:
@@ -1116,20 +1187,37 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
             "max_slowdown": 1.0,
         }
 
+    # segment(i-1→i)는 양 끝 중 하나라도 transit이면 transit으로 본다(스캔↔transit 진입/이탈 포함).
+    if is_transit is not None and len(is_transit) == n:
+        it = np.asarray(is_transit, dtype=bool)
+        seg_is_transit = it[1:] | it[:-1]
+    else:
+        seg_is_transit = np.zeros((n - 1,), dtype=bool)
+
+    transit_time = 0.0
     for i in range(1, n):
         linear_dist = float(np.linalg.norm(ee_positions[i] - ee_positions[i - 1]))
         angular_dist = _quat_angle_xyzw(ee_quaternions[i - 1], ee_quaternions[i])
         joint_dist = float(np.max(np.abs(joints[i] - joints[i - 1])))
 
-        dt_candidates = [min_segment_dt]
-        if ee_speed_m_s > 0.0:
-            dt_candidates.append(linear_dist / ee_speed_m_s)
-        if ee_angular_speed_rad_s > 0.0:
-            dt_candidates.append(angular_dist / ee_angular_speed_rad_s)
-        if max_joint_vel_rad_s > 0.0:
-            dt_candidates.append(joint_dist / max_joint_vel_rad_s)
+        if seg_is_transit[i - 1]:
+            # 재배치: joint 속도 한계로만 (EE 속도/corner 무시)
+            dt_candidates = [min_segment_dt]
+            if max_joint_vel_rad_s > 0.0:
+                dt_candidates.append(joint_dist / max_joint_vel_rad_s)
+            dt = max(dt_candidates)
+            transit_time += dt
+        else:
+            dt_candidates = [min_segment_dt]
+            if ee_speed_m_s > 0.0:
+                dt_candidates.append(linear_dist / ee_speed_m_s)
+            if ee_angular_speed_rad_s > 0.0:
+                dt_candidates.append(angular_dist / ee_angular_speed_rad_s)
+            if max_joint_vel_rad_s > 0.0:
+                dt_candidates.append(joint_dist / max_joint_vel_rad_s)
+            dt = max(dt_candidates) * slowdown_factors[i - 1]
 
-        times[i] = times[i - 1] + max(dt_candidates) * slowdown_factors[i - 1]
+        times[i] = times[i - 1] + dt
 
     segment_dt = np.diff(times)
     linear_speed = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1) / segment_dt
@@ -1138,10 +1226,17 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
         for i in range(1, n)
     ])
     joint_speed = np.max(np.abs(np.diff(joints, axis=0)), axis=1) / segment_dt
+    # EE 선/각속도 최대는 '스캔 구간'에서만 의미가 있다(transit은 EE가 자유공간을 빠르게 휘둘러
+    # EE 속도가 매우 커지지만 검사 속도가 아님). joint 속도 최대는 전체에서 본다.
+    scan_seg = ~seg_is_transit
+    scan_lin = linear_speed[scan_seg] if scan_seg.any() else linear_speed
+    scan_ang = angular_speed[scan_seg] if scan_seg.any() else angular_speed
     stats = {
         "total_time": float(times[-1]),
-        "max_linear_speed_mm_s": float(linear_speed.max() * 1000.0),
-        "max_angular_speed_deg_s": float(np.rad2deg(angular_speed.max())),
+        "transit_time": float(transit_time),
+        "n_transit_segments": int(seg_is_transit.sum()),
+        "max_linear_speed_mm_s": float(scan_lin.max() * 1000.0),
+        "max_angular_speed_deg_s": float(np.rad2deg(scan_ang.max())),
         "max_joint_speed_rad_s": float(joint_speed.max()),
         **corner_stats,
     }
@@ -1691,7 +1786,7 @@ def main():
 
     # Phase 5: Uniform resample + collision check
     print(f"\n[Phase 5] Interpolation + uniform resample (mode={RESAMPLE_MODE})...")
-    final_traj, skipped_vps, runs_info = interpolate_and_resample(
+    final_traj, final_is_transit, skipped_vps, runs_info = interpolate_and_resample(
         selected, transit_segments, robot_cfg,
         mode=RESAMPLE_MODE, spacing=args.spacing,
         reconfig_threshold_rad=reconfig_rad,
@@ -1713,7 +1808,10 @@ def main():
         spacing_desc = f"EE spacing={args.spacing*1000:.1f} mm"
     else:
         spacing_desc = f"joint spacing={np.rad2deg(args.spacing):.2f}°"
-    print(f"  Resampled: {len(final_traj)} waypoints ({spacing_desc})")
+    n_transit_wp = int(np.asarray(final_is_transit).sum())
+    print(f"  Resampled: {len(final_traj)} waypoints ({spacing_desc}, "
+          f"scan={len(final_traj) - n_transit_wp}, "
+          f"transit={n_transit_wp} @ joint spacing {np.rad2deg(TRANSIT_RESAMPLE_SPACING_RAD):.1f}°)")
 
     # Collision check
     print("  Collision check...")
@@ -1752,10 +1850,14 @@ def main():
         corner_slowdown_enabled=CORNER_SLOWDOWN_ENABLED,
         corner_angle_threshold_rad=np.deg2rad(CORNER_ANGLE_THRESHOLD_DEG),
         corner_max_slowdown=CORNER_MAX_SLOWDOWN,
+        is_transit=final_is_transit,
     )
-    print(f"  Time profile: total={time_stats['total_time']:.1f}s, "
-          f"max EE={time_stats['max_linear_speed_mm_s']:.1f} mm/s, "
-          f"max rot={time_stats['max_angular_speed_deg_s']:.1f} deg/s, "
+    scan_time = time_stats['total_time'] - time_stats['transit_time']
+    print(f"  Time profile: total={time_stats['total_time']:.1f}s "
+          f"(scan={scan_time:.1f}s, transit={time_stats['transit_time']:.1f}s "
+          f"in {time_stats['n_transit_segments']} seg), "
+          f"max scan EE={time_stats['max_linear_speed_mm_s']:.1f} mm/s, "
+          f"max scan rot={time_stats['max_angular_speed_deg_s']:.1f} deg/s, "
           f"max joint={time_stats['max_joint_speed_rad_s']:.2f} rad/s, "
           f"corners={time_stats['n_slow_segments']} seg "
           f"(max angle={time_stats['max_corner_angle_deg']:.1f}°, "
