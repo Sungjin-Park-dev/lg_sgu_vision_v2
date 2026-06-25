@@ -69,7 +69,11 @@ ENABLE_CONTINUITY_SEEDING = False
 DROP_UNREACHABLE_VIEWPOINTS = True
 
 # Reconfig transit(충돌회피 joint-to-joint) 계획 강건화 (#1)
-TRANSIT_MAX_ATTEMPTS = 15           # plan_cspace 재시도 횟수 (기본 5)
+# plan_cspace는 timeout이 없고 max_attempts 회 재시도 후 실패하는 단순 루프라(성공 시 즉시 break),
+# '실패 판정에 걸리는 시간'이 max_attempts에 거의 선형 비례한다(이 하드웨어에서 ~0.33s/attempt).
+# 성공은 attempt 0~1(~0.37s)에 끝나므로 max_attempts를 줄여도 성공은 거의 영향 없고 실패 대기만 짧아진다.
+# 15→8: 실패 대기 ~5s→~2.7s. 단 attempt 후반에야 풀리던 경계 transit 일부를 잃을 수 있음(→ 정직한 run-split).
+TRANSIT_MAX_ATTEMPTS = 8            # plan_cspace 재시도 횟수 (cuRobo 기본 5). 실패 대기시간 ∝ 이 값
 TRANSIT_ENABLE_GRAPH_ATTEMPT = 1    # 이 시도부터 PRM graph seeding 사용 (0=처음부터)
 
 # transit이 끝내 실패한 reconfig를 직선 보간으로 메우면 카메라/팔이 물체를 관통한다(#2).
