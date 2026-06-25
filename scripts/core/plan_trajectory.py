@@ -51,6 +51,33 @@ IK_BATCH_SIZE = 4
 DBSCAN_EPS_RAD = 0.3
 RECONFIG_THRESHOLD_DEG = 29.0
 
+# (b) DP 후보 풍부화: DBSCAN medoid(클러스터당 1개)는 이웃과 연속인 해를 버릴 수 있다.
+# enrich=True면 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모두 후보로
+# 남겨 DP가 연속 분기를 직접 고르게 한다.
+ENRICH_DP_CANDIDATES = True
+DP_CANDIDATE_DEDUP_RAD = 0.08   # ~4.6°, 분기는 보존하며 거의 동일한 seed 만 제거
+
+# (a) 연속성 IK seeding: reconfig 양끝/empty viewpoint를 이웃의 선택 자세로 warm-start하여
+# IK 재시도 → random seed가 못 찾은 '이웃과 연속인' 분기를 찾거나 empty를 채운다.
+# curved_structure 실측상 효과 0(empty 0개 채움, reconfig 불변)이라 기본 OFF. 다른 물체에서
+# '연속 분기가 존재하는데 random seed가 놓친' 경우 도움될 수 있어 토글로 남겨둠.
+ENABLE_CONTINUITY_SEEDING = False
+
+# IK 해가 전혀 없는(empty) viewpoint를 carry-forward(이웃 자세 복제)로 메우지 않고 경로에서
+# 제거한다. 복제는 그 표면점을 실제로 검사하지 않는 '가짜 커버리지'이므로, 도달 가능한
+# viewpoint만 남겨 정직하게 검사한다.
+DROP_UNREACHABLE_VIEWPOINTS = True
+
+# Reconfig transit(충돌회피 joint-to-joint) 계획 강건화 (#1)
+TRANSIT_MAX_ATTEMPTS = 15           # plan_cspace 재시도 횟수 (기본 5)
+TRANSIT_ENABLE_GRAPH_ATTEMPT = 1    # 이 시도부터 PRM graph seeding 사용 (0=처음부터)
+
+# transit이 끝내 실패한 reconfig를 직선 보간으로 메우면 카메라/팔이 물체를 관통한다(#2).
+# 대신 아웃라이어 viewpoint를 최대 이 개수까지 건너뛰어(skip), 시작 자세와 다시
+# reconfig_threshold 안에서 만나는 viewpoint에 재연결한다. 그 안에 재연결이 안 되면
+# (클러스터 경계 등) 안전한 연속 경로가 없으므로 명확히 에러를 낸다.
+TRANSIT_FAIL_SKIP_MAX = 5
+
 # 충돌검사에서 제외할 로봇 링크. base_link_inertia(로봇 베이스)는 base_link 에 고정이라
 # 자세와 무관하게 항상 robot_mount(받침대) 윗면을 ~2cm 파고든다 → 모든 IK/충돌검사가
 # 상시 충돌로 실패. 받침대 박스가 팔은 그대로 막아주고, base 는 자기 받침대만 닿으므로
@@ -381,9 +408,75 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
     return all_solutions, all_success
 
 
+def solve_ik_seeded(robot_cfg, world_scene, positions_np, quats_np,
+                    target_idxs, anchors, num_seeds=NUM_IK_SEEDS):
+    """target viewpoint들을 이웃의 선택 자세(anchor)로 warm-start하여 IK 재시도(#a).
+
+    각 target은 batch item 으로, seed_config = anchor 를 num_seeds 개 복제해 강하게 편향.
+    random multi-seed가 못 찾은 '이웃과 연속인' 분기를 찾거나 empty viewpoint를 채운다.
+
+    Args:
+        target_idxs: list[int] — 재시도할 viewpoint 인덱스
+        anchors: (B, 6) — 각 target의 seed가 될 이웃 선택 자세
+
+    Returns:
+        sol: (B, num_seeds, 6) normalize된 IK 해
+        success: (B, num_seeds) bool
+    """
+    B = len(target_idxs)
+    cache = {
+        "obb": max(1, len(world_scene.cuboid)),
+        "mesh": max(1, len(world_scene.mesh)),
+    }
+    cfg = InverseKinematicsCfg.create(
+        robot=robot_cfg,
+        scene_model={},
+        self_collision_check=True,
+        num_seeds=num_seeds,
+        max_batch_size=B,
+        use_cuda_graph=False,
+        collision_cache=cache,
+    )
+    ik = InverseKinematics(cfg)
+    ik.update_world(world_scene)
+    tool = ik.tool_frames[0]
+
+    bp = torch.tensor(positions_np[target_idxs], device="cuda:0", dtype=torch.float32)
+    bq = torch.tensor(quats_np[target_idxs], device="cuda:0", dtype=torch.float32)
+    goal = Pose(position=bp, quaternion=bq)
+
+    seed = torch.tensor(np.asarray(anchors), device="cuda:0", dtype=torch.float32)
+    seed = seed.unsqueeze(1).repeat(1, num_seeds, 1)  # (B, num_seeds, 6)
+
+    result = ik.solve_pose(
+        GoalToolPose.from_poses({tool: goal}, num_goalset=1),
+        seed_config=seed,
+        return_seeds=num_seeds,
+    )
+
+    sol = result.js_solution.position.cpu().numpy()
+    if sol.shape[-1] != 6:
+        sol = sol[..., :6]
+    success = result.success.cpu().numpy()
+    return normalize_joints(sol), success
+
+
 # =========================================================================
 # Phase 2: DBSCAN clustering per viewpoint
 # =========================================================================
+
+def _greedy_dedup(sols, tol_rad):
+    """L∞ 기준 greedy near-duplicate 제거. tol 안에 들어오는 해는 하나만 남긴다.
+
+    클러스터링과 달리 medoid 로 합치지 않아 서로 다른 분기(branch)와 분기 내 다수 해를
+    모두 보존한다 → DP 가 이웃과 연속인 해를 직접 고를 수 있다.
+    """
+    kept = []
+    for s in sols:
+        if all(np.max(np.abs(s - k)) > tol_rad for k in kept):
+            kept.append(s)
+    return np.array(kept)
+
 
 def cluster_ik_solutions(all_solutions, all_success, eps=0.3, min_samples=1):
     """DBSCAN으로 viewpoint당 대표 해(medoid) 추출.
@@ -415,27 +508,33 @@ def cluster_ik_solutions(all_solutions, all_success, eps=0.3, min_samples=1):
             total_reps += 1
             continue
 
-        db = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean')
-        labels = db.fit_predict(successful)
+        if ENRICH_DP_CANDIDATES:
+            # (b) near-duplicate 만 제거하고 모든 분기를 후보로 유지
+            reps = _greedy_dedup(successful, DP_CANDIDATE_DEDUP_RAD)
+        else:
+            db = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean')
+            labels = db.fit_predict(successful)
+            medoids = []
+            for label in np.unique(labels):
+                if label == -1:
+                    # noise → 각각 singleton으로 취급
+                    for p in successful[labels == -1]:
+                        medoids.append(p)
+                else:
+                    members = successful[labels == label]
+                    mean = members.mean(axis=0)
+                    dists = np.linalg.norm(members - mean, axis=1)
+                    medoids.append(members[np.argmin(dists)])
+            reps = np.array(medoids)
 
-        medoids = []
-        for label in np.unique(labels):
-            if label == -1:
-                # noise → 각각 singleton으로 취급
-                for p in successful[labels == -1]:
-                    medoids.append(p)
-            else:
-                members = successful[labels == label]
-                mean = members.mean(axis=0)
-                dists = np.linalg.norm(members - mean, axis=1)
-                medoids.append(members[np.argmin(dists)])
-
-        representatives.append(np.array(medoids))
-        total_reps += len(medoids)
+        representatives.append(reps)
+        total_reps += len(reps)
 
     avg_reps = total_reps / max(N - empty_count, 1)
+    mode_desc = (f"enrich dedup={DP_CANDIDATE_DEDUP_RAD:.2f} rad"
+                 if ENRICH_DP_CANDIDATES else f"DBSCAN medoid eps={eps:.2f} rad")
     print(f"  Phase 2 done: {N} viewpoints → avg {avg_reps:.1f} representatives/viewpoint "
-          f"(eps={eps:.2f} rad, {empty_count} empty)")
+          f"({mode_desc}, {empty_count} empty)")
 
     return representatives
 
@@ -490,7 +589,6 @@ def dp_optimal_path(representatives, reconfig_threshold_rad=0.5):
     dp_parent[0] = np.full(K_0, -1, dtype=int)
 
     for i in range(1, N):
-        K_prev = len(representatives[i - 1])
         K_curr = len(representatives[i])
 
         dp_cost[i] = np.full(K_curr, np.inf)
@@ -507,12 +605,10 @@ def dp_optimal_path(representatives, reconfig_threshold_rad=0.5):
         reconfig_mask = linf > reconfig_threshold_rad  # (K_prev, K_curr)
         edge_costs = reconfig_mask.astype(float) * RECONFIG_PENALTY + l2_costs
 
-        for j in range(K_curr):
-            for k in range(K_prev):
-                c = dp_cost[i - 1][k] + edge_costs[k, j]
-                if c < dp_cost[i][j]:
-                    dp_cost[i][j] = c
-                    dp_parent[i][j] = k
+        # 벡터화 DP 갱신: total[k,j] = dp_cost[i-1][k] + edge_costs[k,j]
+        total = dp_cost[i - 1][:, np.newaxis] + edge_costs  # (K_prev, K_curr)
+        dp_cost[i] = total.min(axis=0)
+        dp_parent[i] = total.argmin(axis=0)
 
     # Backtrack
     selected = np.zeros((N, 6))
@@ -565,7 +661,7 @@ def _single_joint_state_path(joint_state: JointState, n_dof: int) -> np.ndarray:
 
 
 def plan_reconfig_transits(
-    selected, reconfig_indices, robot_cfg, world_scene,
+    selected, reconfig_indices, robot_cfg, world_scene, label_idx=None,
 ):
     """Reconfig 지점마다 MotionPlanner joint-to-joint planning 수행.
 
@@ -574,11 +670,14 @@ def plan_reconfig_transits(
         reconfig_indices: reconfig이 발생하는 transition 인덱스 배열
         robot_cfg: cuRobo robot config (dict)
         world_scene: Scene (충돌 세계)
+        label_idx: (선택) filtered→원본 viewpoint 인덱스 매핑. 로그 표기용.
 
     Returns:
         transit_segments: dict {idx: (T, 6) transit trajectory} — 성공한 것만
         transit_stats: list of dicts
     """
+    def _lbl(i):
+        return int(label_idx[i]) if label_idx is not None else int(i)
     cache = {
         "obb": max(1, len(world_scene.cuboid)),
         "mesh": max(1, len(world_scene.mesh)),
@@ -590,8 +689,10 @@ def plan_reconfig_transits(
     )
     planner = MotionPlanner(cfg)
     planner.update_world(world_scene)
-    print("    Warming up MotionPlanner...")
-    planner.warmup(enable_graph=False, num_warmup_iterations=2)
+    # enable_graph=True 로 PRM roadmap 까지 워밍업한다. reconfig transit 은 자세를 크게
+    # 뒤집는 hard 케이스라 trajopt 직선 시드만으로는 자주 실패 → graph seeding 이 핵심.
+    print("    Warming up MotionPlanner (with graph planner)...")
+    planner.warmup(enable_graph=True, num_warmup_iterations=2)
 
     transit_segments = {}
     transit_stats = []
@@ -608,7 +709,11 @@ def plan_reconfig_transits(
         goal_state = JointState.from_position(goal_q, joint_names=planner.joint_names)
 
         t0 = time.time()
-        result = planner.plan_cspace(goal_state, start_state, max_attempts=10)
+        result = planner.plan_cspace(
+            goal_state, start_state,
+            max_attempts=TRANSIT_MAX_ATTEMPTS,
+            enable_graph_attempt=TRANSIT_ENABLE_GRAPH_ATTEMPT,
+        )
         dt = time.time() - t0
 
         ok = result is not None and bool(result.success.any().item())
@@ -621,7 +726,7 @@ def plan_reconfig_transits(
                     "n_waypoints": len(waypoints), "time": dt,
                 })
                 print(
-                    f"    {idx}→{idx+1}: FAILED "
+                    f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED "
                     f"(planner returned {len(waypoints)} waypoint, {dt:.2f}s)"
                 )
                 continue
@@ -635,14 +740,14 @@ def plan_reconfig_transits(
                 "max_step_deg": float(max_step_deg),
             })
             print(
-                f"    {idx}→{idx+1}: OK ({len(waypoints)} waypoints, "
+                f"    {_lbl(idx)}→{_lbl(idx+1)}: OK ({len(waypoints)} waypoints, "
                 f"max_step={max_step_deg:.2f}°, {dt:.2f}s)"
             )
         else:
             transit_stats.append({
                 "idx": idx, "success": False, "time": dt,
             })
-            print(f"    {idx}→{idx+1}: FAILED ({dt:.2f}s)")
+            print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED ({dt:.2f}s)")
 
     n_ok = sum(1 for s in transit_stats if s["success"])
     print(f"  Transit planning: {n_ok}/{len(reconfig_indices)} succeeded")
@@ -697,66 +802,161 @@ def _resample_uniform_joint(joints, spacing_rad):
     return out
 
 
+def _linear_interior(q0, q1, dense_step_rad):
+    """q0→q1 joint-space 직선 보간의 내부점(양 끝 제외). 없으면 None."""
+    dist = float(np.max(np.abs(q1 - q0)))
+    n_steps = max(1, int(np.ceil(dist / dense_step_rad)))
+    if n_steps <= 1:
+        return None
+    alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
+    return q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :]
+
+
+def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip):
+    """viewpoint 시퀀스를 '안전하게 연속인' run 들로 분할한다(#2).
+
+    run 내부 연결 규칙:
+        - 성공한 transit (consecutive, idx in transit_segments) → run 유지
+        - small jump (L∞ <= thr) → run 유지
+        - transit 실패 reconfig → 아웃라이어 viewpoint(i+1..j-1)를 최대 max_skip개까지
+          건너뛰어 selected[i] 와 thr 이내로 만나는 j 에 재연결(run 유지)
+    위 어떤 것으로도 못 이으면(클러스터 경계 등) 그 지점에서 run 을 끊는다(cut).
+
+    Returns:
+        runs: list[list[int]] — 각 run 의 viewpoint 인덱스(원본 순서)
+        skipped: set[int] — run 내부에서 건너뛴 아웃라이어 인덱스
+    """
+    N = len(selected)
+    runs: list[list[int]] = []
+    skipped: set[int] = set()
+    cur = [0]
+    i = 0
+    while i < N - 1:
+        # 성공 transit 또는 small jump → 현재 run 유지
+        if i in transit_segments:
+            cur.append(i + 1)
+            i += 1
+            continue
+        jump = float(np.max(np.abs(selected[i + 1] - selected[i])))
+        if jump <= reconfig_threshold_rad:
+            cur.append(i + 1)
+            i += 1
+            continue
+
+        # transit 실패 reconfig → 아웃라이어 skip 시도(transit 시작점은 건너뛰지 않음)
+        j = i + 1
+        n_dropped = 0
+        while (j < N and n_dropped < max_skip and j not in transit_segments
+               and float(np.max(np.abs(selected[j] - selected[i]))) > reconfig_threshold_rad):
+            j += 1
+            n_dropped += 1
+        reconnectable = (
+            j < N and j not in transit_segments
+            and float(np.max(np.abs(selected[j] - selected[i]))) <= reconfig_threshold_rad
+        )
+        if reconnectable:
+            skipped.update(range(i + 1, j))
+            cur.append(j)
+            i = j
+            continue
+
+        # 이을 수 없는 경계 → run 을 끊고 i+1 부터 새 run 시작
+        runs.append(cur)
+        cur = [i + 1]
+        i += 1
+
+    if cur[-1] != N - 1:
+        cur.append(N - 1)
+    runs.append(cur)
+    return runs, skipped
+
+
+def _dense_path_for_run(selected, transit_segments, run_idx, dense_step_rad):
+    """한 run(viewpoint 인덱스 리스트)을 joint-space dense path 로 전개."""
+    segs = []
+    for a, cur in enumerate(run_idx):
+        segs.append(selected[cur:cur + 1])
+        if a == len(run_idx) - 1:
+            break
+        nxt = run_idx[a + 1]
+        if nxt == cur + 1 and cur in transit_segments:
+            transit = transit_segments[cur]
+            if len(transit) > 2:
+                segs.append(transit[1:-1])
+        else:
+            # consecutive small jump 또는 skip 재연결(둘 다 L∞ <= thr) → 직선 보간
+            interior = _linear_interior(selected[cur], selected[nxt], dense_step_rad)
+            if interior is not None:
+                segs.append(interior)
+    return np.concatenate(segs, axis=0)
+
+
 def interpolate_and_resample(selected, transit_segments, robot_cfg,
-                             mode="ee", spacing=0.01, dense_step_rad=0.02):
+                             mode="ee", spacing=0.01, dense_step_rad=0.02,
+                             reconfig_threshold_rad=np.deg2rad(RECONFIG_THRESHOLD_DEG),
+                             max_skip=TRANSIT_FAIL_SKIP_MAX):
     """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
 
-    Non-reconfig 구간: joint-space linear interpolation으로 dense화
-    Transit 구간: MotionPlanner의 dense 경로를 그대로 사용
-    최종 resample 단위: mode에 따라 EE position arc-length(m) 또는 joint L∞(rad)
+    transit 실패 reconfig 은 직선 보간하면 물체를 관통하므로(#2) 사용하지 않는다. 대신
+    경로를 '안전 연속 run'들로 분할(_build_runs)하고 **가장 긴 run** 을 채택한다. 즉
+    아웃라이어 viewpoint 는 건너뛰고, 이을 수 없는 경계에서는 작은 쪽을 통째로 드롭한다.
 
     Args:
         selected: (N, 6) DP 선택 궤적
-        transit_segments: dict {idx: (T, 6)} transit 경로
+        transit_segments: dict {idx: (T, 6)} 성공한 transit 경로
         robot_cfg: cuRobo robot config dict (mode='ee'일 때 FK 용)
         mode: "ee" (EE position arc-length, meters) | "joint" (cumulative L∞, radians)
         spacing: 최종 spacing (mode에 따라 m 또는 rad)
-        dense_step_rad: dense path 구성 시 joint-space L∞ step (radians).
+        dense_step_rad: dense path 구성 시 joint-space L∞ step (radians)
+        reconfig_threshold_rad: 직선 보간 허용 임계값(이보다 크면 transit 필요)
+        max_skip: transit 실패 시 run 내부에서 건너뛸 수 있는 최대 viewpoint 수
 
     Returns:
-        resampled: (M, 6) uniform-spaced trajectory
+        resampled: (M, 6) uniform-spaced trajectory (가장 긴 안전 run)
+        dropped:   list[int] — 채택 run 에 포함되지 않아 드롭된 viewpoint 인덱스
+        runs_info: dict — {"runs": [(start,end,len)...], "kept": (start,end,len)}
     """
     N = len(selected)
+    runs, _ = _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip)
+    kept = max(runs, key=len)
+    kept_set = set(kept)
+    dropped = sorted(set(range(N)) - kept_set)
 
-    # 1) 모든 구간을 dense path로 연결 (joint-space)
-    dense_segments = []
-    for i in range(N - 1):
-        dense_segments.append(selected[i:i+1])
+    runs_info = {
+        "runs": [(r[0], r[-1], len(r)) for r in runs],
+        "kept": (kept[0], kept[-1], len(kept)),
+    }
 
-        if i in transit_segments:
-            # transit 구간: 이미 dense, 첫/끝 제외
-            transit = transit_segments[i]
-            if len(transit) > 2:
-                dense_segments.append(transit[1:-1])
-        else:
-            # non-reconfig: joint-space linear interpolation
-            q0, q1 = selected[i], selected[i + 1]
-            dist = np.max(np.abs(q1 - q0))
-            n_steps = max(1, int(np.ceil(dist / dense_step_rad)))
-            if n_steps > 1:
-                alphas = np.linspace(0, 1, n_steps + 1)[1:-1]  # 양 끝 제외
-                interp = q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :]
-                dense_segments.append(interp)
+    if len(kept) < 2:
+        raise RuntimeError(
+            "안전하게 연속인 구간이 viewpoint 2개 미만입니다 — 모든 인접 전이가 "
+            "이을 수 없는 reconfig. transit 성공(#1) 또는 reconfig 감소(#3)가 필요합니다."
+        )
 
-    dense_segments.append(selected[-1:])  # 마지막 점
-    dense_path = np.concatenate(dense_segments, axis=0)
+    dense_path = _dense_path_for_run(selected, transit_segments, kept, dense_step_rad)
 
-    # 2) Mode별 uniform resample
     if mode == "ee":
-        return _resample_uniform_ee(dense_path, robot_cfg, spacing)
+        resampled = _resample_uniform_ee(dense_path, robot_cfg, spacing)
     elif mode == "joint":
-        return _resample_uniform_joint(dense_path, spacing)
+        resampled = _resample_uniform_joint(dense_path, spacing)
     else:
         raise ValueError(f"Unknown resample mode: {mode!r} (expected 'ee' or 'joint')")
+    return resampled, dropped, runs_info
 
 
 def batch_collision_check(trajectory, robot_cfg, world_scene):
     """전체 궤적에 대해 batch collision check 수행. Returns (is_collision, n_collisions)."""
+    # collision_activation_distance 의 cuRobo 기본값은 0.2 m 이다. 그 경우 비용은 장애물
+    # 20 cm 이내에서 양수가 되므로(카메라는 작업거리 46 mm 라 항상 그 안), cost > 0 검사가
+    # 모든 waypoint 를 충돌로 판정해 버린다. 최종 검증에서는 실제 침투만 잡도록
+    # activation distance 를 COLLISION_MARGIN(기본 0)으로 둔다 → cost > 0 ⇔ 실제 침투.
     cfg = RobotCollisionCheckerCfg.load_from_config(
         robot_config=robot_cfg,
         scene_model=world_scene,
         n_cuboids=max(1, len(world_scene.cuboid)),
         n_meshes=max(1, len(world_scene.mesh)),
+        collision_activation_distance=float(config.COLLISION_MARGIN),
+        self_collision_activation_distance=0.0,
     )
     checker = RobotCollisionChecker(cfg)
 
@@ -772,12 +972,16 @@ def batch_collision_check(trajectory, robot_cfg, world_scene):
     d_scene = checker.collision_cost.forward(state)
     d_self = checker.self_collision_cost.forward(state.robot_spheres)
 
-    # 음수 거리 = 충돌. Cost shape may be (batch, horizon, num_spheres) or (batch, horizon).
-    # Reduce trailing dims to per-row collision flag.
+    # cuRobo collision cost는 음수가 아니다: 0 = 안전, >0 = 충돌(또는 activation_distance
+    # 이내 근접). cuRobo 본체 RobotSceneCollision.validate()도 "충돌 없음 ⇔ cost == 0.0"으로
+    # 판정한다. 따라서 충돌은 cost > 0 으로 잡아야 한다. (과거 `< 0` 비교는 절대 참이 될 수
+    # 없어 월드/자가 충돌 검사가 항상 무력화됐다.)
+    # Cost shape may be (batch, horizon, num_spheres) or (batch, horizon); reduce trailing dims.
+    COLLISION_COST_EPS = 1e-6  # float noise 방지용 임계값
     d_scene_r = d_scene.view(batch, -1)
     d_self_r = d_self.view(batch, -1)
-    is_world_collision = (d_scene_r < 0).any(dim=-1).cpu().numpy()
-    is_self_collision = (d_self_r < 0).any(dim=-1).cpu().numpy()
+    is_world_collision = (d_scene_r > COLLISION_COST_EPS).any(dim=-1).cpu().numpy()
+    is_self_collision = (d_self_r > COLLISION_COST_EPS).any(dim=-1).cpu().numpy()
     is_collision = is_self_collision | is_world_collision
     n_collisions = int(is_collision.sum())
 
@@ -1349,15 +1553,83 @@ def main():
         all_solutions, all_success, eps=DBSCAN_EPS_RAD,
     )
 
-    print("[5/6] Phase 3 — DP optimal path...")
-    reconfig_rad = np.deg2rad(RECONFIG_THRESHOLD_DEG)
-    selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
-
-    # wrist_3 고정 — Phase 4/5 전체가 일관된 wrist_3로 동작하여
-    # |Δwrist_3|=0이 되므로 6-DoF L∞ = 5-DoF L∞ (다른 joint가 최대값을 결정).
+    # wrist_3 고정을 DP '이전'에 적용 — wrist_3는 어차피 0으로 잠그며(검사 시 광축 roll
+    # 무관), IK는 free wrist_3로 풀려 후보마다 wrist_3가 제각각이다. DP의 reconfig 비용은
+    # 6-DoF L∞라, 5-DoF로는 연속인 해가 '버려질' wrist_3 차이 때문에 reconfig로 오판돼
+    # DP가 엉뚱한 분기를 고른다. 미리 0으로 잠그면 6-DoF L∞ = 5-DoF L∞ 가 되어 DP가
+    # 실제 최종 자세 기준으로 연속 해를 직접 고른다.
     wrist3_fixed = config.ROBOT_START_STATE[-1]
-    selected[:, -1] = wrist3_fixed
-    print(f"  Locked wrist_3 at {np.rad2deg(wrist3_fixed):.1f}° (pre-transit)")
+    for reps in representatives:
+        if len(reps) > 0:
+            reps[:, -1] = wrist3_fixed
+    print(f"  Locked wrist_3 at {np.rad2deg(wrist3_fixed):.1f}° (pre-DP)")
+
+    reconfig_rad = np.deg2rad(RECONFIG_THRESHOLD_DEG)
+
+    # (a) 연속성 IK seeding: 초기 DP로 reconfig/empty 지점을 찾아 이웃 자세로 IK 재시도.
+    if ENABLE_CONTINUITY_SEEDING:
+        empty_idxs = [i for i, r in enumerate(representatives) if len(r) == 0]
+        reps_dp0 = [r.copy() for r in representatives]      # dp는 carry-forward로 입력을 변형
+        selected0, _, _ = dp_optimal_path(reps_dp0, reconfig_rad)
+        jumps0 = np.max(np.abs(np.diff(selected0, axis=0)), axis=1)
+        recfg0 = np.where(jumps0 > reconfig_rad)[0]
+
+        targets: dict[int, np.ndarray] = {}
+        for idx in recfg0:                                  # reconfig 양끝을 서로의 자세로 seed
+            targets[idx + 1] = selected0[idx]
+            targets[idx] = selected0[idx + 1]
+        for i in empty_idxs:                                # empty는 가까운 이웃 자세로 seed
+            nb = i - 1 if i > 0 else min(i + 1, len(selected0) - 1)
+            targets.setdefault(i, selected0[nb])
+
+        if targets:
+            tlist = sorted(targets)
+            anchors = np.array([targets[i] for i in tlist])
+            print(f"[5a/6] Continuity IK seeding — {len(tlist)} targets "
+                  f"({len(recfg0)} reconfig, {len(empty_idxs)} empty)...")
+            sol2, succ2 = solve_ik_seeded(
+                robot_cfg, world_config, positions_np, quats_np, tlist, anchors,
+            )
+            sol2[..., -1] = wrist3_fixed
+            added, filled = 0, 0
+            for k, vp in enumerate(tlist):
+                good = sol2[k][succ2[k]]
+                if len(good) == 0:
+                    continue
+                if len(representatives[vp]) == 0:
+                    filled += 1
+                merged = (np.vstack([representatives[vp], good])
+                          if len(representatives[vp]) > 0 else good)
+                representatives[vp] = _greedy_dedup(merged, DP_CANDIDATE_DEDUP_RAD)
+                added += len(good)
+            print(f"  Continuity seeding: +{added} solutions, "
+                  f"{filled}/{len(empty_idxs)} empty viewpoints filled")
+
+    # 못 가는(empty) viewpoint 제거 — IK 해가 없으면 carry-forward로 메우지 않고 경로에서 뺀다.
+    # orig_idx: 남은 viewpoint의 '원본' 인덱스(드롭 후에도 로그를 원래 번호로 표기하기 위함).
+    orig_idx = np.arange(len(representatives))
+    n_dropped_empty = 0
+    if DROP_UNREACHABLE_VIEWPOINTS:
+        keep = np.array([len(r) > 0 for r in representatives], dtype=bool)
+        n_dropped_empty = int((~keep).sum())
+        if n_dropped_empty > 0:
+            dropped_list = orig_idx[~keep].tolist()
+            print(f"  Dropping {n_dropped_empty} unreachable (empty) viewpoints "
+                  f"(no IK solution): {dropped_list}")
+            representatives = [r for r, k in zip(representatives, keep) if k]
+            all_solutions = all_solutions[keep]
+            all_success = all_success[keep]
+            if cluster_id is not None:
+                cluster_id = cluster_id[keep]
+            orig_idx = orig_idx[keep]
+            if len(representatives) < 2:
+                raise RuntimeError(
+                    f"도달 가능한 viewpoint가 {len(representatives)}개뿐입니다 — "
+                    "물체 배치/작업거리(WD)를 조정해 reachability를 높여야 합니다."
+                )
+
+    print("[5/6] Phase 3 — DP optimal path...")
+    selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
 
     # 클러스터 간/내 reconfig 분석
     if cluster_id is not None:
@@ -1377,12 +1649,33 @@ def main():
               f"({100 * rc_intra / max(n_intra_transition, 1):.0f}%) — should be 0")
 
         if rc_intra > 0:
+            _jn = ["pan", "lift", "elbow", "w1", "w2", "w3"]
             intra_reconfig_idx = np.where(is_reconfig & ~is_inter_cluster)[0]
             for idx in intra_reconfig_idx:
                 jump_deg = np.rad2deg(jumps[idx])
                 cid = cluster_id[idx]
-                print(f"      viewpoint {idx}→{idx+1} (cluster {cid}): "
-                      f"jump {jump_deg:.1f}°")
+                # 어떤 joint가 튀는지 (per-joint |Δ| deg)
+                dq_deg = np.rad2deg(np.abs(selected[idx + 1] - selected[idx]))
+                worst = int(np.argmax(dq_deg))
+                per_joint = " ".join(f"{n}={d:.0f}" for n, d in zip(_jn, dq_deg))
+                # 연속 해가 IK pool에 있었는가? (wrist_3 잠금이므로 5-DoF L∞로 비교)
+                def _min_pool_linf(vp, ref):
+                    cand = all_solutions[vp][all_success[vp]]
+                    if len(cand) == 0:
+                        return None
+                    return float(np.rad2deg(np.min(np.max(np.abs(cand[:, :5] - ref[:5]), axis=1))))
+                d_next = _min_pool_linf(idx + 1, selected[idx])      # vp(idx+1) ~ selected[idx]
+                d_prev = _min_pool_linf(idx, selected[idx + 1])      # vp(idx)   ~ selected[idx+1]
+                thr_deg = np.rad2deg(reconfig_rad)
+                def _verdict(d):
+                    if d is None:
+                        return "no-IK"
+                    return f"{d:.0f}° ({'POOL-HAS-CONT' if d <= thr_deg else 'no-cont-in-pool'})"
+                o0, o1 = int(orig_idx[idx]), int(orig_idx[idx + 1])
+                print(f"      viewpoint {o0}→{o1} (cluster {cid}): jump {jump_deg:.1f}° "
+                      f"[worst={_jn[worst]}]  Δ: {per_joint}")
+                print(f"          pool-continuity: vp{o1}~sel[{o0}]={_verdict(d_next)}, "
+                      f"vp{o0}~sel[{o1}]={_verdict(d_prev)}  (thr={thr_deg:.0f}°)")
 
     # Phase 4: MotionPlanner transit at reconfig points
     reconfig_indices = np.where(is_reconfig)[0] if cluster_id is not None else np.array([], dtype=int)
@@ -1390,7 +1683,7 @@ def main():
     if len(reconfig_indices) > 0:
         print(f"\n[Phase 4] MotionPlanner transit for {len(reconfig_indices)} reconfig points...")
         transit_segments, _ = plan_reconfig_transits(
-            selected, reconfig_indices, robot_cfg, world_config,
+            selected, reconfig_indices, robot_cfg, world_config, label_idx=orig_idx,
         )
         # 안전망: MotionPlanner가 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정
         for idx in transit_segments:
@@ -1398,10 +1691,24 @@ def main():
 
     # Phase 5: Uniform resample + collision check
     print(f"\n[Phase 5] Interpolation + uniform resample (mode={RESAMPLE_MODE})...")
-    final_traj = interpolate_and_resample(
+    final_traj, skipped_vps, runs_info = interpolate_and_resample(
         selected, transit_segments, robot_cfg,
         mode=RESAMPLE_MODE, spacing=args.spacing,
+        reconfig_threshold_rad=reconfig_rad,
     )
+    skipped_orig = [int(orig_idx[i]) for i in skipped_vps]   # 원본 viewpoint 번호로 표기
+    if len(runs_info["runs"]) > 1:
+        kl = runs_info["kept"][2]
+        print(
+            f"  WARNING: transit 실패로 경로가 {len(runs_info['runs'])}개 run으로 끊김 "
+            f"→ 가장 긴 run ({kl}개 viewpoint) 채택, "
+            f"viewpoint {len(skipped_vps)}개 드롭(원본 번호): {skipped_orig}"
+        )
+    elif skipped_vps:
+        print(
+            f"  WARNING: transit 실패로 아웃라이어 viewpoint {len(skipped_vps)}개 건너뜀"
+            f"(원본 번호): {skipped_orig}"
+        )
     if RESAMPLE_MODE == "ee":
         spacing_desc = f"EE spacing={args.spacing*1000:.1f} mm"
     else:
@@ -1481,11 +1788,12 @@ def main():
     # visualize_animated_html(args.object, final_traj, ee_positions, anim_path)
 
     n_transit_ok = len(transit_segments)
-    print(f"\nDone. reconfigs={stats['n_reconfigs']} "
-          f"(inter={rc_inter}, intra={rc_intra}), "
+    covered = runs_info["kept"][2]
+    print(f"\nDone. coverage={covered}/{N} viewpoints "
+          f"(unreachable dropped={n_dropped_empty}, transit-split dropped={len(skipped_vps)}), "
+          f"reconfigs={stats['n_reconfigs']} (inter={rc_inter}, intra={rc_intra}), "
           f"transit={n_transit_ok}/{len(reconfig_indices)} OK, "
-          f"collisions={n_collisions}, "
-          f"final={len(final_traj)} waypoints")
+          f"collisions={n_collisions}, final={len(final_traj)} waypoints")
 
 
 if __name__ == "__main__":
