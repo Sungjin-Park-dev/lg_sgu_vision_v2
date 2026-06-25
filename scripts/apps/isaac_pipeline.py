@@ -1281,7 +1281,36 @@ class PipelineWindow:
             / "ur20_description"
             / Path(kin["urdf_path"]).name
         )
-        return robot_cfg_path, urdf_path, kin["collision_link_names"], kin["collision_spheres"]
+        sphere_buffer = kin.get("collision_sphere_buffer", 0.0)
+        if isinstance(sphere_buffer, dict):
+            buffer_by_link = {
+                link_name: float(value)
+                for link_name, value in sphere_buffer.items()
+            }
+        else:
+            buffer_by_link = {
+                link_name: float(sphere_buffer or 0.0)
+                for link_name in kin["collision_spheres"]
+            }
+        collision_spheres = {
+            link_name: [
+                {
+                    **sphere_cfg,
+                    "radius": float(sphere_cfg["radius"])
+                    + float(buffer_by_link.get(link_name, 0.0)),
+                }
+                for sphere_cfg in link_spheres
+            ]
+            for link_name, link_spheres in kin["collision_spheres"].items()
+        }
+        max_sphere_buffer = max(buffer_by_link.values(), default=0.0)
+        return (
+            robot_cfg_path,
+            urdf_path,
+            kin["collision_link_names"],
+            collision_spheres,
+            max_sphere_buffer,
+        )
 
     @staticmethod
     def _find_link_prim(stage, robot_root: str, link_name: str):
@@ -1386,7 +1415,7 @@ class PipelineWindow:
             return
 
         try:
-            cfg_path, urdf_path, collision_link_names, collision_spheres = (
+            cfg_path, urdf_path, collision_link_names, collision_spheres, sphere_buffer = (
                 self._load_collision_spheres()
             )
             fixed_edges = self._load_fixed_urdf_edges(urdf_path)
@@ -1430,6 +1459,8 @@ class PipelineWindow:
             f"[spheres] displayed {n_spheres} cuRobo collision spheres from "
             f"{cfg_path.name} under {robot_root}"
         )
+        if sphere_buffer > 0.0:
+            msg += f" (+{sphere_buffer * 1000:.1f} mm YAML buffer)"
         if missing_links:
             msg += f" (missing links: {', '.join(missing_links)})"
         self._append_log(msg)
@@ -1496,6 +1527,7 @@ class PipelineWindow:
 
         self._btn_generate.enabled = False
         self._append_log("[generate] $ " + " ".join(cmd))
+        generated_csv_path: list[str] = []
 
         def on_line(line: str):
             self._append_log(line)
@@ -1505,11 +1537,18 @@ class PipelineWindow:
                 if not Path(csv).is_absolute():
                     csv = str(PROJECT_ROOT / csv)
                 self._csv_path_model.set_value(csv)
+                generated_csv_path[:] = [csv]
                 self._append_log(f"[generate] captured CSV: {csv}")
 
         def on_exit(rc: int):
             self._append_log(f"[generate] exit code = {rc}")
             self._btn_generate.enabled = True
+            if rc == 0 and generated_csv_path:
+                csv = generated_csv_path[0]
+                if self._preview.load(csv):
+                    self._update_slider_bounds()
+                    self._refresh_status()
+                    self._append_log(f"[preview] auto-loaded generated CSV: {csv}")
 
         self._gen_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
 

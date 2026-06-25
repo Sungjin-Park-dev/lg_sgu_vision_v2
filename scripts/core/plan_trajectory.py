@@ -51,6 +51,12 @@ IK_BATCH_SIZE = 4
 DBSCAN_EPS_RAD = 0.3
 RECONFIG_THRESHOLD_DEG = 29.0
 
+# 충돌검사에서 제외할 로봇 링크. base_link_inertia(로봇 베이스)는 base_link 에 고정이라
+# 자세와 무관하게 항상 robot_mount(받침대) 윗면을 ~2cm 파고든다 → 모든 IK/충돌검사가
+# 상시 충돌로 실패. 받침대 박스가 팔은 그대로 막아주고, base 는 자기 받침대만 닿으므로
+# 충돌검사 자체가 무의미해 제외해도 실질 보호 손실이 없다.
+COLLISION_EXCLUDE_LINKS = ("base_link_inertia",)
+
 RESAMPLE_MODE = "ee"
 DEFAULT_SPACING_M = 0.01
 
@@ -128,9 +134,41 @@ def _resolve_robot_config(robot_filename: str):
         cs_allowed = {f.name for f in dataclasses.fields(CSpaceParams)}
         kin["cspace"] = {k: v for k, v in cs.items() if k in cs_allowed}
 
-    allowed = {f.name for f in dataclasses.fields(KinematicsLoaderCfg)}
+    # 고정 베이스 링크를 충돌검사에서 제외 (COLLISION_EXCLUDE_LINKS 참고).
+    # collision_link_names 와 mesh_link_names 는 YAML anchor 로 같은 리스트일 수 있어
+    # 각각 새 리스트로 다시 필터한다.
+    for key in ("collision_link_names", "mesh_link_names"):
+        if isinstance(kin.get(key), list):
+            kin[key] = [l for l in kin[key] if l not in COLLISION_EXCLUDE_LINKS]
+    if isinstance(kin.get("collision_spheres"), dict):
+        kin["collision_spheres"] = {
+            k: v for k, v in kin["collision_spheres"].items()
+            if k not in COLLISION_EXCLUDE_LINKS
+        }
+
+    # RobotCfg.create() injects these into KinematicsLoaderCfg() explicitly; leaving
+    # them in the kinematics dict raises "multiple values for keyword argument".
+    injected = {"load_collision_spheres", "num_envs", "device_cfg"}
+    allowed = {f.name for f in dataclasses.fields(KinematicsLoaderCfg)} - injected
     cfg["robot_cfg"]["kinematics"] = {k: v for k, v in kin.items() if k in allowed}
     return cfg
+
+
+def _collision_sphere_buffer_summary(robot_cfg) -> str | None:
+    buffer = robot_cfg["robot_cfg"]["kinematics"].get("collision_sphere_buffer", 0.0)
+    if isinstance(buffer, dict):
+        values = [float(v) for v in buffer.values()]
+        values = [v for v in values if v > 0.0]
+        if not values:
+            return None
+        if min(values) == max(values):
+            return f"{values[0] * 1000:.1f} mm"
+        return f"{min(values) * 1000:.1f}-{max(values) * 1000:.1f} mm"
+
+    value = float(buffer or 0.0)
+    if value <= 0.0:
+        return None
+    return f"{value * 1000:.1f} mm"
 
 
 # =========================================================================
@@ -509,6 +547,23 @@ def dp_optimal_path(representatives, reconfig_threshold_rad=0.5):
 # Phase 4: MotionGen transit at reconfig points
 # =========================================================================
 
+def _single_joint_state_path(joint_state: JointState, n_dof: int) -> np.ndarray:
+    """Extract the one planned path from cuRobo's batch/seed shaped JointState."""
+    q = joint_state.position
+    original_shape = tuple(q.shape)
+    while q.ndim > 2 and q.shape[0] == 1:
+        q = q.squeeze(0)
+    if q.ndim != 2:
+        raise RuntimeError(
+            f"Expected a single trajectory shaped (T, dof), got "
+            f"{original_shape} -> {tuple(q.shape)}"
+        )
+    waypoints = q.detach().cpu().numpy()
+    if waypoints.shape[-1] != n_dof:
+        waypoints = waypoints[..., :n_dof]
+    return waypoints
+
+
 def plan_reconfig_transits(
     selected, reconfig_indices, robot_cfg, world_scene,
 ):
@@ -559,15 +614,30 @@ def plan_reconfig_transits(
         ok = result is not None and bool(result.success.any().item())
         if ok:
             traj = result.get_interpolated_plan()
-            waypoints = traj.position.squeeze(0).cpu().numpy()
-            if waypoints.shape[-1] != selected.shape[-1]:
-                waypoints = waypoints[..., :selected.shape[-1]]
+            waypoints = _single_joint_state_path(traj, selected.shape[-1])
+            if len(waypoints) < 2:
+                transit_stats.append({
+                    "idx": idx, "success": False,
+                    "n_waypoints": len(waypoints), "time": dt,
+                })
+                print(
+                    f"    {idx}→{idx+1}: FAILED "
+                    f"(planner returned {len(waypoints)} waypoint, {dt:.2f}s)"
+                )
+                continue
             transit_segments[idx] = waypoints
+            max_step_deg = np.rad2deg(
+                np.max(np.abs(np.diff(waypoints, axis=0)))
+            ) if len(waypoints) > 1 else 0.0
             transit_stats.append({
                 "idx": idx, "success": True,
                 "n_waypoints": len(waypoints), "time": dt,
+                "max_step_deg": float(max_step_deg),
             })
-            print(f"    {idx}→{idx+1}: OK ({len(waypoints)} waypoints, {dt:.2f}s)")
+            print(
+                f"    {idx}→{idx+1}: OK ({len(waypoints)} waypoints, "
+                f"max_step={max_step_deg:.2f}°, {dt:.2f}s)"
+            )
         else:
             transit_stats.append({
                 "idx": idx, "success": False, "time": dt,
@@ -712,6 +782,31 @@ def batch_collision_check(trajectory, robot_cfg, world_scene):
     n_collisions = int(is_collision.sum())
 
     return is_collision, n_collisions
+
+
+def densify_for_collision_check(trajectory: np.ndarray) -> np.ndarray:
+    """Densify joint-space segments before collision validation."""
+    if len(trajectory) < 2:
+        return trajectory
+
+    max_step_rad = np.deg2rad(config.COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG)
+    if max_step_rad <= 0.0:
+        raise ValueError("COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG must be > 0")
+
+    metric = trajectory
+    if config.COLLISION_INTERP_EXCLUDE_LAST_JOINT and trajectory.shape[1] > 1:
+        metric = trajectory[:, :-1]
+
+    segments = [trajectory[0:1]]
+    for i in range(len(trajectory) - 1):
+        q0 = trajectory[i]
+        q1 = trajectory[i + 1]
+        dist = float(np.max(np.abs(metric[i + 1] - metric[i])))
+        n_steps = max(1, int(np.ceil(dist / max_step_rad)))
+        alphas = np.linspace(0.0, 1.0, n_steps + 1, dtype=np.float64)[1:]
+        segments.append(q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :])
+
+    return np.concatenate(segments, axis=0)
 
 
 # =========================================================================
@@ -1239,6 +1334,9 @@ def main():
     world_config = build_collision_world(args.object)
     robot_cfg = _resolve_robot_config(ROBOT_CONFIG)
     print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
+    collision_buffer = _collision_sphere_buffer_summary(robot_cfg)
+    if collision_buffer:
+        print(f"  Collision sphere buffer: {collision_buffer} (from robot YAML)")
 
     all_solutions, all_success = solve_ik_multi_seed(
         robot_cfg, world_config, positions_np, quats_np,
@@ -1312,21 +1410,27 @@ def main():
 
     # Collision check
     print("  Collision check...")
+    collision_traj = densify_for_collision_check(final_traj)
+    if len(collision_traj) != len(final_traj):
+        print(
+            f"  Collision check densified: {len(final_traj)} → {len(collision_traj)} "
+            f"waypoints (max joint step="
+            f"{config.COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG:.3f}°"
+            + (", excluding wrist_3 metric" if config.COLLISION_INTERP_EXCLUDE_LAST_JOINT else "")
+            + ")"
+        )
     is_collision, n_collisions = batch_collision_check(
-        final_traj, robot_cfg, world_config,
+        collision_traj, robot_cfg, world_config,
     )
     if n_collisions > 0:
-        collision_pct = 100 * n_collisions / len(final_traj)
-        print(f"  WARNING: {n_collisions}/{len(final_traj)} waypoints in collision ({collision_pct:.1f}%)")
-        final_traj = final_traj[~is_collision]
-        # 균일성 복원: drop으로 생긴 gap을 동일 metric으로 다시 균등 분할
-        if RESAMPLE_MODE == "ee":
-            final_traj = _resample_uniform_ee(final_traj, robot_cfg, args.spacing)
-        else:
-            final_traj = _resample_uniform_joint(final_traj, args.spacing)
-        print(f"  Removed collisions → re-resampled to {len(final_traj)} waypoints")
+        collision_pct = 100 * n_collisions / len(collision_traj)
+        raise RuntimeError(
+            f"Collision validation failed: {n_collisions}/{len(collision_traj)} "
+            f"dense waypoints in collision ({collision_pct:.1f}%). "
+            "Refusing to save trajectory."
+        )
     else:
-        print(f"  No collisions detected ({len(final_traj)} waypoints)")
+        print(f"  No collisions detected ({len(collision_traj)} dense waypoints)")
 
     # FK + 저장
     ee_positions, ee_quaternions = compute_fk(final_traj, robot_cfg)
