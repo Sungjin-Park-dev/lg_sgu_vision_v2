@@ -90,6 +90,14 @@ TRANSIT_ENABLE_GRAPH_ATTEMPT = 1    # 이 시도부터 PRM graph seeding 사용 
 # (클러스터 경계 등) 안전한 연속 경로가 없으므로 명확히 에러를 낸다.
 TRANSIT_FAIL_SKIP_MAX = 5
 
+# 직접(start→goal) transit 이 실패하면 안전한 HOME(=config.ROBOT_START_STATE)을 경유하는
+# 2-leg(start→HOME, HOME→goal)로 재시도한다. 직접 큰 재구성(예: 정면→측면 78°)은 물체 옆 좁은
+# 공간을 카메라가 쓸며 지나가야 해 자주 실패하지만, 각 leg는 '표면→자유공간(retract)'과
+# '자유공간→표면(re-approach)' 문제라 훨씬 쉽고 빠르다(curved 47→48 실측: 직접 0/8 → via-home 8/8).
+# 직접이 성공하면 미사용(fallback). 비용은 retract+reapproach 이동(joint-timed)만 추가되며 reconfig
+# 는 궤적당 몇 개뿐이라, 못 가던 viewpoint(예: 측면 chunk)를 살리는 값으로 충분히 싸다.
+TRANSIT_VIA_HOME = True
+
 # 충돌검사에서 제외할 로봇 링크. base_link_inertia(로봇 베이스)는 base_link 에 고정이라
 # 자세와 무관하게 항상 robot_mount(받침대) 윗면을 ~2cm 파고든다 → 모든 IK/충돌검사가
 # 상시 충돌로 실패. 받침대 박스가 팔은 그대로 막아주고, base 는 자기 받침대만 닿으므로
@@ -714,53 +722,58 @@ def plan_reconfig_transits(
     print("    Warming up MotionPlanner (with graph planner)...")
     planner.warmup(enable_graph=True, num_warmup_iterations=2)
 
+    n_dof = selected.shape[-1]
+
+    def _plan_leg(q_from, q_to):
+        """단일 plan_cspace. 성공 시 waypoints (T,6), 실패/퇴화 시 None."""
+        s = JointState.from_position(
+            torch.tensor(q_from, device="cuda:0", dtype=torch.float32).unsqueeze(0),
+            joint_names=planner.joint_names)
+        g = JointState.from_position(
+            torch.tensor(q_to, device="cuda:0", dtype=torch.float32).unsqueeze(0),
+            joint_names=planner.joint_names)
+        r = planner.plan_cspace(
+            g, s, max_attempts=TRANSIT_MAX_ATTEMPTS,
+            enable_graph_attempt=TRANSIT_ENABLE_GRAPH_ATTEMPT,
+        )
+        if r is None or not bool(r.success.any().item()):
+            return None
+        wp = _single_joint_state_path(r.get_interpolated_plan(), n_dof)
+        return wp if len(wp) >= 2 else None
+
+    # HOME: 직접 transit 실패 시 경유할 안전 retract 자세. wrist_3 가 이미 lock 값과 동일.
+    home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
+
     transit_segments = {}
     transit_stats = []
 
     for idx in reconfig_indices:
-        start_q = torch.tensor(
-            selected[idx], device="cuda:0", dtype=torch.float32,
-        ).unsqueeze(0)
-        goal_q = torch.tensor(
-            selected[idx + 1], device="cuda:0", dtype=torch.float32,
-        ).unsqueeze(0)
-
-        start_state = JointState.from_position(start_q, joint_names=planner.joint_names)
-        goal_state = JointState.from_position(goal_q, joint_names=planner.joint_names)
-
         t0 = time.time()
-        result = planner.plan_cspace(
-            goal_state, start_state,
-            max_attempts=TRANSIT_MAX_ATTEMPTS,
-            enable_graph_attempt=TRANSIT_ENABLE_GRAPH_ATTEMPT,
-        )
+        waypoints = _plan_leg(selected[idx], selected[idx + 1])   # 1) 직접
+        route = "direct"
+
+        if waypoints is None and TRANSIT_VIA_HOME:
+            # 2) HOME 경유: start→HOME(retract), HOME→goal(re-approach)
+            leg1 = _plan_leg(selected[idx], home_q)
+            leg2 = _plan_leg(home_q, selected[idx + 1])
+            if leg1 is not None and leg2 is not None:
+                waypoints = np.concatenate([leg1, leg2[1:]], axis=0)  # HOME 중복 제거
+                route = "via-home"
+
         dt = time.time() - t0
 
-        ok = result is not None and bool(result.success.any().item())
-        if ok:
-            traj = result.get_interpolated_plan()
-            waypoints = _single_joint_state_path(traj, selected.shape[-1])
-            if len(waypoints) < 2:
-                transit_stats.append({
-                    "idx": idx, "success": False,
-                    "n_waypoints": len(waypoints), "time": dt,
-                })
-                print(
-                    f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED "
-                    f"(planner returned {len(waypoints)} waypoint, {dt:.2f}s)"
-                )
-                continue
+        if waypoints is not None:
             transit_segments[idx] = waypoints
             max_step_deg = np.rad2deg(
                 np.max(np.abs(np.diff(waypoints, axis=0)))
             ) if len(waypoints) > 1 else 0.0
             transit_stats.append({
-                "idx": idx, "success": True,
+                "idx": idx, "success": True, "route": route,
                 "n_waypoints": len(waypoints), "time": dt,
                 "max_step_deg": float(max_step_deg),
             })
             print(
-                f"    {_lbl(idx)}→{_lbl(idx+1)}: OK ({len(waypoints)} waypoints, "
+                f"    {_lbl(idx)}→{_lbl(idx+1)}: OK [{route}] ({len(waypoints)} waypoints, "
                 f"max_step={max_step_deg:.2f}°, {dt:.2f}s)"
             )
         else:
@@ -770,7 +783,9 @@ def plan_reconfig_transits(
             print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED ({dt:.2f}s)")
 
     n_ok = sum(1 for s in transit_stats if s["success"])
-    print(f"  Transit planning: {n_ok}/{len(reconfig_indices)} succeeded")
+    n_via = sum(1 for s in transit_stats if s.get("route") == "via-home")
+    print(f"  Transit planning: {n_ok}/{len(reconfig_indices)} succeeded"
+          + (f" ({n_via} via HOME)" if n_via else ""))
 
     return transit_segments, transit_stats
 
@@ -832,49 +847,58 @@ def _linear_interior(q0, q1, dense_step_rad):
     return q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :]
 
 
-def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip):
+def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
+                scan_free=None):
     """viewpoint 시퀀스를 '안전하게 연속인' run 들로 분할한다(#2).
 
-    run 내부 연결 규칙:
-        - 성공한 transit (consecutive, idx in transit_segments) → run 유지
-        - small jump (L∞ <= thr) → run 유지
-        - transit 실패 reconfig → 아웃라이어 viewpoint(i+1..j-1)를 최대 max_skip개까지
-          건너뛰어 selected[i] 와 thr 이내로 만나는 j 에 재연결(run 유지)
-    위 어떤 것으로도 못 이으면(클러스터 경계 등) 그 지점에서 run 을 끊는다(cut).
+    run 내부 연결 규칙(두 viewpoint를 같은 run으로 이으려면 충돌-free 이동이 있어야 함):
+        - 성공한 transit (consecutive, idx in transit_segments) → MotionGen 충돌-free → 유지
+        - small jump (L∞ <= thr) **이고** 그 직선 스캔이 충돌-free → 유지
+        - 위로 못 이으면 아웃라이어 viewpoint(i+1..j-1)를 최대 max_skip개까지 건너뛰어
+          selected[i]와 thr 이내 **이고** 직선 스캔이 충돌-free인 j 에 재연결(run 유지)
+    어떤 것으로도 못 이으면(클러스터 경계 / 스캔 관통 등) 그 지점에서 run 을 끊는다(cut).
+
+    scan_free(a, b): 직선 joint 스캔 selected[a]→selected[b] 가 충돌-free인지 (None이면 항상 True,
+    하위호환). small jump 이라도 곡면 측면에서 직선 보간이 물체를 관통할 수 있어 검사가 필요하다.
 
     Returns:
         runs: list[list[int]] — 각 run 의 viewpoint 인덱스(원본 순서)
         skipped: set[int] — run 내부에서 건너뛴 아웃라이어 인덱스
     """
+    def _scan_ok(a, b):
+        return scan_free is None or scan_free(a, b)
+
     N = len(selected)
     runs: list[list[int]] = []
     skipped: set[int] = set()
     cur = [0]
     i = 0
     while i < N - 1:
-        # 성공 transit 또는 small jump → 현재 run 유지
+        # 성공 transit → 충돌-free 이동 보장 → 현재 run 유지
         if i in transit_segments:
             cur.append(i + 1)
             i += 1
             continue
+        # small jump 이고 직선 스캔이 충돌-free → 유지
         jump = float(np.max(np.abs(selected[i + 1] - selected[i])))
-        if jump <= reconfig_threshold_rad:
+        if jump <= reconfig_threshold_rad and _scan_ok(i, i + 1):
             cur.append(i + 1)
             i += 1
             continue
 
-        # transit 실패 reconfig → 아웃라이어 skip 시도(transit 시작점은 건너뛰지 않음)
+        # 못 이음(큰 reconfig 또는 스캔 관통) → 아웃라이어 skip 시도(transit 시작점은 건너뛰지 않음)
+        def _connectable(a, b):
+            return (b not in transit_segments
+                    and float(np.max(np.abs(selected[b] - selected[a]))) <= reconfig_threshold_rad
+                    and _scan_ok(a, b))
+
         j = i + 1
         n_dropped = 0
         while (j < N and n_dropped < max_skip and j not in transit_segments
-               and float(np.max(np.abs(selected[j] - selected[i]))) > reconfig_threshold_rad):
+               and not _connectable(i, j)):
             j += 1
             n_dropped += 1
-        reconnectable = (
-            j < N and j not in transit_segments
-            and float(np.max(np.abs(selected[j] - selected[i]))) <= reconfig_threshold_rad
-        )
-        if reconnectable:
+        if j < N and _connectable(i, j):
             skipped.update(range(i + 1, j))
             cur.append(j)
             i = j
@@ -889,6 +913,37 @@ def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip):
         cur.append(N - 1)
     runs.append(cur)
     return runs, skipped
+
+
+def _precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
+                          robot_cfg, world_scene):
+    """직선 joint 스캔이 충돌-free인 (a,b) 쌍을 한 번의 batch collision check로 미리 계산.
+
+    스캔으로 이어질 수 있는 후보(=jump ≤ thr, b-a ≤ max_skip+1)만 검사한다. 큰 jump는 어차피
+    transit이 필요하므로 스캔 검사 불필요. 반환: 함수 scan_free(a,b)->bool (표에 없으면 True).
+    """
+    N = len(selected)
+    pairs = []
+    for a in range(N - 1):
+        for b in range(a + 1, min(a + max_skip + 2, N)):
+            if float(np.max(np.abs(selected[b] - selected[a]))) <= reconfig_threshold_rad:
+                pairs.append((a, b))
+    if not pairs:
+        return lambda a, b: True
+
+    dense_list, counts = [], []
+    for (a, b) in pairs:
+        d = densify_for_collision_check(np.stack([selected[a], selected[b]]))
+        dense_list.append(d)
+        counts.append(len(d))
+    isc, _ = batch_collision_check(np.concatenate(dense_list, axis=0), robot_cfg, world_scene)
+
+    free = {}
+    off = 0
+    for (a, b), n in zip(pairs, counts):
+        free[(a, b)] = not bool(isc[off:off + n].any())
+        off += n
+    return lambda a, b: free.get((a, b), True)
 
 
 def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad):
@@ -954,7 +1009,7 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
                              mode="ee", spacing=0.01, dense_step_rad=0.02,
                              transit_spacing_rad=TRANSIT_RESAMPLE_SPACING_RAD,
                              reconfig_threshold_rad=np.deg2rad(RECONFIG_THRESHOLD_DEG),
-                             max_skip=TRANSIT_FAIL_SKIP_MAX):
+                             max_skip=TRANSIT_FAIL_SKIP_MAX, world_scene=None):
     """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
 
     transit 실패 reconfig 은 직선 보간하면 물체를 관통하므로(#2) 사용하지 않는다. 대신
@@ -981,7 +1036,14 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
         runs_info:  dict — {"runs": [(start,end,len)...], "kept": (start,end,len)}
     """
     N = len(selected)
-    runs, _ = _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip)
+    # world_scene이 있으면 직선 스캔 충돌까지 고려해 run을 나눈다. 곡면 측면에서 인접
+    # viewpoint 사이 직선 보간이 물체를 관통하면(via-home으로 진입은 됐어도) 스캔 자체가 불가 →
+    # 그 구간을 끊어 정직하게 드롭(최종 batch 충돌검사 거부 대신 유효 궤적 저장).
+    scan_free = (_precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
+                                       robot_cfg, world_scene)
+                 if world_scene is not None else None)
+    runs, _ = _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
+                          scan_free=scan_free)
     kept = max(runs, key=len)
     kept_set = set(kept)
     dropped = sorted(set(range(N)) - kept_set)
@@ -1008,6 +1070,16 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     for kind, dense in segments:
         if kind == "transit":
             rs = _resample_uniform_joint(dense, transit_spacing_rad)
+            # sparse joint resample은 코너에서 직선을 그어 MotionGen이 충돌-free로 보장한
+            # 곡선 경로를 잘라낼 수 있다(특히 물체로 재진입하는 via-home 재접근 leg). 그러면
+            # 최종 densify 충돌검사에서 관통이 잡혀 저장이 거부된다. world_scene이 주어지면
+            # 이 transit piece를 검사해, 충돌이 생기면 MotionGen native 해상도를 그대로 쓴다
+            # (densify가 모든 vertex를 지나 충돌-free 유지). 자유공간 transit은 sparse 유지.
+            if world_scene is not None and len(rs) >= 2:
+                isc, _ = batch_collision_check(
+                    densify_for_collision_check(rs), robot_cfg, world_scene)
+                if bool(isc.any()):
+                    rs = dense
             mk = np.ones((len(rs),), dtype=bool)
         elif mode == "ee":
             rs = _resample_uniform_ee(dense, robot_cfg, spacing)
@@ -1832,20 +1904,21 @@ def main():
     final_traj, final_is_transit, skipped_vps, runs_info = interpolate_and_resample(
         selected, transit_segments, robot_cfg,
         mode=RESAMPLE_MODE, spacing=args.spacing,
-        reconfig_threshold_rad=reconfig_rad,
+        reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
     )
     skipped_orig = [int(orig_idx[i]) for i in skipped_vps]   # 원본 viewpoint 번호로 표기
     if len(runs_info["runs"]) > 1:
         kl = runs_info["kept"][2]
         print(
-            f"  WARNING: transit 실패로 경로가 {len(runs_info['runs'])}개 run으로 끊김 "
+            f"  WARNING: 전이 불가(transit 실패/스캔 충돌)로 경로가 "
+            f"{len(runs_info['runs'])}개 run으로 끊김 "
             f"→ 가장 긴 run ({kl}개 viewpoint) 채택, "
             f"viewpoint {len(skipped_vps)}개 드롭(원본 번호): {skipped_orig}"
         )
     elif skipped_vps:
         print(
-            f"  WARNING: transit 실패로 아웃라이어 viewpoint {len(skipped_vps)}개 건너뜀"
-            f"(원본 번호): {skipped_orig}"
+            f"  WARNING: 전이 불가(transit 실패/스캔 충돌)로 아웃라이어 viewpoint "
+            f"{len(skipped_vps)}개 건너뜀(원본 번호): {skipped_orig}"
         )
     if RESAMPLE_MODE == "ee":
         spacing_desc = f"EE spacing={args.spacing*1000:.1f} mm"
