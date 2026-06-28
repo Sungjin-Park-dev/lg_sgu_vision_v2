@@ -98,6 +98,24 @@ TRANSIT_FAIL_SKIP_MAX = 5
 # 는 궤적당 몇 개뿐이라, 못 가던 viewpoint(예: 측면 chunk)를 살리는 값으로 충분히 싸다.
 TRANSIT_VIA_HOME = True
 
+# via-roll: 직접/via-home 실패 시, 경계의 양 끝 scan 자세를 광축(camera 광축 ≈ wrist_3 축) 둘레로
+# roll 한 '중간자세'를 경유해 direct 가교한다. wrist_3 lock 이 버린 redundant DOF(광축 roll =
+# 검사 무손실)를 경계 transit 에서만 복원하는 것 — scan config(selected[i]) 는 보존하므로 검사
+# 품질·스캔 일관성에 영향 없다(중간자세는 스캔되지 않음). 측정상 transit-fail 5/5 해소
+# (scratchpad/freedom_bridge_probe.py: curved 좋은배치 5개 실패 경계 전부 roll 단독 가교).
+# via-home detour 보다 우선(빠름), via-home 은 최후 fallback 으로 강등.
+VIA_ROLL_ENABLE = True
+ROLL_VARIANT_DEG = (45, 90, 135, 180, 225, 270, 315)   # 광축 둘레 roll 변형 각도
+VIA_ROLL_IK_SEEDS = 40            # 변형 타깃당 IK seed 수 (collision-free 분기 확보)
+VIA_ROLL_MAX_REPS = 6             # endpoint 당 변형 후보 상한(가까운 가교쌍이 cap 안에 들도록)
+VIA_ROLL_PAIR_CAP = 20            # 경계당 (A',B') 후보쌍 MotionGen 시도 상한(가교쌍이 joint-far 일 수 있음)
+
+# via-tilt: roll 로도 못 푼 경계를 표면점 중심 orbit tilt(광축 ±φ)로 escalation. 중간자세는
+# 스캔되지 않으므로 시야 비스듬함은 무비용. roll 다음, via-home 앞. (wd_m 필요)
+VIA_TILT_ENABLE = True
+TILT_VARIANT_PHI = (15, 30)       # 광축 기울임 각도(도)
+TILT_VARIANT_AZ = (0, 90, 180, 270)
+
 # 충돌검사에서 제외할 로봇 링크. base_link_inertia(로봇 베이스)는 base_link 에 고정이라
 # 자세와 무관하게 항상 robot_mount(받침대) 윗면을 ~2cm 파고든다 → 모든 IK/충돌검사가
 # 상시 충돌로 실패. 받침대 박스가 팔은 그대로 막아주고, base 는 자기 받침대만 닿으므로
@@ -689,9 +707,12 @@ def _single_joint_state_path(joint_state: JointState, n_dof: int) -> np.ndarray:
 
 
 def plan_reconfig_transits(
-    selected, reconfig_indices, robot_cfg, world_scene, label_idx=None,
+    selected, reconfig_indices, robot_cfg, world_scene, label_idx=None, wd_m=None,
 ):
     """Reconfig 지점마다 MotionPlanner joint-to-joint planning 수행.
+
+    사다리: direct → via-roll → via-tilt → via-home. via-roll/via-tilt 는 경계 양 끝 scan
+    자세를 광축 둘레로 roll/tilt 한 중간자세를 경유해 가교한다(scan config 보존, ripple 없음).
 
     Args:
         selected: (N, 6) DP로 선택된 joint trajectory
@@ -699,6 +720,7 @@ def plan_reconfig_transits(
         robot_cfg: cuRobo robot config (dict)
         world_scene: Scene (충돌 세계)
         label_idx: (선택) filtered→원본 viewpoint 인덱스 매핑. 로그 표기용.
+        wd_m: (선택) working distance [m]. via-tilt(orbit) 에만 필요.
 
     Returns:
         transit_segments: dict {idx: (T, 6) transit trajectory} — 성공한 것만
@@ -724,7 +746,8 @@ def plan_reconfig_transits(
 
     n_dof = selected.shape[-1]
 
-    def _plan_leg(q_from, q_to):
+    def _plan_leg(q_from, q_to, max_attempts=TRANSIT_MAX_ATTEMPTS,
+                  graph_attempt=TRANSIT_ENABLE_GRAPH_ATTEMPT):
         """단일 plan_cspace. 성공 시 waypoints (T,6), 실패/퇴화 시 None."""
         s = JointState.from_position(
             torch.tensor(q_from, device="cuda:0", dtype=torch.float32).unsqueeze(0),
@@ -733,8 +756,7 @@ def plan_reconfig_transits(
             torch.tensor(q_to, device="cuda:0", dtype=torch.float32).unsqueeze(0),
             joint_names=planner.joint_names)
         r = planner.plan_cspace(
-            g, s, max_attempts=TRANSIT_MAX_ATTEMPTS,
-            enable_graph_attempt=TRANSIT_ENABLE_GRAPH_ATTEMPT,
+            g, s, max_attempts=max_attempts, enable_graph_attempt=graph_attempt,
         )
         if r is None or not bool(r.success.any().item()):
             return None
@@ -744,16 +766,126 @@ def plan_reconfig_transits(
     # HOME: 직접 transit 실패 시 경유할 안전 retract 자세. wrist_3 가 이미 lock 값과 동일.
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 
+    # ----- via-roll/via-tilt 인프라 (lazy: 직접 transit 실패가 생겨 처음 필요할 때만 빌드) -----
+    # 카메라 광축 ≈ wrist_3 축 → wrist_3 = 광축 roll = 검사 무손실 redundant DOF. scan config
+    # (selected[i]) 는 그대로 두고 transit 중간자세에만 roll/tilt 를 줘 direct 가교를 푼다.
+    # 중간자세는 스캔되지 않으므로 시야 손실 없음. (compute_fk 로 endpoint 광축을 얻어 roll/tilt)
+    _via = {"ready": False, "ik": None, "tool": None, "pose_of": None}
+    _vcache = {}                       # (sel_idx, mode) -> [collision-free config, ...]
+
+    def _ensure_via():
+        if _via["ready"]:
+            return
+        ep_set = sorted(set([int(i) for i in reconfig_indices]
+                            + [int(i) + 1 for i in reconfig_indices]))
+        ee_pos, ee_quat = compute_fk(selected[ep_set], robot_cfg)   # (M,3), (M,4 xyzw)
+        _via["pose_of"] = {k: (Rotation.from_quat(ee_quat[j]).as_matrix(), ee_pos[j].copy())
+                           for j, k in enumerate(ep_set)}
+        ik_cache = {"obb": max(1, len(world_scene.cuboid)), "mesh": max(1, len(world_scene.mesh))}
+        ik_cfg = InverseKinematicsCfg.create(
+            robot=robot_cfg, scene_model={}, self_collision_check=True,
+            num_seeds=VIA_ROLL_IK_SEEDS,
+            max_batch_size=max(len(ROLL_VARIANT_DEG), len(TILT_VARIANT_PHI) * len(TILT_VARIANT_AZ)),
+            use_cuda_graph=False, collision_cache=ik_cache)
+        ik = InverseKinematics(ik_cfg)
+        ik.update_world(world_scene)
+        _via["ik"], _via["tool"] = ik, ik.tool_frames[0]
+        _via["ready"] = True
+
+    def _roll_targets(R, p):
+        return [(R @ Rotation.from_euler("z", deg, degrees=True).as_matrix(), p.copy())
+                for deg in ROLL_VARIANT_DEG]
+
+    def _tilt_targets(R, p):
+        z = R[:, 2]
+        surf = p + z * wd_m                                    # 표면점(orbit 중심)
+        out = []
+        for phi in TILT_VARIANT_PHI:
+            for az in TILT_VARIANT_AZ:
+                u = R @ np.array([np.cos(np.deg2rad(az)), np.sin(np.deg2rad(az)), 0.0])
+                u = u / np.linalg.norm(u)
+                Rp = Rotation.from_rotvec(u * np.deg2rad(phi)).as_matrix() @ R
+                out.append((Rp, surf - Rp[:, 2] * wd_m))       # WD 유지하며 광축 ±φ
+        return out
+
+    def _variant_configs(k, mode):
+        """sel index k 의 변형 IK 후보(collision-free, dedup). 캐시."""
+        if (k, mode) in _vcache:
+            return _vcache[(k, mode)]
+        _ensure_via()
+        R, p = _via["pose_of"][k]
+        targets = _roll_targets(R, p) if mode == "roll" else _tilt_targets(R, p)
+        Rs = np.stack([t[0] for t in targets])
+        ps = np.stack([t[1] for t in targets])
+        bp = torch.tensor(ps, device="cuda:0", dtype=torch.float32)
+        bq = torch.tensor(rot_to_quat_batch(Rs), device="cuda:0", dtype=torch.float32)
+        res = _via["ik"].solve_pose(
+            GoalToolPose.from_poses({_via["tool"]: Pose(position=bp, quaternion=bq)}, num_goalset=1),
+            return_seeds=VIA_ROLL_IK_SEEDS)
+        sols = res.js_solution.position.detach().cpu().numpy()
+        if sols.shape[-1] != n_dof:
+            sols = sols[..., :n_dof]
+        sols = normalize_joints(sols)
+        flat = sols[res.success.detach().cpu().numpy()]        # (K,6) 성공 해만
+        kept = []
+        if len(flat):
+            isc, _ = batch_collision_check(flat, robot_cfg, world_scene)
+            tol = np.deg2rad(8.0)
+            for s in flat[~isc]:
+                if all(np.max(np.abs(s - q)) > tol for q in kept):
+                    kept.append(s)
+                if len(kept) >= VIA_ROLL_MAX_REPS:
+                    break
+        _vcache[(k, mode)] = kept
+        return kept
+
+    def _via_variant(idx, mode):
+        """scan config 고정 채 변형 중간자세 경유 3-leg transit. 성공 시 waypoints, 아니면 None."""
+        qi, qj = selected[idx], selected[idx + 1]
+        poolA = [qi] + _variant_configs(idx, mode)
+        poolB = [qj] + _variant_configs(idx + 1, mode)
+        pairs = sorted(((float(np.max(np.abs(poolA[ia] - poolB[ib]))), ia, ib)
+                        for ia in range(len(poolA)) for ib in range(len(poolB))),
+                       key=lambda t: t[0])
+        for n, (_, ia, ib) in enumerate(pairs):
+            if n >= VIA_ROLL_PAIR_CAP:
+                break
+            a, b = poolA[ia], poolB[ib]
+            leg1 = _plan_leg(qi, a) if ia != 0 else None       # scan→A' (roll, 보통 쉬움)
+            if ia != 0 and leg1 is None:
+                continue
+            legm = _plan_leg(a, b)                              # A'→B' (가교부)
+            if legm is None:
+                continue
+            leg3 = _plan_leg(b, qj) if ib != 0 else None        # B'→scan (roll)
+            if ib != 0 and leg3 is None:
+                continue
+            segs = [leg1, legm[1:]] if ia != 0 else [legm]      # 중복 endpoint 제거
+            if ib != 0:
+                segs.append(leg3[1:])
+            wp = np.concatenate(segs, axis=0)
+            return wp if len(wp) >= 2 else None
+        return None
+
     transit_segments = {}
     transit_stats = []
 
     for idx in reconfig_indices:
         t0 = time.time()
-        waypoints = _plan_leg(selected[idx], selected[idx + 1])   # 1) 직접
+        waypoints = _plan_leg(selected[idx], selected[idx + 1])    # 1) 직접
         route = "direct"
 
-        if waypoints is None and TRANSIT_VIA_HOME:
-            # 2) HOME 경유: start→HOME(retract), HOME→goal(re-approach)
+        if waypoints is None and VIA_ROLL_ENABLE:                  # 2) 광축 roll 중간자세 경유
+            waypoints = _via_variant(idx, "roll")
+            if waypoints is not None:
+                route = "via-roll"
+
+        if waypoints is None and VIA_TILT_ENABLE and wd_m is not None:  # 3) tilt 중간자세 경유 (escalation)
+            waypoints = _via_variant(idx, "tilt")
+            if waypoints is not None:
+                route = "via-tilt"
+
+        if waypoints is None and TRANSIT_VIA_HOME:                  # 4) HOME 경유 (최후 fallback)
             leg1 = _plan_leg(selected[idx], home_q)
             leg2 = _plan_leg(home_q, selected[idx + 1])
             if leg1 is not None and leg2 is not None:
@@ -780,12 +912,16 @@ def plan_reconfig_transits(
             transit_stats.append({
                 "idx": idx, "success": False, "time": dt,
             })
-            print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED ({dt:.2f}s)")
+            print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED [genuinely-unbridgeable] ({dt:.2f}s)")
 
     n_ok = sum(1 for s in transit_stats if s["success"])
-    n_via = sum(1 for s in transit_stats if s.get("route") == "via-home")
+    by_route = []
+    for nm in ("via-roll", "via-tilt", "via-home"):
+        c = sum(1 for s in transit_stats if s.get("route") == nm)
+        if c:
+            by_route.append(f"{c} {nm}")
     print(f"  Transit planning: {n_ok}/{len(reconfig_indices)} succeeded"
-          + (f" ({n_via} via HOME)" if n_via else ""))
+          + (f" ({', '.join(by_route)})" if by_route else ""))
 
     return transit_segments, transit_stats
 
@@ -1892,12 +2028,16 @@ def main():
     transit_segments = {}
     if len(reconfig_indices) > 0:
         print(f"\n[Phase 4] MotionPlanner transit for {len(reconfig_indices)} reconfig points...")
-        transit_segments, _ = plan_reconfig_transits(
-            selected, reconfig_indices, robot_cfg, world_config, label_idx=orig_idx,
+        transit_segments, transit_stats = plan_reconfig_transits(
+            selected, reconfig_indices, robot_cfg, world_config, label_idx=orig_idx, wd_m=wd_m,
         )
-        # 안전망: MotionPlanner가 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정
+        # 안전망: MotionPlanner가 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정.
+        # 단 via-roll/via-tilt 는 의도적으로 rolled 중간자세(wrist_3 가변)를 쓰므로 덮어쓰면
+        # 가교가 깨진다 → scan config 가 양 끝인 direct/via-home route 에만 적용.
+        _routes = {s["idx"]: s.get("route") for s in transit_stats if s.get("success")}
         for idx in transit_segments:
-            transit_segments[idx][:, -1] = wrist3_fixed
+            if _routes.get(idx) in ("direct", "via-home"):
+                transit_segments[idx][:, -1] = wrist3_fixed
 
     # Phase 5: Uniform resample + collision check
     print(f"\n[Phase 5] Interpolation + uniform resample (mode={RESAMPLE_MODE})...")
