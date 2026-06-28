@@ -233,9 +233,7 @@ class IKBackend:
             succ = result.success.cpu().numpy()[0]                   # (S,)
             sol = PT.normalize_joints(sol)
 
-            reps_list = PT.cluster_ik_solutions(
-                sol[None], succ[None], eps=PT.DBSCAN_EPS_RAD,
-            )
+            reps_list = PT.cluster_ik_solutions(sol[None], succ[None])
             reps = reps_list[0]
             if len(reps) == 0:
                 return np.empty((0, 6)), np.empty((0,), dtype=bool)

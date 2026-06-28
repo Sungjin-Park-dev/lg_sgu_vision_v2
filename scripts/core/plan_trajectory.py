@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-DBSCAN + DP + MotionPlanner 기반 최적 IK 궤적 생성 (cuRobo v0.8 API)
+IK + DP + MotionPlanner 기반 최적 IK 궤적 생성 (cuRobo v0.8 API)
 
 각 viewpoint에 대해 다수의 IK 해를 구하고, DP로 전역 최적 경로를 선택한 뒤,
 reconfig 지점은 MotionPlanner로 충돌회피 transit을 만들어 균일 spacing으로 resample한다.
 
 단계:
     Phase 1: Multi-seed IK         — viewpoint당 num_seeds개 IK 해
-    Phase 2: DBSCAN                — viewpoint당 대표 해 (medoid) 추출
+    Phase 2: 대표해                — viewpoint당 IK 분기를 near-dup 제거(분기 보존)
     Phase 3: DP                    — 최소 joint-space 비용 경로 선택
        ↓ wrist_3 잠금 (resample 균일성을 위해 metric에서 사실상 제외)
-    Phase 4: MotionPlanner transit — reconfig 지점 충돌회피 joint-to-joint planning
+    Phase 4: MotionPlanner transit — reconfig 가교: direct→via-roll→via-tilt→via-home
     Phase 5: Uniform resample      — cumulative EE arc-length(m) spacing + 충돌 검사
     Phase 6: Time planning         — EE 선속도/각속도/joint 속도 제한 기반 continuous scan
 
@@ -27,7 +27,6 @@ import h5py
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
-from sklearn.cluster import DBSCAN
 
 from curobo.types import Pose, JointState, GoalToolPose
 from curobo.scene import Scene, Cuboid, Mesh as CuRoboMesh
@@ -48,71 +47,35 @@ from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
 ROBOT_CONFIG = config.DEFAULT_ROBOT_CONFIG
 NUM_IK_SEEDS = 100
 IK_BATCH_SIZE = 4
-DBSCAN_EPS_RAD = 0.3
 RECONFIG_THRESHOLD_DEG = 29.0
 
-# (b) DP 후보 풍부화: DBSCAN medoid(클러스터당 1개)는 이웃과 연속인 해를 버릴 수 있다.
-# enrich=True면 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모두 후보로
-# 남겨 DP가 연속 분기를 직접 고르게 한다.
-ENRICH_DP_CANDIDATES = True
+# DP 후보: 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모든 분기를 후보로 남겨
+# DP가 이웃과 연속인 분기를 직접 고르게 한다(클러스터 medoid는 연속 해를 버릴 수 있어 미사용).
 DP_CANDIDATE_DEDUP_RAD = 0.08   # ~4.6°, 분기는 보존하며 거의 동일한 seed 만 제거
 
-# (a) 연속성 IK seeding: reconfig 양끝/empty viewpoint를 이웃의 선택 자세로 warm-start하여
-# IK 재시도 → random seed가 못 찾은 '이웃과 연속인' 분기를 찾거나 empty를 채운다.
-# curved_structure 실측상 효과 0(empty 0개 채움, reconfig 불변)이라 기본 OFF. 다른 물체에서
-# '연속 분기가 존재하는데 random seed가 놓친' 경우 도움될 수 있어 토글로 남겨둠.
-ENABLE_CONTINUITY_SEEDING = False
-
-# IK 해가 전혀 없는(empty) viewpoint를 carry-forward(이웃 자세 복제)로 메우지 않고 경로에서
-# 제거한다. 복제는 그 표면점을 실제로 검사하지 않는 '가짜 커버리지'이므로, 도달 가능한
-# viewpoint만 남겨 정직하게 검사한다.
-DROP_UNREACHABLE_VIEWPOINTS = True
-
-# DP는 충돌을 보지 않고 joint 비용만으로 대표 해를 고른다. 그런데 IK의 world(물체) 충돌은
-# soft cost(activation 10mm)라 물체를 살짝 파고드는 해도 success로 돌아온다 → 한 viewpoint에
-# 충돌/비충돌 분기가 섞여 있으면 DP가 더 싼 '충돌' 분기를 골라 최종 충돌검사에서 거부된다
-# (sample/74에서 발생). 그래서 DP 이전에, 최종검사와 '동일한' hard 충돌검사로 각 viewpoint의
-# 대표 해에서 충돌 자세를 제거한다. wrist_3 잠금 뒤에 검사해 실제 최종 자세와 일치시키고,
-# 충돌-free 해가 0개가 된 viewpoint는 empty와 똑같이 unreachable로 드롭한다.
-FILTER_COLLIDING_REPS = True
-
-# Reconfig transit(충돌회피 joint-to-joint) 계획 강건화 (#1)
+# Reconfig transit(충돌회피 joint-to-joint) 계획.
 # plan_cspace는 timeout이 없고 max_attempts 회 재시도 후 실패하는 단순 루프라(성공 시 즉시 break),
 # '실패 판정에 걸리는 시간'이 max_attempts에 거의 선형 비례한다(이 하드웨어에서 ~0.33s/attempt).
 # 성공은 attempt 0~1(~0.37s)에 끝나므로 max_attempts를 줄여도 성공은 거의 영향 없고 실패 대기만 짧아진다.
-# 15→8: 실패 대기 ~5s→~2.7s. 단 attempt 후반에야 풀리던 경계 transit 일부를 잃을 수 있음(→ 정직한 run-split).
 TRANSIT_MAX_ATTEMPTS = 8            # plan_cspace 재시도 횟수 (cuRobo 기본 5). 실패 대기시간 ∝ 이 값
 TRANSIT_ENABLE_GRAPH_ATTEMPT = 1    # 이 시도부터 PRM graph seeding 사용 (0=처음부터)
 
-# transit이 끝내 실패한 reconfig를 직선 보간으로 메우면 카메라/팔이 물체를 관통한다(#2).
+# transit이 끝내 실패한 reconfig를 직선 보간으로 메우면 카메라/팔이 물체를 관통한다.
 # 대신 아웃라이어 viewpoint를 최대 이 개수까지 건너뛰어(skip), 시작 자세와 다시
-# reconfig_threshold 안에서 만나는 viewpoint에 재연결한다. 그 안에 재연결이 안 되면
-# (클러스터 경계 등) 안전한 연속 경로가 없으므로 명확히 에러를 낸다.
+# reconfig_threshold 안에서 만나는 viewpoint에 재연결한다.
 TRANSIT_FAIL_SKIP_MAX = 5
 
-# 직접(start→goal) transit 이 실패하면 안전한 HOME(=config.ROBOT_START_STATE)을 경유하는
-# 2-leg(start→HOME, HOME→goal)로 재시도한다. 직접 큰 재구성(예: 정면→측면 78°)은 물체 옆 좁은
-# 공간을 카메라가 쓸며 지나가야 해 자주 실패하지만, 각 leg는 '표면→자유공간(retract)'과
-# '자유공간→표면(re-approach)' 문제라 훨씬 쉽고 빠르다(curved 47→48 실측: 직접 0/8 → via-home 8/8).
-# 직접이 성공하면 미사용(fallback). 비용은 retract+reapproach 이동(joint-timed)만 추가되며 reconfig
-# 는 궤적당 몇 개뿐이라, 못 가던 viewpoint(예: 측면 chunk)를 살리는 값으로 충분히 싸다.
-TRANSIT_VIA_HOME = True
-
-# via-roll: 직접/via-home 실패 시, 경계의 양 끝 scan 자세를 광축(camera 광축 ≈ wrist_3 축) 둘레로
+# via-roll: 직접 transit 실패 시, 경계의 양 끝 scan 자세를 광축(camera 광축 ≈ wrist_3 축) 둘레로
 # roll 한 '중간자세'를 경유해 direct 가교한다. wrist_3 lock 이 버린 redundant DOF(광축 roll =
 # 검사 무손실)를 경계 transit 에서만 복원하는 것 — scan config(selected[i]) 는 보존하므로 검사
-# 품질·스캔 일관성에 영향 없다(중간자세는 스캔되지 않음). 측정상 transit-fail 5/5 해소
-# (scratchpad/freedom_bridge_probe.py: curved 좋은배치 5개 실패 경계 전부 roll 단독 가교).
-# via-home detour 보다 우선(빠름), via-home 은 최후 fallback 으로 강등.
-VIA_ROLL_ENABLE = True
+# 품질·스캔 일관성에 영향 없다(중간자세는 스캔되지 않음). transit-fail 의 주 해결 레버.
 ROLL_VARIANT_DEG = (45, 90, 135, 180, 225, 270, 315)   # 광축 둘레 roll 변형 각도
 VIA_ROLL_IK_SEEDS = 40            # 변형 타깃당 IK seed 수 (collision-free 분기 확보)
 VIA_ROLL_MAX_REPS = 6             # endpoint 당 변형 후보 상한(가까운 가교쌍이 cap 안에 들도록)
 VIA_ROLL_PAIR_CAP = 20            # 경계당 (A',B') 후보쌍 MotionGen 시도 상한(가교쌍이 joint-far 일 수 있음)
 
 # via-tilt: roll 로도 못 푼 경계를 표면점 중심 orbit tilt(광축 ±φ)로 escalation. 중간자세는
-# 스캔되지 않으므로 시야 비스듬함은 무비용. roll 다음, via-home 앞. (wd_m 필요)
-VIA_TILT_ENABLE = True
+# 스캔되지 않으므로 시야 비스듬함은 무비용. (wd_m 필요)
 TILT_VARIANT_PHI = (15, 30)       # 광축 기울임 각도(도)
 TILT_VARIANT_AZ = (0, 90, 180, 270)
 
@@ -132,13 +95,11 @@ MIN_SEGMENT_DT_S = 0.05
 
 # reconfig transit(재배치)은 검사 스캔이 아니라 단순 repositioning이다. 스캔과 똑같이 EE
 # arc-length로 resample하고 EE 선속도(50mm/s)로 시간 매기면, base를 크게 돌릴 때 팔 끝이
-# 자유공간에 그리는 긴 호(수 m)를 기어가느라 사이클의 대부분을 먹는다(curved/100에서 139°
-# transit 1개가 5.25m 호 → 525 waypoint → 105s = 전체의 63%). 그래서 transit 구간은
+# 자유공간에 그리는 긴 호(수 m)를 기어가느라 사이클의 대부분을 먹는다. 그래서 transit 구간은
 # (1) joint-space L∞로 sparse하게 resample하고, (2) joint 속도 한계로만 시간을 매긴다
-# (EE 선속도/각속도/corner slowdown 무시). 139° transit이 ~8s로 줄어든다.
+# (EE 선속도/각속도/corner slowdown 무시).
 TRANSIT_RESAMPLE_SPACING_RAD = 0.05   # ~2.9°, transit resample 간격(가장 빨리 도는 joint 기준)
 
-CORNER_SLOWDOWN_ENABLED = True
 CORNER_ANGLE_THRESHOLD_DEG = 30.0
 CORNER_MAX_SLOWDOWN = 2.5
 
@@ -228,6 +189,7 @@ def _resolve_robot_config(robot_filename: str):
 
 
 def _collision_sphere_buffer_summary(robot_cfg) -> str | None:
+    """robot_cfg의 collision_sphere_buffer를 진단용 한 줄 문자열로 요약(없으면 None)."""
     buffer = robot_cfg["robot_cfg"]["kinematics"].get("collision_sphere_buffer", 0.0)
     if isinstance(buffer, dict):
         values = [float(v) for v in buffer.values()]
@@ -454,84 +416,19 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
     return all_solutions, all_success
 
 
-def solve_ik_seeded(robot_cfg, world_scene, positions_np, quats_np,
-                    target_idxs, anchors, num_seeds=NUM_IK_SEEDS):
-    """target viewpoint들을 이웃의 선택 자세(anchor)로 warm-start하여 IK 재시도(#a).
-
-    각 target은 batch item 으로, seed_config = anchor 를 num_seeds 개 복제해 강하게 편향.
-    random multi-seed가 못 찾은 '이웃과 연속인' 분기를 찾거나 empty viewpoint를 채운다.
-
-    Args:
-        target_idxs: list[int] — 재시도할 viewpoint 인덱스
-        anchors: (B, 6) — 각 target의 seed가 될 이웃 선택 자세
-
-    Returns:
-        sol: (B, num_seeds, 6) normalize된 IK 해
-        success: (B, num_seeds) bool
-    """
-    B = len(target_idxs)
-    cache = {
-        "obb": max(1, len(world_scene.cuboid)),
-        "mesh": max(1, len(world_scene.mesh)),
-    }
-    cfg = InverseKinematicsCfg.create(
-        robot=robot_cfg,
-        scene_model={},
-        self_collision_check=True,
-        num_seeds=num_seeds,
-        max_batch_size=B,
-        use_cuda_graph=False,
-        collision_cache=cache,
-    )
-    ik = InverseKinematics(cfg)
-    ik.update_world(world_scene)
-    tool = ik.tool_frames[0]
-
-    bp = torch.tensor(positions_np[target_idxs], device="cuda:0", dtype=torch.float32)
-    bq = torch.tensor(quats_np[target_idxs], device="cuda:0", dtype=torch.float32)
-    goal = Pose(position=bp, quaternion=bq)
-
-    seed = torch.tensor(np.asarray(anchors), device="cuda:0", dtype=torch.float32)
-    seed = seed.unsqueeze(1).repeat(1, num_seeds, 1)  # (B, num_seeds, 6)
-
-    result = ik.solve_pose(
-        GoalToolPose.from_poses({tool: goal}, num_goalset=1),
-        seed_config=seed,
-        return_seeds=num_seeds,
-    )
-
-    sol = result.js_solution.position.cpu().numpy()
-    if sol.shape[-1] != 6:
-        sol = sol[..., :6]
-    success = result.success.cpu().numpy()
-    return normalize_joints(sol), success
-
-
 # =========================================================================
-# Phase 2: DBSCAN clustering per viewpoint
+# Phase 2: per-viewpoint 대표해 (성공 IK 해를 greedy near-duplicate 제거)
 # =========================================================================
 
-def _greedy_dedup(sols, tol_rad):
-    """L∞ 기준 greedy near-duplicate 제거. tol 안에 들어오는 해는 하나만 남긴다.
+def cluster_ik_solutions(all_solutions, all_success):
+    """viewpoint당 대표 해 추출 — 성공 IK 해에서 near-duplicate만 greedy 제거(모든 분기 보존).
 
-    클러스터링과 달리 medoid 로 합치지 않아 서로 다른 분기(branch)와 분기 내 다수 해를
-    모두 보존한다 → DP 가 이웃과 연속인 해를 직접 고를 수 있다.
-    """
-    kept = []
-    for s in sols:
-        if all(np.max(np.abs(s - k)) > tol_rad for k in kept):
-            kept.append(s)
-    return np.array(kept)
-
-
-def cluster_ik_solutions(all_solutions, all_success, eps=0.3, min_samples=1):
-    """DBSCAN으로 viewpoint당 대표 해(medoid) 추출.
+    클러스터 medoid(클러스터당 1개)는 이웃과 연속인 분기를 버릴 수 있어, 대신 L∞ fine tolerance
+    (DP_CANDIDATE_DEDUP_RAD)로 거의 동일한 seed만 제거하고 분기를 모두 후보로 남겨 DP가 직접 고른다.
 
     Args:
         all_solutions: (N, S, 6)
         all_success: (N, S) bool
-        eps: DBSCAN eps (radians)
-        min_samples: DBSCAN min_samples
 
     Returns:
         representatives: List[np.ndarray] — 각 원소 shape (K_i, 6)
@@ -543,44 +440,21 @@ def cluster_ik_solutions(all_solutions, all_success, eps=0.3, min_samples=1):
 
     for i in range(N):
         successful = all_solutions[i][all_success[i]]
-
         if len(successful) == 0:
             representatives.append(np.empty((0, 6)))
             empty_count += 1
             continue
-
-        if len(successful) == 1:
-            representatives.append(successful.copy())
-            total_reps += 1
-            continue
-
-        if ENRICH_DP_CANDIDATES:
-            # (b) near-duplicate 만 제거하고 모든 분기를 후보로 유지
-            reps = _greedy_dedup(successful, DP_CANDIDATE_DEDUP_RAD)
-        else:
-            db = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean')
-            labels = db.fit_predict(successful)
-            medoids = []
-            for label in np.unique(labels):
-                if label == -1:
-                    # noise → 각각 singleton으로 취급
-                    for p in successful[labels == -1]:
-                        medoids.append(p)
-                else:
-                    members = successful[labels == label]
-                    mean = members.mean(axis=0)
-                    dists = np.linalg.norm(members - mean, axis=1)
-                    medoids.append(members[np.argmin(dists)])
-            reps = np.array(medoids)
-
-        representatives.append(reps)
-        total_reps += len(reps)
+        # greedy near-dup 제거: 이미 채택한 해와 L∞ > tol 인 해만 남긴다(분기 보존)
+        kept = []
+        for s in successful:
+            if all(np.max(np.abs(s - k)) > DP_CANDIDATE_DEDUP_RAD for k in kept):
+                kept.append(s)
+        representatives.append(np.array(kept))
+        total_reps += len(kept)
 
     avg_reps = total_reps / max(N - empty_count, 1)
-    mode_desc = (f"enrich dedup={DP_CANDIDATE_DEDUP_RAD:.2f} rad"
-                 if ENRICH_DP_CANDIDATES else f"DBSCAN medoid eps={eps:.2f} rad")
     print(f"  Phase 2 done: {N} viewpoints → avg {avg_reps:.1f} representatives/viewpoint "
-          f"({mode_desc}, {empty_count} empty)")
+          f"(dedup={DP_CANDIDATE_DEDUP_RAD:.2f} rad, {empty_count} empty)")
 
     return representatives
 
@@ -774,6 +648,7 @@ def plan_reconfig_transits(
     _vcache = {}                       # (sel_idx, mode) -> [collision-free config, ...]
 
     def _ensure_via():
+        """via-roll/tilt용 IK solver + endpoint FK pose를 최초 1회만 lazy 빌드(미사용 시 비용 0)."""
         if _via["ready"]:
             return
         ep_set = sorted(set([int(i) for i in reconfig_indices]
@@ -792,29 +667,25 @@ def plan_reconfig_transits(
         _via["ik"], _via["tool"] = ik, ik.tool_frames[0]
         _via["ready"] = True
 
-    def _roll_targets(R, p):
-        return [(R @ Rotation.from_euler("z", deg, degrees=True).as_matrix(), p.copy())
-                for deg in ROLL_VARIANT_DEG]
-
-    def _tilt_targets(R, p):
-        z = R[:, 2]
-        surf = p + z * wd_m                                    # 표면점(orbit 중심)
-        out = []
-        for phi in TILT_VARIANT_PHI:
-            for az in TILT_VARIANT_AZ:
-                u = R @ np.array([np.cos(np.deg2rad(az)), np.sin(np.deg2rad(az)), 0.0])
-                u = u / np.linalg.norm(u)
-                Rp = Rotation.from_rotvec(u * np.deg2rad(phi)).as_matrix() @ R
-                out.append((Rp, surf - Rp[:, 2] * wd_m))       # WD 유지하며 광축 ±φ
-        return out
-
     def _variant_configs(k, mode):
-        """sel index k 의 변형 IK 후보(collision-free, dedup). 캐시."""
+        """sel index k 의 변형(roll/tilt) IK 후보 — 광축 둘레 회전/기울임 타깃을 IK로 풀어
+        collision-free 분기를 캐시해 반환. roll=위치 불변(시야 무손실), tilt=표면점 orbit(시야 ±φ)."""
         if (k, mode) in _vcache:
             return _vcache[(k, mode)]
         _ensure_via()
         R, p = _via["pose_of"][k]
-        targets = _roll_targets(R, p) if mode == "roll" else _tilt_targets(R, p)
+        if mode == "roll":                                     # 광축(+z) 둘레 회전: 위치 불변
+            targets = [(R @ Rotation.from_euler("z", deg, degrees=True).as_matrix(), p.copy())
+                       for deg in ROLL_VARIANT_DEG]
+        else:                                                  # 표면점 중심 orbit tilt: WD 유지, 광축 ±φ
+            surf = p + R[:, 2] * wd_m
+            targets = []
+            for phi in TILT_VARIANT_PHI:
+                for az in TILT_VARIANT_AZ:
+                    u = R @ np.array([np.cos(np.deg2rad(az)), np.sin(np.deg2rad(az)), 0.0])
+                    u = u / np.linalg.norm(u)
+                    Rp = Rotation.from_rotvec(u * np.deg2rad(phi)).as_matrix() @ R
+                    targets.append((Rp, surf - Rp[:, 2] * wd_m))
         Rs = np.stack([t[0] for t in targets])
         ps = np.stack([t[1] for t in targets])
         bp = torch.tensor(ps, device="cuda:0", dtype=torch.float32)
@@ -875,17 +746,17 @@ def plan_reconfig_transits(
         waypoints = _plan_leg(selected[idx], selected[idx + 1])    # 1) 직접
         route = "direct"
 
-        if waypoints is None and VIA_ROLL_ENABLE:                  # 2) 광축 roll 중간자세 경유
+        if waypoints is None:                                      # 2) 광축 roll 중간자세 경유
             waypoints = _via_variant(idx, "roll")
             if waypoints is not None:
                 route = "via-roll"
 
-        if waypoints is None and VIA_TILT_ENABLE and wd_m is not None:  # 3) tilt 중간자세 경유 (escalation)
+        if waypoints is None and wd_m is not None:                 # 3) tilt 중간자세 경유 (escalation)
             waypoints = _via_variant(idx, "tilt")
             if waypoints is not None:
                 route = "via-tilt"
 
-        if waypoints is None and TRANSIT_VIA_HOME:                  # 4) HOME 경유 (최후 fallback)
+        if waypoints is None:                                      # 4) HOME 경유 (최후 fallback)
             leg1 = _plan_leg(selected[idx], home_q)
             leg2 = _plan_leg(home_q, selected[idx + 1])
             if leg1 is not None and leg2 is not None:
@@ -930,62 +801,34 @@ def plan_reconfig_transits(
 # Phase 5: Uniform resample + collision check
 # =========================================================================
 
-def _resample_uniform_ee(joints, robot_cfg, spacing_m):
-    """EE position arc-length 기준 uniform resample.
+def _resample_uniform(joints, spacing, robot_cfg=None):
+    """waypoint를 균일 간격으로 재분할 → 상수 dt 재생 시 속도가 일정해진다.
 
-    각 인접 waypoint 간 ||Δee_position|| ≈ spacing_m이 되도록 다시 분할한다.
-    상수 dt 재생 시 EE 선속도가 dt당 spacing_m/dt로 일정해진다.
+    robot_cfg 가 주어지면 EE position arc-length(m), 아니면 joint-space L∞(max-joint, rad)
+    기준으로 인접 출력 간 거리 ≈ spacing 이 되도록 분할한다. (scan은 EE, transit은 joint 기준)
     """
     if len(joints) < 2:
         return joints
-    ee_positions, _ = compute_fk(joints, robot_cfg)  # (M, 3)
-    diffs = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1)
+    if robot_cfg is not None:
+        ee_positions, _ = compute_fk(joints, robot_cfg)  # (M, 3)
+        diffs = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1)
+    else:
+        diffs = np.max(np.abs(np.diff(joints, axis=0)), axis=1)
     cum_len = np.concatenate([[0], np.cumsum(diffs)])
     total_len = cum_len[-1]
     if total_len < 1e-9:
         return joints
-    n_out = max(2, int(np.ceil(total_len / spacing_m)) + 1)
+    n_out = max(2, int(np.ceil(total_len / spacing)) + 1)
     uniform_s = np.linspace(0, total_len, n_out)
     out = np.zeros((n_out, joints.shape[1]), dtype=np.float64)
     for j in range(joints.shape[1]):
         out[:, j] = np.interp(uniform_s, cum_len, joints[:, j])
     return out
-
-
-def _resample_uniform_joint(joints, spacing_rad):
-    """Joint-space cumulative L∞ (max-joint) 기준 uniform resample.
-
-    각 인접 waypoint 간 max|Δq_j| ≈ spacing_rad이 되도록 다시 분할한다.
-    상수 dt 재생 시 가장 빨리 움직이는 joint의 각속도가 dt당 spacing_rad/dt로 일정해진다.
-    """
-    if len(joints) < 2:
-        return joints
-    diffs = np.max(np.abs(np.diff(joints, axis=0)), axis=1)
-    cum_len = np.concatenate([[0], np.cumsum(diffs)])
-    total_len = cum_len[-1]
-    if total_len < 1e-9:
-        return joints
-    n_out = max(2, int(np.ceil(total_len / spacing_rad)) + 1)
-    uniform_s = np.linspace(0, total_len, n_out)
-    out = np.zeros((n_out, joints.shape[1]), dtype=np.float64)
-    for j in range(joints.shape[1]):
-        out[:, j] = np.interp(uniform_s, cum_len, joints[:, j])
-    return out
-
-
-def _linear_interior(q0, q1, dense_step_rad):
-    """q0→q1 joint-space 직선 보간의 내부점(양 끝 제외). 없으면 None."""
-    dist = float(np.max(np.abs(q1 - q0)))
-    n_steps = max(1, int(np.ceil(dist / dense_step_rad)))
-    if n_steps <= 1:
-        return None
-    alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
-    return q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :]
 
 
 def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
                 scan_free=None):
-    """viewpoint 시퀀스를 '안전하게 연속인' run 들로 분할한다(#2).
+    """viewpoint 시퀀스를 '안전하게 연속인' run 들로 분할한다(호출부가 최장 run만 채택).
 
     run 내부 연결 규칙(두 viewpoint를 같은 run으로 이으려면 충돌-free 이동이 있어야 함):
         - 성공한 transit (consecutive, idx in transit_segments) → MotionGen 충돌-free → 유지
@@ -1112,9 +955,12 @@ def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad)
             # 다음 스캔 버퍼는 selected[nxt]에서 새로 시작
             scan_buf = [selected[nxt:nxt + 1]]
         else:
-            interior = _linear_interior(selected[cur], selected[nxt], dense_step_rad)
-            if interior is not None:
-                scan_buf.append(interior)
+            # selected[cur]→selected[nxt] 직선 보간의 내부점(양 끝 제외)을 dense하게 채운다
+            q0, q1 = selected[cur], selected[nxt]
+            n_steps = max(1, int(np.ceil(float(np.max(np.abs(q1 - q0))) / dense_step_rad)))
+            if n_steps > 1:
+                alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
+                scan_buf.append(q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :])
             scan_buf.append(selected[nxt:nxt + 1])
     buf = np.concatenate(scan_buf, axis=0)
     if len(buf) >= 1:
@@ -1148,7 +994,7 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
                              max_skip=TRANSIT_FAIL_SKIP_MAX, world_scene=None):
     """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
 
-    transit 실패 reconfig 은 직선 보간하면 물체를 관통하므로(#2) 사용하지 않는다. 대신
+    transit 실패 reconfig 은 직선 보간하면 물체를 관통하므로 사용하지 않는다. 대신
     경로를 '안전 연속 run'들로 분할(_build_runs)하고 **가장 긴 run** 을 채택한다. 즉
     아웃라이어 viewpoint 는 건너뛰고, 이을 수 없는 경계에서는 작은 쪽을 통째로 드롭한다.
 
@@ -1192,7 +1038,7 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     if len(kept) < 2:
         raise RuntimeError(
             "안전하게 연속인 구간이 viewpoint 2개 미만입니다 — 모든 인접 전이가 "
-            "이을 수 없는 reconfig. transit 성공(#1) 또는 reconfig 감소(#3)가 필요합니다."
+            "이을 수 없는 reconfig. 물체 배치/작업거리 조정으로 reconfig를 줄여야 합니다."
         )
 
     if mode not in ("ee", "joint"):
@@ -1205,7 +1051,7 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     pieces, masks = [], []
     for kind, dense in segments:
         if kind == "transit":
-            rs = _resample_uniform_joint(dense, transit_spacing_rad)
+            rs = _resample_uniform(dense, transit_spacing_rad)
             # sparse joint resample은 코너에서 직선을 그어 MotionGen이 충돌-free로 보장한
             # 곡선 경로를 잘라낼 수 있다(특히 물체로 재진입하는 via-home 재접근 leg). 그러면
             # 최종 densify 충돌검사에서 관통이 잡혀 저장이 거부된다. world_scene이 주어지면
@@ -1218,10 +1064,10 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
                     rs = dense
             mk = np.ones((len(rs),), dtype=bool)
         elif mode == "ee":
-            rs = _resample_uniform_ee(dense, robot_cfg, spacing)
+            rs = _resample_uniform(dense, spacing, robot_cfg)
             mk = np.zeros((len(rs),), dtype=bool)
         else:  # mode == "joint"
-            rs = _resample_uniform_joint(dense, spacing)
+            rs = _resample_uniform(dense, spacing)
             mk = np.zeros((len(rs),), dtype=bool)
         pieces.append(rs)
         masks.append(mk)
@@ -1370,7 +1216,6 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
                              ee_angular_speed_rad_s=np.deg2rad(30.0),
                              max_joint_vel_rad_s=0.5,
                              min_segment_dt=0.05,
-                             corner_slowdown_enabled=True,
                              corner_angle_threshold_rad=np.deg2rad(30.0),
                              corner_max_slowdown=2.5,
                              is_transit=None):
@@ -1393,19 +1238,11 @@ def compute_trajectory_times(joints, ee_positions, ee_quaternions,
             "transit_time": 0.0,
         }
 
-    if corner_slowdown_enabled:
-        slowdown_factors, corner_stats = _corner_slowdown_factors(
-            ee_positions, joints,
-            threshold_rad=corner_angle_threshold_rad,
-            max_slowdown=corner_max_slowdown,
-        )
-    else:
-        slowdown_factors = np.ones((n - 1,), dtype=np.float64)
-        corner_stats = {
-            "n_slow_segments": 0,
-            "max_corner_angle_deg": 0.0,
-            "max_slowdown": 1.0,
-        }
+    slowdown_factors, corner_stats = _corner_slowdown_factors(
+        ee_positions, joints,
+        threshold_rad=corner_angle_threshold_rad,
+        max_slowdown=corner_max_slowdown,
+    )
 
     # segment(i-1→i)는 양 끝 중 하나라도 transit이면 transit으로 본다(스캔↔transit 진입/이탈 포함).
     if is_transit is not None and len(is_transit) == n:
@@ -1525,272 +1362,12 @@ def save_trajectory_csv(solutions, ee_positions, ee_quaternions, output_path,
 
 
 # =========================================================================
-# Visualization
-# =========================================================================
-
-_JOINT_JUMP_THRESH_RAD = 0.5  # reconfig 판정 임계값
-
-def _load_object_mesh_traces(object_name):
-    """대상 메쉬를 world frame으로 변환하여 Plotly trace 반환."""
-    import trimesh
-    import plotly.graph_objects as go
-
-    mesh_path = config.get_mesh_path(object_name, mesh_type="source")
-    if not mesh_path.exists():
-        return []
-
-    loaded = trimesh.load(str(mesh_path))
-    if isinstance(loaded, trimesh.Scene):
-        mesh = trimesh.util.concatenate(list(loaded.geometry.values()))
-    else:
-        mesh = loaded
-
-    from common.math_utils import quaternion_to_rotation_matrix
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
-    T[:3, 3] = config.TARGET_OBJECT["position"]
-
-    verts = np.array(mesh.vertices)
-    verts_h = np.c_[verts, np.ones(len(verts))]
-    verts_w = (T @ verts_h.T).T[:, :3]
-    faces = mesh.faces
-
-    return [go.Mesh3d(
-        x=verts_w[:, 0], y=verts_w[:, 1], z=verts_w[:, 2],
-        i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-        color='lightgray', opacity=0.25,
-        name='Mesh', hoverinfo='skip',
-    )]
-
-
-def _detect_reconfigs(joints):
-    """연속 waypoint 간 max joint diff로 reconfig 판정. Returns (N-1,) bool."""
-    diffs = np.max(np.abs(np.diff(joints, axis=0)), axis=1)
-    return diffs > _JOINT_JUMP_THRESH_RAD
-
-
-def visualize_static_html(object_name, joints, ee_positions, output_path):
-    """Static trajectory: EE path + reconfig 강조 + 메쉬.
-
-    Args:
-        object_name: 대상 객체 이름
-        joints: (N, 6) joint angles
-        ee_positions: (N, 3) EE positions
-        output_path: 출력 HTML 경로
-    """
-    import plotly.graph_objects as go
-
-    N = len(ee_positions)
-    reconfigs = _detect_reconfigs(joints)
-    n_rc = int(reconfigs.sum())
-
-    traces = _load_object_mesh_traces(object_name)
-
-    # Normal / Reconfig 구간 분리
-    norm_x, norm_y, norm_z = [], [], []
-    rc_x, rc_y, rc_z = [], [], []
-
-    for i in range(N - 1):
-        seg_x = [ee_positions[i, 0], ee_positions[i + 1, 0], None]
-        seg_y = [ee_positions[i, 1], ee_positions[i + 1, 1], None]
-        seg_z = [ee_positions[i, 2], ee_positions[i + 1, 2], None]
-        if reconfigs[i]:
-            rc_x.extend(seg_x); rc_y.extend(seg_y); rc_z.extend(seg_z)
-        else:
-            norm_x.extend(seg_x); norm_y.extend(seg_y); norm_z.extend(seg_z)
-
-    traces.append(go.Scatter3d(
-        x=norm_x, y=norm_y, z=norm_z, mode='lines',
-        line=dict(color='green', width=3),
-        name=f'Normal ({N - 1 - n_rc} segments)',
-    ))
-    if n_rc > 0:
-        traces.append(go.Scatter3d(
-            x=rc_x, y=rc_y, z=rc_z, mode='lines',
-            line=dict(color='red', width=4),
-            name=f'Reconfig ({n_rc} segments)',
-        ))
-
-    # Step markers (색상 그라디언트)
-    traces.append(go.Scatter3d(
-        x=ee_positions[:, 0], y=ee_positions[:, 1], z=ee_positions[:, 2],
-        mode='markers',
-        marker=dict(size=3, color=np.arange(N), colorscale='Viridis',
-                    colorbar=dict(title='Step', x=1.05), opacity=0.8),
-        text=[f'Step {i}' for i in range(N)],
-        hoverinfo='text',
-        name='Poses',
-    ))
-
-    # Start / End
-    traces.append(go.Scatter3d(
-        x=[ee_positions[0, 0]], y=[ee_positions[0, 1]], z=[ee_positions[0, 2]],
-        mode='markers', marker=dict(size=8, color='lime', symbol='diamond'),
-        name='Start',
-    ))
-    traces.append(go.Scatter3d(
-        x=[ee_positions[-1, 0]], y=[ee_positions[-1, 1]], z=[ee_positions[-1, 2]],
-        mode='markers', marker=dict(size=8, color='orange', symbol='square'),
-        name='End',
-    ))
-
-    fig = go.Figure(data=traces)
-    fig.update_layout(
-        title=f'Trajectory — {object_name} | {N} poses, {n_rc} reconfigs '
-              f'({100 * n_rc / max(N - 1, 1):.1f}%)',
-        scene=dict(xaxis_title='X (m)', yaxis_title='Y (m)', zaxis_title='Z (m)',
-                   aspectmode='data'),
-        legend=dict(x=0.01, y=0.99),
-        margin=dict(l=0, r=0, t=80, b=0),
-        width=1200, height=800,
-    )
-    fig.write_html(output_path)
-    print(f"  Static HTML saved to {output_path}")
-
-
-def visualize_animated_html(object_name, joints, ee_positions, output_path):
-    """Animated trajectory: 슬라이더로 step별 경로 성장 애니메이션.
-
-    Args:
-        object_name: 대상 객체 이름
-        joints: (N, 6) joint angles
-        ee_positions: (N, 3) EE positions
-        output_path: 출력 HTML 경로
-    """
-    import plotly.graph_objects as go
-
-    N = len(ee_positions)
-    reconfigs = _detect_reconfigs(joints)
-    n_rc = int(reconfigs.sum())
-
-    fig = go.Figure()
-
-    # Trace 0: Mesh
-    mesh_traces = _load_object_mesh_traces(object_name)
-    for t in mesh_traces:
-        fig.add_trace(t)
-    n_fixed = len(mesh_traces)
-
-    # Trace n_fixed+0: Full path (dim)
-    fig.add_trace(go.Scatter3d(
-        x=ee_positions[:, 0], y=ee_positions[:, 1], z=ee_positions[:, 2],
-        mode='lines+markers',
-        line=dict(color='lightgray', width=2),
-        marker=dict(size=2, color='lightgray'),
-        name='Full path',
-    ))
-
-    # Trace n_fixed+1: Current EE marker
-    fig.add_trace(go.Scatter3d(
-        x=[ee_positions[0, 0]], y=[ee_positions[0, 1]], z=[ee_positions[0, 2]],
-        mode='markers', marker=dict(size=6, color='red'),
-        name='Current pose',
-    ))
-
-    # Trace n_fixed+2: Normal path so far (green)
-    fig.add_trace(go.Scatter3d(
-        x=[], y=[], z=[], mode='lines', line=dict(color='green', width=4),
-        name='Normal',
-    ))
-
-    # Trace n_fixed+3: Reconfig path so far (red)
-    fig.add_trace(go.Scatter3d(
-        x=[], y=[], z=[], mode='lines', line=dict(color='red', width=4),
-        name='Reconfig',
-    ))
-
-    idx_marker = n_fixed + 1
-    idx_norm = n_fixed + 2
-    idx_rc = n_fixed + 3
-
-    # Frames
-    print(f"  Building {N} animation frames...")
-    frames = []
-    for step in range(N):
-        rc_so_far = int(reconfigs[:max(step, 1)].sum()) if step > 0 else 0
-
-        norm_x, norm_y, norm_z = [], [], []
-        rc_x, rc_y, rc_z = [], [], []
-        for i in range(step):
-            seg = ([ee_positions[i, 0], ee_positions[i + 1, 0], None],
-                   [ee_positions[i, 1], ee_positions[i + 1, 1], None],
-                   [ee_positions[i, 2], ee_positions[i + 1, 2], None])
-            if reconfigs[i]:
-                rc_x.extend(seg[0]); rc_y.extend(seg[1]); rc_z.extend(seg[2])
-            else:
-                norm_x.extend(seg[0]); norm_y.extend(seg[1]); norm_z.extend(seg[2])
-
-        frames.append(go.Frame(
-            data=[
-                go.Scatter3d(
-                    x=[ee_positions[step, 0]], y=[ee_positions[step, 1]],
-                    z=[ee_positions[step, 2]],
-                    mode='markers', marker=dict(size=6, color='red'),
-                ),
-                go.Scatter3d(
-                    x=norm_x, y=norm_y, z=norm_z,
-                    mode='lines', line=dict(color='green', width=4),
-                ),
-                go.Scatter3d(
-                    x=rc_x, y=rc_y, z=rc_z,
-                    mode='lines', line=dict(color='red', width=4),
-                ),
-            ],
-            traces=[idx_marker, idx_norm, idx_rc],
-            name=str(step),
-            layout=go.Layout(
-                title_text=f'Step {step}/{N-1} | Reconfigs: {rc_so_far}',
-            ),
-        ))
-
-    fig.frames = frames
-
-    # Slider
-    sliders = [dict(
-        active=0,
-        currentvalue=dict(prefix='Step: '),
-        pad=dict(t=50),
-        steps=[
-            dict(args=[[str(s)], dict(frame=dict(duration=0, redraw=True),
-                                       mode='immediate')],
-                 label=str(s), method='animate')
-            for s in range(N)
-        ],
-    )]
-
-    # Play/Pause
-    updatemenus = [dict(
-        type='buttons', showactive=False,
-        x=0.1, y=0, xanchor='right', yanchor='top',
-        pad=dict(t=87, r=10),
-        buttons=[
-            dict(label='Play', method='animate',
-                 args=[None, dict(frame=dict(duration=200, redraw=True),
-                                  fromcurrent=True, transition=dict(duration=0))]),
-            dict(label='Pause', method='animate',
-                 args=[[None], dict(frame=dict(duration=0, redraw=True),
-                                    mode='immediate', transition=dict(duration=0))]),
-        ],
-    )]
-
-    fig.update_layout(
-        title=f'Animation — {object_name} | {N} poses, {n_rc} reconfigs',
-        scene=dict(xaxis_title='X (m)', yaxis_title='Y (m)', zaxis_title='Z (m)',
-                   aspectmode='data'),
-        sliders=sliders,
-        updatemenus=updatemenus,
-        width=1200, height=800,
-    )
-    fig.write_html(output_path)
-    print(f"  Animated HTML saved to {output_path}")
-
-
-# =========================================================================
 # Main
 # =========================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="DBSCAN + DP 기반 최적 IK 해 선택")
+    """CLI 진입점: 6단계 파이프라인(IK→대표해→DP→transit→resample/충돌→시간)을 실행해 궤적 CSV 저장."""
+    parser = argparse.ArgumentParser(description="IK + DP + via-roll transit 기반 최적 궤적 생성")
     parser.add_argument("--object", type=str, required=True, help="Object name")
     parser.add_argument("--num-viewpoints", type=int, required=True, help="Number of viewpoints")
     parser.add_argument("--viewpoints", type=str, default=None,
@@ -1867,11 +1444,9 @@ def main():
         num_seeds=NUM_IK_SEEDS, batch_size=IK_BATCH_SIZE,
     )
 
-    # [4] Phase 2 + 3: DBSCAN → DP
-    print("[4/6] Phase 2 — DBSCAN clustering...")
-    representatives = cluster_ik_solutions(
-        all_solutions, all_success, eps=DBSCAN_EPS_RAD,
-    )
+    # [4] Phase 2 + 3: 대표해 추출 → DP
+    print("[4/6] Phase 2 — per-viewpoint 대표해 (greedy dedup)...")
+    representatives = cluster_ik_solutions(all_solutions, all_success)
 
     # wrist_3 고정을 DP '이전'에 적용 — wrist_3는 어차피 0으로 잠그며(검사 시 광축 roll
     # 무관), IK는 free wrist_3로 풀려 후보마다 wrist_3가 제각각이다. DP의 reconfig 비용은
@@ -1886,98 +1461,56 @@ def main():
 
     reconfig_rad = np.deg2rad(RECONFIG_THRESHOLD_DEG)
 
-    # (a) 연속성 IK seeding: 초기 DP로 reconfig/empty 지점을 찾아 이웃 자세로 IK 재시도.
-    if ENABLE_CONTINUITY_SEEDING:
-        empty_idxs = [i for i, r in enumerate(representatives) if len(r) == 0]
-        reps_dp0 = [r.copy() for r in representatives]      # dp는 carry-forward로 입력을 변형
-        selected0, _, _ = dp_optimal_path(reps_dp0, reconfig_rad)
-        jumps0 = np.max(np.abs(np.diff(selected0, axis=0)), axis=1)
-        recfg0 = np.where(jumps0 > reconfig_rad)[0]
-
-        targets: dict[int, np.ndarray] = {}
-        for idx in recfg0:                                  # reconfig 양끝을 서로의 자세로 seed
-            targets[idx + 1] = selected0[idx]
-            targets[idx] = selected0[idx + 1]
-        for i in empty_idxs:                                # empty는 가까운 이웃 자세로 seed
-            nb = i - 1 if i > 0 else min(i + 1, len(selected0) - 1)
-            targets.setdefault(i, selected0[nb])
-
-        if targets:
-            tlist = sorted(targets)
-            anchors = np.array([targets[i] for i in tlist])
-            print(f"[5a/6] Continuity IK seeding — {len(tlist)} targets "
-                  f"({len(recfg0)} reconfig, {len(empty_idxs)} empty)...")
-            sol2, succ2 = solve_ik_seeded(
-                robot_cfg, world_config, positions_np, quats_np, tlist, anchors,
-            )
-            sol2[..., -1] = wrist3_fixed
-            added, filled = 0, 0
-            for k, vp in enumerate(tlist):
-                good = sol2[k][succ2[k]]
-                if len(good) == 0:
-                    continue
-                if len(representatives[vp]) == 0:
-                    filled += 1
-                merged = (np.vstack([representatives[vp], good])
-                          if len(representatives[vp]) > 0 else good)
-                representatives[vp] = _greedy_dedup(merged, DP_CANDIDATE_DEDUP_RAD)
-                added += len(good)
-            print(f"  Continuity seeding: +{added} solutions, "
-                  f"{filled}/{len(empty_idxs)} empty viewpoints filled")
-
     # 충돌하는 대표 해 제거 (DP는 충돌을 안 보므로). 최종검사와 동일한 batch_collision_check로
     # wrist_3 잠금 후 자세를 검사 → 충돌 자세를 후보에서 빼 DP가 충돌-free만 고르게 한다.
     # 충돌-free가 0개가 된 viewpoint는 아래 empty-drop이 unreachable로 처리한다.
-    if FILTER_COLLIDING_REPS:
-        spans = []   # (vp, flat_start, count)
-        flat = []
-        for i, r in enumerate(representatives):
-            if len(r) > 0:
-                spans.append((i, sum(len(f) for f in flat), len(r)))
-                flat.append(r)
-        if flat:
-            isc_flat, _ = batch_collision_check(
-                np.concatenate(flat, axis=0), robot_cfg, world_config,
-            )
-            n_removed, n_emptied = 0, 0
-            for vp, start, cnt in spans:
-                free_mask = ~isc_flat[start:start + cnt]
-                removed = cnt - int(free_mask.sum())
-                if removed > 0:
-                    n_removed += removed
-                    representatives[vp] = representatives[vp][free_mask]
-                    if len(representatives[vp]) == 0:
-                        n_emptied += 1
-            if n_removed > 0:
-                print(f"  Collision-filtered reps: removed {n_removed} colliding solutions "
-                      f"(margin={config.COLLISION_MARGIN*1000:.0f}mm), "
-                      f"{n_emptied} viewpoints emptied → unreachable")
-            else:
-                print(f"  Collision-filtered reps: 0 colliding (all candidates collision-free)")
+    spans = []   # (vp, flat_start, count)
+    flat = []
+    for i, r in enumerate(representatives):
+        if len(r) > 0:
+            spans.append((i, sum(len(f) for f in flat), len(r)))
+            flat.append(r)
+    if flat:
+        isc_flat, _ = batch_collision_check(
+            np.concatenate(flat, axis=0), robot_cfg, world_config,
+        )
+        n_removed, n_emptied = 0, 0
+        for vp, start, cnt in spans:
+            free_mask = ~isc_flat[start:start + cnt]
+            removed = cnt - int(free_mask.sum())
+            if removed > 0:
+                n_removed += removed
+                representatives[vp] = representatives[vp][free_mask]
+                if len(representatives[vp]) == 0:
+                    n_emptied += 1
+        if n_removed > 0:
+            print(f"  Collision-filtered reps: removed {n_removed} colliding solutions "
+                  f"(margin={config.COLLISION_MARGIN*1000:.0f}mm), "
+                  f"{n_emptied} viewpoints emptied → unreachable")
+        else:
+            print(f"  Collision-filtered reps: 0 colliding (all candidates collision-free)")
 
     # 못 가는(empty) viewpoint 제거 — IK 해가 없거나 충돌 필터로 비워진 viewpoint는
     # carry-forward로 메우지 않고 경로에서 뺀다.
     # orig_idx: 남은 viewpoint의 '원본' 인덱스(드롭 후에도 로그를 원래 번호로 표기하기 위함).
     orig_idx = np.arange(len(representatives))
-    n_dropped_empty = 0
-    if DROP_UNREACHABLE_VIEWPOINTS:
-        keep = np.array([len(r) > 0 for r in representatives], dtype=bool)
-        n_dropped_empty = int((~keep).sum())
-        if n_dropped_empty > 0:
-            dropped_list = orig_idx[~keep].tolist()
-            print(f"  Dropping {n_dropped_empty} unreachable (empty) viewpoints "
-                  f"(no IK solution): {dropped_list}")
-            representatives = [r for r, k in zip(representatives, keep) if k]
-            all_solutions = all_solutions[keep]
-            all_success = all_success[keep]
-            if cluster_id is not None:
-                cluster_id = cluster_id[keep]
-            orig_idx = orig_idx[keep]
-            if len(representatives) < 2:
-                raise RuntimeError(
-                    f"도달 가능한 viewpoint가 {len(representatives)}개뿐입니다 — "
-                    "물체 배치/작업거리(WD)를 조정해 reachability를 높여야 합니다."
-                )
+    keep = np.array([len(r) > 0 for r in representatives], dtype=bool)
+    n_dropped_empty = int((~keep).sum())
+    if n_dropped_empty > 0:
+        dropped_list = orig_idx[~keep].tolist()
+        print(f"  Dropping {n_dropped_empty} unreachable (empty) viewpoints "
+              f"(no IK solution): {dropped_list}")
+        representatives = [r for r, k in zip(representatives, keep) if k]
+        all_solutions = all_solutions[keep]
+        all_success = all_success[keep]
+        if cluster_id is not None:
+            cluster_id = cluster_id[keep]
+        orig_idx = orig_idx[keep]
+        if len(representatives) < 2:
+            raise RuntimeError(
+                f"도달 가능한 viewpoint가 {len(representatives)}개뿐입니다 — "
+                "물체 배치/작업거리(WD)를 조정해 reachability를 높여야 합니다."
+            )
 
     print("[5/6] Phase 3 — DP optimal path...")
     selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
@@ -2108,7 +1641,6 @@ def main():
         ee_angular_speed_rad_s=np.deg2rad(EE_ANGULAR_SPEED_DEG_S),
         max_joint_vel_rad_s=MAX_JOINT_VEL_RAD_S,
         min_segment_dt=MIN_SEGMENT_DT_S,
-        corner_slowdown_enabled=CORNER_SLOWDOWN_ENABLED,
         corner_angle_threshold_rad=np.deg2rad(CORNER_ANGLE_THRESHOLD_DEG),
         corner_max_slowdown=CORNER_MAX_SLOWDOWN,
         is_transit=final_is_transit,
@@ -2133,22 +1665,15 @@ def main():
     ang_speed_str = f"{EE_ANGULAR_SPEED_DEG_S:.0f}"
     joint_vel_str = f"{MAX_JOINT_VEL_RAD_S:.2f}".replace(".", "p")
     tag = f"{suffix}_{RESAMPLE_MODE}_s{spacing_str}_eev{ee_speed_str}mms_av{ang_speed_str}dps_jv{joint_vel_str}"
-    if CORNER_SLOWDOWN_ENABLED:
-        corner_thresh_str = f"{CORNER_ANGLE_THRESHOLD_DEG:.0f}"
-        corner_slow_str = f"{CORNER_MAX_SLOWDOWN:.1f}".replace(".", "p")
-        tag = f"{tag}_corner{corner_thresh_str}d_x{corner_slow_str}"
+    corner_thresh_str = f"{CORNER_ANGLE_THRESHOLD_DEG:.0f}"
+    corner_slow_str = f"{CORNER_MAX_SLOWDOWN:.1f}".replace(".", "p")
+    tag = f"{tag}_corner{corner_thresh_str}d_x{corner_slow_str}"
 
     csv_path = str(traj_dir / f"trajectory_{tag}.csv")
     save_trajectory_csv(
         final_traj, ee_positions, ee_quaternions, csv_path,
         times=traj_times,
     )
-
-    # static_path = str(traj_dir / f"trajectory_{tag}.html")
-    # visualize_static_html(args.object, final_traj, ee_positions, static_path)
-
-    # anim_path = str(traj_dir / f"trajectory_{tag}_anim.html")
-    # visualize_animated_html(args.object, final_traj, ee_positions, anim_path)
 
     n_transit_ok = len(transit_segments)
     covered = runs_info["kept"][2]
