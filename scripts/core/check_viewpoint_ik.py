@@ -66,6 +66,9 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
+    if config.apply_object_placement(args.object):
+        print(f"  Per-object placement '{args.object}': pos={config.TARGET_OBJECT['position']}, "
+              f"quat={config.TARGET_OBJECT['rotation']}")
     if args.object_position is not None:
         config.TARGET_OBJECT["position"] = np.array(args.object_position, dtype=np.float64)
         print(f"  Object position override (robot frame): {args.object_position}")

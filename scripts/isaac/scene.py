@@ -186,6 +186,9 @@ def load_target_object(object_name: str | None) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
     import config as _config
 
+    # 물체별 배치를 config 에 반영 → 아래 transform(rotation + world position)이 per-object 가 된다.
+    _config.apply_object_placement(object_name)
+
     usd_path = _config.get_mesh_path(object_name, filename="source.usd")
     if not usd_path.exists():
         carb.log_warn(
@@ -212,10 +215,11 @@ def load_target_object(object_name: str | None) -> None:
     from pxr import Gf, UsdGeom
 
     q = _config.TARGET_OBJECT["rotation"]  # (w, x, y, z)
+    wp = _config.target_object_world_position()  # robot frame → world (z += MOUNT_HEIGHT)
     M = Gf.Matrix4d()
     M.SetTransform(
         Gf.Rotation(Gf.Quatd(float(q[0]), float(q[1]), float(q[2]), float(q[3]))),
-        Gf.Vec3d(-0.1, 1.1, 0.795),
+        Gf.Vec3d(float(wp[0]), float(wp[1]), float(wp[2])),
     )
     stage = omni.usd.get_context().get_stage()
     xf = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))

@@ -561,6 +561,11 @@ def main():
     if args.object and args.object not in objects:
         print(f"  '{args.object}' 없음 → '{initial}' 사용. 가능: {objects}")
 
+    # 물체별 배치를 config 에 반영(Inspector 가 init 시 config.TARGET_OBJECT pose 를 캡처하므로 그 전에).
+    if config.apply_object_placement(initial):
+        print(f"  Per-object placement '{initial}': pos={config.TARGET_OBJECT['position']}, "
+              f"quat={config.TARGET_OBJECT['rotation']}")
+
     server = viser.ViserServer(host=args.host, port=args.port)
     server.gui.configure_theme(control_layout="collapsible", dark_mode=True)
     server.scene.set_up_direction("+z")

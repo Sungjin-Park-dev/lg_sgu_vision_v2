@@ -1812,6 +1812,11 @@ def main():
     if args.spacing <= 0.0:
         parser.error("--spacing must be > 0")
 
+    # 물체별 기본 배치(config.OBJECT_PLACEMENTS)를 먼저 반영. CLI override 가 그 뒤라 우선한다.
+    if config.apply_object_placement(args.object):
+        print(f"  Per-object placement '{args.object}': pos={config.TARGET_OBJECT['position']}, "
+              f"quat={config.TARGET_OBJECT['rotation']}")
+
     # Object pose override (e.g. moved via the Isaac Sim viewport gizmo). Mutating
     # config.TARGET_OBJECT in place propagates to build_camera_poses (local→world EE
     # pose transform) and build_collision_world (mesh placement), which read it at

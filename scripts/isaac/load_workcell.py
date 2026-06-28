@@ -18,6 +18,9 @@ from isaacsim import SimulationApp
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 UR20_DIR = PROJECT_ROOT / "ur20_description"
 
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+from common import config  # noqa: E402
+
 ENV_USD    = UR20_DIR / "environment.usd"
 ROBOT_USD  = UR20_DIR / "ur20/ur20.usd"
 MOUNT_USD  = UR20_DIR / "ur10_mount.usd"
@@ -78,12 +81,11 @@ TABLE_TARGET_Y = 1.1
 # Mount XY 두께 배율 (Z는 height/intrinsic 비율 유지)
 MOUNT_XY_SCALE = 2.0
 
-# Target object (참고용 상수 — 실제 USD 로드는 추후 추가)
-# 기존 config.TARGET_OBJECT.position = (-0.1, 1.1, 0.095) [old robot-base frame]
-# old table top z = -0.07 → object center가 table top + 0.165m
-# 새 table top = 0.630 → 새 object z = 0.630 + 0.165 = 0.795
-TARGET_OBJECT_POSITION = np.array([-0.1, 1.1, 0.795])
-TARGET_OBJECT_ROTATION = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z identity (방향은 메시에 베이크)
+# Target object — OBJECT_USD = sample 이므로 config.OBJECT_PLACEMENTS["sample"] 와 동기화
+# (단일 소스). robot frame position → world(z += MOUNT_HEIGHT). rotation 은 config 그대로.
+config.apply_object_placement("sample")
+TARGET_OBJECT_POSITION = config.target_object_world_position()
+TARGET_OBJECT_ROTATION = np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64)  # w,x,y,z
 
 # Environment USD 위치 — robot이 환경 내 어디에 서 있을지를 결정
 ENV_OFFSET = np.array([2.0, 0.0, 0.0])

@@ -78,6 +78,49 @@ TARGET_OBJECT = {
     "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),  # 쿼터니언: w, x, y, z (identity)
 }
 
+# robot base_link 가 world z=MOUNT_HEIGHT 에 있다 → robot frame z = world z - MOUNT_HEIGHT.
+MOUNT_HEIGHT = 0.805
+
+# 물체별 배치 (robot base_link frame). 도달성/스캔성을 최대화하는 위치·방향으로 측정 결정.
+# 표에 없는 물체는 TARGET_OBJECT 기본값을 그대로 쓴다. position 은 robot frame [x,y,z](m),
+# rotation 은 쿼터니언 [w,x,y,z]. rotation 생략 시 identity. apply_object_placement() 로 반영.
+# 주의: rotation 을 여기서 주면 mesh-bake 와 달리 viewer 마다 적용이 필요 — viewpoint_studio /
+# Isaac scene 은 config rotation 을 반영하도록 맞춰져 있다(둘 다 동일 외형). z-yaw 는 bottom-filter
+# 가 불변이라 기존 viewpoint h5 재생성 불필요(비-z 회전은 재생성 필요).
+OBJECT_PLACEMENTS = {
+    # curved: dy-0.30 dz+0.20 → reachable 99/100, via-roll 로 visited 99/99
+    "curved_structure": {
+        "position": np.array([-0.1, 0.8, 0.19], dtype=np.float64),
+        "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+    },
+    # sample: dy-0.30 + z-yaw90 → reachable 69/74, visited 69/69 (yaw 가 scan-collision 회피)
+    "sample": {
+        "position": np.array([-0.1, 0.8, -0.010], dtype=np.float64),
+        "rotation": np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float64),  # z-yaw 90°
+    },
+}
+
+
+def apply_object_placement(object_name):
+    """object_name 의 배치(OBJECT_PLACEMENTS)를 TARGET_OBJECT 에 in-place 반영(robot frame).
+
+    각 진입점에서 CLI override 전에 호출 → 다운스트림(build_camera_poses / build_collision_world /
+    isaac scene)이 read 시점에 per-object 배치를 본다. 표에 없으면 기본값 유지하고 False 반환.
+    """
+    p = OBJECT_PLACEMENTS.get(object_name)
+    if p is None:
+        return False
+    if "position" in p:
+        TARGET_OBJECT["position"] = np.asarray(p["position"], dtype=np.float64).copy()
+    TARGET_OBJECT["rotation"] = np.asarray(
+        p.get("rotation", [1.0, 0.0, 0.0, 0.0]), dtype=np.float64).copy()
+    return True
+
+
+def target_object_world_position():
+    """TARGET_OBJECT position(robot frame) → Isaac world frame(z += MOUNT_HEIGHT)."""
+    return np.asarray(TARGET_OBJECT["position"], dtype=np.float64) + np.array([0.0, 0.0, MOUNT_HEIGHT])
+
 # 테이블 직육면체 설정 — thor_table.usd 측정값 매칭
 # visual: world center (-0.2, 1.1, 0.315), size 0.910×0.768×0.630
 # robot frame z = 0.315 - 0.805 = -0.490

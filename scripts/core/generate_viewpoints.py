@@ -1933,6 +1933,10 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
 def main():
     args = parse_arguments()
 
+    # 물체별 배치를 반영(rotation 은 bottom-filter 판정에 사용 — line ~1776).
+    if config.apply_object_placement(args.object):
+        print(f"  Per-object placement '{args.object}': quat={config.TARGET_OBJECT['rotation']}")
+
     input_path = str(config.get_mesh_path(args.object, mesh_type="source"))
 
     print("=" * 60)

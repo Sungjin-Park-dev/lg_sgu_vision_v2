@@ -594,6 +594,12 @@ class Studio:
     def _build_scene(self, full_mesh, data: dict, coacd_parts) -> None:
         self._clear_layers()
         srv = self.server
+        # 물체별 config rotation 을 부모 frame(/scene, /play)에 적용 → 물체+viewpoint 가 Isaac 과
+        # 동일한 외형으로 회전한다(자식 노드는 object-local 좌표 그대로, frame 이 회전을 입힌다).
+        config.apply_object_placement(self.object_dd.value)
+        obj_wxyz = np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64)
+        srv.scene.add_frame("/scene", show_axes=False, wxyz=obj_wxyz, position=(0.0, 0.0, 0.0))
+        srv.scene.add_frame("/play", show_axes=False, wxyz=obj_wxyz, position=(0.0, 0.0, 0.0))
         surf = data["positions"]
         cam = data["camera_positions"]
         cid = data["cluster_id"]
