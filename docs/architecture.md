@@ -11,6 +11,7 @@
 | 1. 뷰포인트 생성 | `apps/viewpoint_studio.py` (viser) | `core/generate_viewpoints.py` |
 | 2. 포즈 조절 + 궤적 생성/preview | `apps/isaac_pipeline.py` (Isaac Sim) | `core/plan_trajectory.py`, `isaac/scene.py` |
 | 3. 실제 로봇 전송 | `apps/isaac_pipeline.py`의 Publish 패널, `robot/move_to_start.py` | `core/publish_trajectory.py` |
+| 실험. Delaunay+GLNS | `apps/glns_inspector.py` (viser) | `core/solve_glns_path.py`, Julia GLNS |
 
 ```
 scripts/
@@ -53,6 +54,10 @@ Stage 3: 로봇 실행 (ROS2)
   Output: FollowJointTrajectory action → ur_robot_driver
 ```
 
+별도 실험 경로인 `solve_glns_path.py`는 Delaunay 연결 성분별로 viewpoint와 IK 해를
+GLNS로 함께 선택해 `data/{object}/ik/{N}/glns_result_*.h5`를 생성한다. 이 결과는
+`glns_inspector.py`에서 재생하며 Stage 2 motion planning에는 자동 연결하지 않는다.
+
 ## 데이터 형식
 
 ### viewpoints.h5
@@ -65,6 +70,9 @@ viewpoints/
   row_index      (N,)    int32    grid 행 인덱스 (zigzag 계산용)
   cluster_id     (N,)    int32    각 뷰포인트의 클러스터 할당
   cluster_order  (K,)    int32    클러스터 방문 순서 (GTSP 결과)
+  adjacency/
+    edges         (E, 2)  int32    로컬 표면 Delaunay 무방향 edge (작은 index 먼저)
+    component_id  (N,)    int32    Delaunay 연결 성분 ID (향후 bridge 생성용)
   pca_center/axis1/axis2
 
 metadata/

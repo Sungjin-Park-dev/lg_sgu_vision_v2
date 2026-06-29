@@ -740,12 +740,18 @@ class PipelineWindow:
 
     def _build_panel_generate(self):
         ui = self._ui
-        with ui.CollapsableFrame("B. Generate Trajectory (plan_trajectory.py)", height=0):
+        with ui.CollapsableFrame("B. Generate Trajectory (DP | GLNS)", height=0):
             with ui.VStack(spacing=4):
                 # ui.Label("Pick the object's viewpoints .h5 and Generate. Object name + viewpoint "
                 #          "count are read from the h5 path; the object's live pose comes from the "
                 #          "scene — load & place it in panel A first.",
                 #          height=40, word_wrap=True)
+                with ui.HStack(height=26, spacing=8):
+                    ui.Label("Planner backend", width=110)
+                    # 0=DP (plan_trajectory), 1=GLNS (solve_glns_path → verify --join).
+                    # Both emit the same trajectory CSV → preview/publish unchanged.
+                    self._backend_combo = ui.ComboBox(
+                        0, "DP (plan_trajectory)", "GLNS (solve + verify --join)")
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
                     ui.StringField(model=self._h5_path_model)
@@ -763,6 +769,7 @@ class PipelineWindow:
                     with ui.VStack(spacing=4):
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
                         self._fields["output_suffix"] = self._row("--output-suffix", "dp")
+                        self._fields["glns_hops"]     = self._row("--delaunay-expand-hops (GLNS)", 2)
                 with ui.HStack(height=28, spacing=6):
                     self._btn_generate = ui.Button("Generate Trajectory", clicked_fn=self._on_generate)
                     self._btn_cancel_gen = ui.Button("Cancel", clicked_fn=self._on_cancel_generate)
@@ -1514,16 +1521,41 @@ class PipelineWindow:
             return
         pos_robot, quat_wxyz = pose
 
-        cmd = [
-            self._uv, "run", "scripts/core/plan_trajectory.py",
-            "--object", obj,
-            "--num-viewpoints", str(n_vp),
-            "--viewpoints", h5,
-            "--spacing", str(spacing),
-            "--output-suffix", suffix,
-        ]
-        cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
-        cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
+        backend_idx = 0
+        combo = getattr(self, "_backend_combo", None)
+        if combo is not None:
+            backend_idx = combo.model.get_item_value_model().get_value_as_int()
+
+        if backend_idx == 1:
+            # GLNS backend: solve_glns_path → verify_glns_trajectory --join, chained in
+            # one shell (publish-style bash -c). Both stages stream stdout; verify prints
+            # the joined "CSV saved to ..." LAST, so CSV_PATH_RE captures the joined
+            # trajectory (same 14-col schema as DP → preview/publish need no change).
+            hops = max(1, int(self._get_field("glns_hops", int)))
+            det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
+            pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
+            quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
+            shell = (
+                f"{self._uv} run scripts/core/solve_glns_path.py "
+                f"--object {obj!r} --viewpoints {h5!r} "
+                f"--object-position {pos_s} --object-quat {quat_s} "
+                f"--delaunay-expand-hops {hops} --output {det_h5!r} "
+                f"&& {self._uv} run scripts/core/verify_glns_trajectory.py "
+                f"--result {det_h5!r} --join --spacing {spacing}"
+            )
+            cmd = ["bash", "-c", shell]
+        else:
+            # DP backend (default): plan_trajectory.py end-to-end.
+            cmd = [
+                self._uv, "run", "scripts/core/plan_trajectory.py",
+                "--object", obj,
+                "--num-viewpoints", str(n_vp),
+                "--viewpoints", h5,
+                "--spacing", str(spacing),
+                "--output-suffix", suffix,
+                "--object-position", *(f"{v:.6f}" for v in pos_robot),
+                "--object-quat", *(f"{v:.6f}" for v in quat_wxyz),
+            ]
 
         self._btn_generate.enabled = False
         self._append_log("[generate] $ " + " ".join(cmd))

@@ -9,6 +9,7 @@
 OBJ 로드 → (material RGB 필터)
   → [배치] grid: PCA 그리드 → 표면 스냅  |  surface: 표면 직접 균일 샘플링(FPS)
   → 법선/카메라 위치 → bottom-facing 필터 → 클러스터링
+  → 로컬 탄젠트 Delaunay 인접 그래프 (ordering과 독립)
   → [순서] zigzag: 전역 PCA 행 정렬  |  graph: NN+2opt  |  lawnmower: 탄젠트 row sweep
   → GTSP 클러스터 순서 → HDF5 + 인터랙티브 HTML 저장
 ```
@@ -51,6 +52,19 @@ OBJ 로드 → (material RGB 필터)
 | `--ordering-mode` | `zigzag` | `zigzag` \| `graph` \| `lawnmower` (위 "순서 모드") |
 | `--no-filter-bottom` | off | 바닥향 뷰포인트 필터 비활성화 |
 | `--bottom-angle` | 80.0 | 바닥향 필터 각도 (deg) |
+
+### Delaunay 인접 그래프
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--no-delaunay` | off | 로컬 표면 Delaunay 생성·저장 비활성화 |
+| `--delaunay-neighbors` | 12 | viewpoint별 로컬 kNN 크기 |
+| `--delaunay-distance-factor` | 2.5 | edge 최대 길이 / 로컬 spacing 비율 |
+| `--delaunay-max-normal-angle` | 75° | edge 양 끝 법선의 최대 각도 차이 |
+
+전역 3D Delaunay 대신 각 카메라 위치의 이웃을 해당 법선의 탄젠트 평면에 투영해
+2D Delaunay를 계산한다. 중심점에 닿은 edge만 합치고 거리·법선 필터를 적용해 물체 내부를
+가로지르는 chord를 억제한다. 이 그래프는 현재 `path_order`를 바꾸지 않으며, 향후 GLNS의
+허용 전이와 표면 성분 간 명시적 bridge를 정의하기 위한 입력이다.
 
 ### 클러스터링
 | 옵션 | 기본값 | 설명 |
@@ -119,6 +133,7 @@ OBJ 로드 → (material RGB 필터)
 - `data/{object}/viewpoint/{num}/viewpoints_{method}.h5` — 뷰포인트 + 클러스터 데이터
   (`{method}` = 클러스터 방법). h5 `metadata`에 `sampling_mode`/`ordering_mode` 기록,
   `method` 속성 = `"{sampling_mode}+{ordering_mode}"`.
+  `viewpoints/adjacency/{edges,component_id}`에는 무방향 Delaunay edge와 연결 성분을 저장한다.
 - `data/{object}/viewpoint/{num}/viewpoints_{method}.html` — 인터랙티브 3D 시각화
 
 HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
@@ -132,6 +147,7 @@ HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
 - **클러스터별 뷰포인트**: 고유 색상 마커 + 클러스터 내 경로 라인
 - **클러스터 간 이동**: 회색 점선
 - **CoACD 파트 메시**: 반투명 색상 오버레이 (coacd / coacd+dbscan 모드)
+- **Delaunay adjacency**: 옅은 청록색 로컬 표면 인접 edge
 
 **`--compare` 모드**: 여러 파라미터 조합을 드롭다운으로 전환. 버튼 라벨에 경로 길이, 클러스터 수, 최적 대비 차이(%) 표시.
 

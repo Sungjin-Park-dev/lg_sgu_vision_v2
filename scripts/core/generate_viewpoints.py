@@ -49,11 +49,19 @@ from dataclasses import dataclass
 import trimesh
 import h5py
 from sklearn.cluster import DBSCAN
+from scipy.spatial import Delaunay, QhullError, cKDTree
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common import config
 from common.math_utils import quaternion_to_rotation_matrix
 from common.viewpoint_viz import visualize_clusters_html
+
+
+DEFAULT_DELAUNAY_NEIGHBORS = 12
+DEFAULT_DELAUNAY_DISTANCE_FACTOR = 2.5
+DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG = 75.0
 
 
 # ============================================================================
@@ -1062,6 +1070,193 @@ def _tangent_basis(mean_normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return u, v
 
 
+def build_local_delaunay_adjacency(
+    camera_positions: np.ndarray,
+    normals: np.ndarray,
+    k_neighbors: int = DEFAULT_DELAUNAY_NEIGHBORS,
+    distance_factor: float = DEFAULT_DELAUNAY_DISTANCE_FACTOR,
+    max_normal_angle_deg: float = DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
+) -> dict:
+    """곡면 viewpoint를 위한 로컬 탄젠트 Delaunay 인접 그래프를 만든다.
+
+    전역 3D Delaunay는 물체 내부를 가로지르는 tetrahedron edge를 만들 수 있다. 대신 각
+    viewpoint의 k-nearest neighborhood를 그 점의 tangent plane에 투영하고, 로컬 2D
+    Delaunay에서 중심점에 incident한 edge만 합친다. 거리와 법선 각도 필터가 반대편 표면 및
+    장거리 chord를 제거한다.
+
+    반환 edge는 ``(min_index, max_index)`` 형태의 정렬된 무방향 edge이며 중복이 없다.
+    ``component_id``는 향후 서로 다른 표면 성분을 잇는 명시적 bridge 후보 생성에 사용한다.
+    """
+    points = np.asarray(camera_positions, dtype=np.float64)
+    nrms = np.asarray(normals, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"camera_positions must have shape (N, 3), got {points.shape}")
+    if nrms.shape != points.shape:
+        raise ValueError(f"normals must have shape {points.shape}, got {nrms.shape}")
+    if not np.all(np.isfinite(points)) or not np.all(np.isfinite(nrms)):
+        raise ValueError("camera_positions and normals must contain only finite values")
+    if k_neighbors < 3:
+        raise ValueError("k_neighbors must be >= 3")
+    if distance_factor <= 0.0:
+        raise ValueError("distance_factor must be > 0")
+    if not 0.0 < max_normal_angle_deg <= 180.0:
+        raise ValueError("max_normal_angle_deg must be in (0, 180]")
+
+    n_points = len(points)
+    if n_points == 0:
+        return {
+            "edges": np.empty((0, 2), dtype=np.int32),
+            "component_id": np.empty((0,), dtype=np.int32),
+            "method": "local_tangent_delaunay",
+            "k_neighbors": int(k_neighbors),
+            "distance_factor": float(distance_factor),
+            "max_normal_angle_deg": float(max_normal_angle_deg),
+            "stats": {
+                "num_edges": 0, "num_components": 0, "num_isolated": 0,
+                "min_degree": 0, "median_degree": 0.0, "max_degree": 0,
+                "median_edge_length_mm": 0.0, "max_edge_length_mm": 0.0,
+            },
+        }
+
+    norm_len = np.linalg.norm(nrms, axis=1)
+    if np.any(norm_len < 1e-9):
+        bad = np.where(norm_len < 1e-9)[0].tolist()
+        raise ValueError(f"zero-length normals at viewpoint indices: {bad[:10]}")
+    unit_normals = nrms / norm_len[:, None]
+
+    if n_points == 1:
+        return {
+            "edges": np.empty((0, 2), dtype=np.int32),
+            "component_id": np.zeros((1,), dtype=np.int32),
+            "method": "local_tangent_delaunay",
+            "k_neighbors": int(k_neighbors),
+            "distance_factor": float(distance_factor),
+            "max_normal_angle_deg": float(max_normal_angle_deg),
+            "stats": {
+                "num_edges": 0, "num_components": 1, "num_isolated": 1,
+                "min_degree": 0, "median_degree": 0.0, "max_degree": 0,
+                "median_edge_length_mm": 0.0, "max_edge_length_mm": 0.0,
+            },
+        }
+
+    query_k = min(int(k_neighbors), n_points - 1)
+    tree = cKDTree(points)
+    knn_dist, knn_idx = tree.query(points, k=query_k + 1)
+    if knn_dist.ndim == 1:
+        knn_dist = knn_dist[:, None]
+        knn_idx = knn_idx[:, None]
+
+    # 각 점의 local spacing: 가까운 최대 3개 이웃 거리의 median. 중복점 때문에 0만
+    # 남는 경우에는 전체 데이터의 양의 최근접 거리로 폴백한다.
+    positive_nn = knn_dist[:, 1:][knn_dist[:, 1:] > 1e-12]
+    global_spacing = float(np.median(positive_nn)) if positive_nn.size else 1e-9
+    local_spacing = np.empty(n_points, dtype=np.float64)
+    for i in range(n_points):
+        ds = knn_dist[i, 1:min(4, query_k + 1)]
+        ds = ds[ds > 1e-12]
+        local_spacing[i] = float(np.median(ds)) if ds.size else global_spacing
+
+    cos_limit = float(np.cos(np.deg2rad(max_normal_angle_deg)))
+    edges: set[tuple[int, int]] = set()
+
+    def _passes_filters(i: int, j: int) -> bool:
+        if i == j:
+            return False
+        distance = float(np.linalg.norm(points[i] - points[j]))
+        max_distance = distance_factor * max(local_spacing[i], local_spacing[j])
+        if distance > max_distance + 1e-12:
+            return False
+        return float(np.dot(unit_normals[i], unit_normals[j])) >= cos_limit - 1e-12
+
+    for i in range(n_points):
+        # cKDTree 결과에서 self 위치를 가정하지 않고, 중심점을 항상 local index 0으로 둔다.
+        local_indices = [i]
+        local_indices.extend(
+            int(j) for j in knn_idx[i]
+            if int(j) != i and int(j) not in local_indices
+        )
+        if len(local_indices) < 2:
+            continue
+
+        local_indices_arr = np.asarray(local_indices, dtype=np.int32)
+        u, v = _tangent_basis(unit_normals[i])
+        centered = points[local_indices_arr] - points[i]
+        projected = np.column_stack([centered @ u, centered @ v])
+
+        centered_2d = projected - projected.mean(axis=0)
+        singular = np.linalg.svd(centered_2d, compute_uv=False)
+        rank_2d = int(np.sum(singular > max(singular[0] if singular.size else 0.0, 1.0) * 1e-10))
+
+        candidate_local: set[int] = set()
+        if rank_2d >= 2 and len(local_indices) >= 3:
+            try:
+                options = "QJ" if len(local_indices) >= 4 else None
+                triangulation = Delaunay(projected, qhull_options=options)
+                for simplex in triangulation.simplices:
+                    if 0 in simplex:
+                        candidate_local.update(int(j) for j in simplex if int(j) != 0)
+            except QhullError:
+                # 수치적으로 퇴화한 neighborhood는 아래 1D 인접 규칙으로 처리한다.
+                rank_2d = 1
+
+        if rank_2d < 2:
+            # 공선점의 1D Delaunay analogue: 주축 정렬에서 중심점의 직전·직후만 연결.
+            if singular.size and singular[0] > 1e-12:
+                _, _, vh = np.linalg.svd(centered_2d, full_matrices=False)
+                coord = centered_2d @ vh[0]
+            else:
+                coord = np.linalg.norm(centered, axis=1)
+            order = np.argsort(coord, kind="stable")
+            center_rank = int(np.where(order == 0)[0][0])
+            if center_rank > 0:
+                candidate_local.add(int(order[center_rank - 1]))
+            if center_rank + 1 < len(order):
+                candidate_local.add(int(order[center_rank + 1]))
+
+        for local_j in candidate_local:
+            j = int(local_indices_arr[local_j])
+            if _passes_filters(i, j):
+                edges.add((min(i, j), max(i, j)))
+
+    edge_array = (np.asarray(sorted(edges), dtype=np.int32).reshape(-1, 2)
+                  if edges else np.empty((0, 2), dtype=np.int32))
+    degree = np.zeros(n_points, dtype=np.int32)
+    if len(edge_array):
+        np.add.at(degree, edge_array[:, 0], 1)
+        np.add.at(degree, edge_array[:, 1], 1)
+        rows = np.concatenate([edge_array[:, 0], edge_array[:, 1]])
+        cols = np.concatenate([edge_array[:, 1], edge_array[:, 0]])
+        graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n_points, n_points))
+        num_components, component_id = connected_components(graph, directed=False)
+        edge_lengths = np.linalg.norm(
+            points[edge_array[:, 0]] - points[edge_array[:, 1]], axis=1,
+        )
+    else:
+        num_components = n_points
+        component_id = np.arange(n_points, dtype=np.int32)
+        edge_lengths = np.empty((0,), dtype=np.float64)
+
+    stats = {
+        "num_edges": int(len(edge_array)),
+        "num_components": int(num_components),
+        "num_isolated": int(np.sum(degree == 0)),
+        "min_degree": int(degree.min()),
+        "median_degree": float(np.median(degree)),
+        "max_degree": int(degree.max()),
+        "median_edge_length_mm": float(np.median(edge_lengths) * 1000.0) if len(edge_lengths) else 0.0,
+        "max_edge_length_mm": float(edge_lengths.max() * 1000.0) if len(edge_lengths) else 0.0,
+    }
+    return {
+        "edges": edge_array,
+        "component_id": np.asarray(component_id, dtype=np.int32),
+        "method": "local_tangent_delaunay",
+        "k_neighbors": int(k_neighbors),
+        "distance_factor": float(distance_factor),
+        "max_normal_angle_deg": float(max_normal_angle_deg),
+        "stats": stats,
+    }
+
+
 def _two_opt_open(order: list, points: np.ndarray, max_passes: int) -> list:
     """Open-path 2-opt 개선(full). 양 끝점(order[0], order[-1])은 고정 → 열린 경로 유지.
 
@@ -1366,6 +1561,7 @@ def save_viewpoints_hdf5(
     cluster_order: Optional[np.ndarray] = None,
     cluster_direction: Optional[np.ndarray] = None,
     cluster_metadata: Optional[dict] = None,
+    adjacency: Optional[dict] = None,
 ) -> Path:
     """Save viewpoints to HDF5 file
 
@@ -1376,6 +1572,8 @@ def save_viewpoints_hdf5(
         cluster_order: (K,) int32 array — cluster visit order
         cluster_direction: (K,) int32 array — 0=Forward, 1=Reverse per cluster
         cluster_metadata: dict with clustering parameters
+        adjacency: build_local_delaunay_adjacency() 결과. 기존 reader와 호환되는
+            viewpoints/adjacency 하위 그룹으로 저장한다.
     """
     if positions.shape != normals.shape:
         raise ValueError(
@@ -1412,6 +1610,35 @@ def save_viewpoints_hdf5(
             viewpoints_grp.create_dataset('cluster_order', data=cluster_order.astype(np.int32))
         if cluster_direction is not None:
             viewpoints_grp.create_dataset('cluster_direction', data=cluster_direction.astype(np.int32))
+
+        if adjacency is not None:
+            edges = np.asarray(adjacency['edges'], dtype=np.int32)
+            component_id = np.asarray(adjacency['component_id'], dtype=np.int32)
+            if edges.ndim != 2 or edges.shape[1] != 2:
+                raise ValueError(f"adjacency edges must have shape (E, 2), got {edges.shape}")
+            if component_id.shape != (len(positions),):
+                raise ValueError(
+                    f"adjacency component_id must have shape ({len(positions)},), "
+                    f"got {component_id.shape}"
+                )
+            if len(edges):
+                if np.any(edges < 0) or np.any(edges >= len(positions)):
+                    raise ValueError("adjacency edges contain out-of-range viewpoint indices")
+                if np.any(edges[:, 0] >= edges[:, 1]):
+                    raise ValueError("adjacency edges must be canonical undirected pairs (a < b)")
+                if len(np.unique(edges, axis=0)) != len(edges):
+                    raise ValueError("adjacency edges contain duplicates")
+            adjacency_grp = viewpoints_grp.create_group('adjacency')
+            adjacency_grp.create_dataset('edges', data=edges)
+            adjacency_grp.create_dataset('component_id', data=component_id)
+            adjacency_grp.attrs['method'] = adjacency.get('method', 'local_tangent_delaunay')
+            adjacency_grp.attrs['k_neighbors'] = int(adjacency['k_neighbors'])
+            adjacency_grp.attrs['distance_factor'] = float(adjacency['distance_factor'])
+            adjacency_grp.attrs['max_normal_angle_deg'] = float(adjacency['max_normal_angle_deg'])
+            adjacency_grp.attrs['coordinate_space'] = 'camera_positions_object_local'
+            adjacency_grp.attrs['edge_semantics'] = 'undirected_canonical'
+            for key, value in adjacency.get('stats', {}).items():
+                adjacency_grp.attrs[key] = value
 
         metadata_grp = f.create_group('metadata')
         metadata_grp.attrs['num_viewpoints'] = len(positions)
@@ -1505,6 +1732,20 @@ Examples:
                         help='클러스터 내부 순서: zigzag(전역 PCA) | graph(NN+2opt) | '
                              'lawnmower(탄젠트 row sweep). 기본: zigzag')
 
+    # --- Viewpoint adjacency (future GLNS constraint graph) ---
+    parser.add_argument('--no-delaunay', action='store_true',
+                        help='로컬 표면 Delaunay 인접 그래프 생성/저장을 비활성화')
+    parser.add_argument('--delaunay-neighbors', type=int, default=DEFAULT_DELAUNAY_NEIGHBORS,
+                        help=f'로컬 Delaunay kNN 크기 (기본: {DEFAULT_DELAUNAY_NEIGHBORS})')
+    parser.add_argument('--delaunay-distance-factor', type=float,
+                        default=DEFAULT_DELAUNAY_DISTANCE_FACTOR,
+                        help='edge 최대 길이 / 로컬 spacing 비율 '
+                             f'(기본: {DEFAULT_DELAUNAY_DISTANCE_FACTOR})')
+    parser.add_argument('--delaunay-max-normal-angle', type=float,
+                        default=DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
+                        help='인접 edge의 최대 법선 차이 deg '
+                             f'(기본: {DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG:.0f})')
+
     # --- Comparison ---
     parser.add_argument('--compare', action='store_true',
                         help='선택된 방법의 파라미터 변형 비교 HTML 생성')
@@ -1526,6 +1767,13 @@ Examples:
                 raise ValueError("RGB values must be in range [0, 255]")
         except ValueError as e:
             parser.error(f"Invalid RGB format: {e}")
+
+    if args.delaunay_neighbors < 3:
+        parser.error("--delaunay-neighbors must be >= 3")
+    if args.delaunay_distance_factor <= 0.0:
+        parser.error("--delaunay-distance-factor must be > 0")
+    if not 0.0 < args.delaunay_max_normal_angle <= 180.0:
+        parser.error("--delaunay-max-normal-angle must be in (0, 180]")
 
     return args
 
@@ -1553,6 +1801,10 @@ class ViewpointGenParams:
     sampling_mode: str = 'grid'               # 'grid'(PCA 그리드 투영) | 'surface'(FPS)
     surface_spacing_mm: Optional[float] = None  # surface 모드 FPS 목표 간격 (None이면 FOV 작은 축)
     ordering_mode: str = 'zigzag'             # 'zigzag' | 'graph' | 'lawnmower'
+    build_delaunay: bool = True
+    delaunay_neighbors: int = DEFAULT_DELAUNAY_NEIGHBORS
+    delaunay_distance_factor: float = DEFAULT_DELAUNAY_DISTANCE_FACTOR
+    delaunay_max_normal_angle_deg: float = DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG
 
 
 @dataclass
@@ -1575,6 +1827,7 @@ class ViewpointResult:
     clustered_path_length_mm: float
     num_clusters: int
     cluster_meta: dict
+    adjacency: Optional[dict]
     method: str
     label: str
 
@@ -1816,6 +2069,27 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
     Phase B(viser 실시간 재생성)가 호출할 import 시임.
     """
     grid = prepare_grid(target_mesh, params)
+    adjacency = None
+    if params.build_delaunay:
+        print("Building local tangent Delaunay adjacency...")
+        adjacency = build_local_delaunay_adjacency(
+            grid['camera_positions'], grid['normals'],
+            k_neighbors=params.delaunay_neighbors,
+            distance_factor=params.delaunay_distance_factor,
+            max_normal_angle_deg=params.delaunay_max_normal_angle_deg,
+        )
+        ds = adjacency['stats']
+        print(
+            f"  Delaunay: {ds['num_edges']} edges, {ds['num_components']} components, "
+            f"{ds['num_isolated']} isolated, degree={ds['min_degree']}-"
+            f"{ds['max_degree']} (median {ds['median_degree']:.1f}), "
+            f"edge median/max={ds['median_edge_length_mm']:.1f}/"
+            f"{ds['max_edge_length_mm']:.1f} mm"
+        )
+        if ds['num_isolated'] > 0:
+            print("  WARNING: Delaunay graph has isolated viewpoints; future hard-constrained "
+                  "routing will require parameter adjustment or explicit bridge edges.")
+
     common = dict(
         positions=grid['positions'], normals=grid['normals'],
         camera_positions=grid['camera_positions'], target_mesh=target_mesh,
@@ -1921,7 +2195,7 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
         original_path_length_mm=grid['original_path_length_mm'],
         clustered_path_length_mm=result['path_length_mm'],
         num_clusters=result['num_clusters'],
-        cluster_meta=cluster_meta, method=method, label=label,
+        cluster_meta=cluster_meta, adjacency=adjacency, method=method, label=label,
     )
 
 
@@ -1977,6 +2251,10 @@ def main():
         sampling_mode=args.sampling_mode,
         surface_spacing_mm=args.surface_spacing,
         ordering_mode=args.ordering_mode,
+        build_delaunay=not args.no_delaunay,
+        delaunay_neighbors=args.delaunay_neighbors,
+        delaunay_distance_factor=args.delaunay_distance_factor,
+        delaunay_max_normal_angle_deg=args.delaunay_max_normal_angle,
     )
 
     method = args.cluster_method
@@ -1987,6 +2265,14 @@ def main():
     # ------------------------------------------------------------------
     if args.compare:
         grid = prepare_grid(target_mesh, params)
+        adjacency = None
+        if params.build_delaunay:
+            adjacency = build_local_delaunay_adjacency(
+                grid['camera_positions'], grid['normals'],
+                k_neighbors=params.delaunay_neighbors,
+                distance_factor=params.delaunay_distance_factor,
+                max_normal_angle_deg=params.delaunay_max_normal_angle_deg,
+            )
         common = dict(
             positions=grid['positions'], normals=grid['normals'],
             camera_positions=grid['camera_positions'], target_mesh=target_mesh,
@@ -2087,6 +2373,7 @@ def main():
                 mesh, grid['positions'], grid['camera_positions'],
                 compare_results, grid['original_path_length_mm'],
                 html_path,
+                adjacency_edges=adjacency['edges'] if adjacency is not None else None,
             )
 
         print("Compare complete!")
@@ -2136,6 +2423,7 @@ def main():
             cluster_order=res.cluster_order,
             cluster_direction=res.cluster_direction,
             cluster_metadata=res.cluster_meta,
+            adjacency=res.adjacency,
         )
         print()
 
@@ -2160,6 +2448,7 @@ def main():
             mesh, res.positions, res.camera_positions,
             cluster_result, res.original_path_length_mm,
             html_path,
+            adjacency_edges=res.adjacency['edges'] if res.adjacency is not None else None,
         )
 
     return 0

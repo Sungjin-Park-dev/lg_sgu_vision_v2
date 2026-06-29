@@ -50,12 +50,13 @@ from common import config
 from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
 from core.generate_viewpoints import (
     load_meshes, prepare_grid as prepare_viewpoints, cluster_coacd, cluster_and_order,
-    save_viewpoints_hdf5, ViewpointGenParams,
+    save_viewpoints_hdf5, build_local_delaunay_adjacency, ViewpointGenParams,
 )
 
 HIGHLIGHT_RGB = (255, 235, 59)   # moving playback marker
 TRAIL_RGB = (255, 205, 0)        # visited path so far
 TRANSITION_RGB = (150, 150, 150)  # inter-cluster lines
+DELAUNAY_RGB = (0, 180, 220)
 MESH_RGB = (180, 180, 180)
 SURFACE_RGB = (255, 255, 255)
 
@@ -177,6 +178,20 @@ def load_viewpoint_h5(path: Path) -> dict:
                       if "path_order" in g else np.arange(n, dtype=np.int32))
         cluster_order = (np.asarray(g["cluster_order"], dtype=np.int32)
                          if "cluster_order" in g else np.unique(cluster_id))
+        adjacency = None
+        if "adjacency" in g:
+            ag = g["adjacency"]
+            if "edges" in ag and "component_id" in ag:
+                adjacency = {
+                    "edges": np.asarray(ag["edges"], dtype=np.int32),
+                    "component_id": np.asarray(ag["component_id"], dtype=np.int32),
+                    "method": _attr_str(ag.attrs.get("method", "local_tangent_delaunay")),
+                    "stats": {
+                        key: ag.attrs[key]
+                        for key in ("num_edges", "num_components", "num_isolated")
+                        if key in ag.attrs
+                    },
+                }
 
         wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
         input_mesh = None
@@ -189,11 +204,11 @@ def load_viewpoint_h5(path: Path) -> dict:
 
     camera_positions = positions + normals * wd_m
     return _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
-                       path_order, input_mesh, wd_m)
+                       path_order, input_mesh, wd_m, adjacency=adjacency)
 
 
 def _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
-                path_order, input_mesh, wd_m) -> dict:
+                path_order, input_mesh, wd_m, adjacency=None) -> dict:
     return {
         "positions": positions,
         "normals": normals,
@@ -205,6 +220,7 @@ def _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
         "n": len(positions),
         "input_mesh": input_mesh,
         "wd_m": wd_m,
+        "adjacency": adjacency,
     }
 
 
@@ -253,7 +269,8 @@ class Studio:
         self.data_root = data_root
 
         self.layers: dict[str, list] = {
-            "mesh": [], "surface": [], "markers": [], "paths": [], "transitions": [], "coacd": [],
+            "mesh": [], "surface": [], "markers": [], "paths": [], "transitions": [],
+            "delaunay": [], "coacd": [],
         }
         self.play: dict[str, object] = {"highlight": None, "visited": None}
         self.data: dict | None = None
@@ -283,6 +300,7 @@ class Studio:
             self.cb_markers = g.add_checkbox("Markers", initial_value=True)
             self.cb_paths = g.add_checkbox("Cluster paths", initial_value=True)
             self.cb_transitions = g.add_checkbox("Transitions", initial_value=True)
+            self.cb_delaunay = g.add_checkbox("Delaunay adjacency", initial_value=False)
             self.cb_coacd = g.add_checkbox("CoACD parts", initial_value=False)
 
         with g.add_folder("Generate (surface + coacd + sub-cluster)"):
@@ -318,7 +336,7 @@ class Studio:
         self.object_dd.on_update(lambda _: self._on_object_change())
         self.existing_dd.on_update(lambda _: self._on_existing_change())
         for cb in (self.cb_mesh, self.cb_surface, self.cb_markers,
-                   self.cb_paths, self.cb_transitions, self.cb_coacd):
+                   self.cb_paths, self.cb_transitions, self.cb_delaunay, self.cb_coacd):
             cb.on_update(lambda _: self._apply_visibility())
         self.btn_generate.on_click(lambda _: self._on_generate())
         self.btn_save.on_click(lambda _: self._on_save())
@@ -471,13 +489,18 @@ class Studio:
             else:
                 raise ValueError(f"Unsupported sub-cluster method in studio: {p['submethod']}")
 
+            adjacency = build_local_delaunay_adjacency(
+                surface["camera_positions"], surface["normals"],
+            )
             data = _scene_dict(
                 surface["positions"], surface["normals"], surface["camera_positions"],
                 result["cluster_ids"], result["cluster_order"], result["path_order"],
                 str(input_path), config.CAMERA_WORKING_DISTANCE_MM / 1000.0,
+                adjacency=adjacency,
             )
             self.last = {"obj": obj, "surface": surface, "result": result,
-                         "params": p, "n": data["n"], "input_path": input_path}
+                         "params": p, "n": data["n"], "input_path": input_path,
+                         "adjacency": adjacency}
             red = (1 - result["path_length_mm"] / surface["original_path_length_mm"]) * 100
             smlabel = f"surface {p['surface_overlap_pct']:.0f}% overlap · {sp:.1f}mm"
             if p["submethod"] == "agglomerative":
@@ -557,6 +580,7 @@ class Studio:
                 result["path_order"], pca_data, surface["row_index"],
                 cluster_id=result["cluster_ids"], cluster_order=result["cluster_order"],
                 cluster_direction=result["cluster_direction"], cluster_metadata=cluster_meta,
+                adjacency=L["adjacency"],
             )
             self.gen_status.content = f"**Saved** → `{out}`"
             self._refresh_existing_options()
@@ -585,7 +609,8 @@ class Studio:
         toggles = {
             "mesh": self.cb_mesh, "surface": self.cb_surface,
             "markers": self.cb_markers, "paths": self.cb_paths,
-            "transitions": self.cb_transitions, "coacd": self.cb_coacd,
+            "transitions": self.cb_transitions, "delaunay": self.cb_delaunay,
+            "coacd": self.cb_coacd,
         }
         for key, cb in toggles.items():
             for handle in self.layers[key]:
@@ -645,6 +670,15 @@ class Studio:
                 f"/scene/transitions/t{i}", positions=np.stack([p1, p2]),
                 color=TRANSITION_RGB, line_width=2.0))
 
+        adjacency = data.get("adjacency")
+        if adjacency is not None:
+            edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
+            # viser 0.2.11에는 batched line-segment primitive가 없어 edge별 2-point spline을 쓴다.
+            for edge_idx, (a, b) in enumerate(edges):
+                self.layers["delaunay"].append(srv.scene.add_spline_catmull_rom(
+                    f"/scene/delaunay/e{edge_idx}", positions=np.stack([cam[a], cam[b]]),
+                    color=DELAUNAY_RGB, line_width=1.0))
+
         if coacd_parts:
             for j, part in enumerate(coacd_parts):
                 self.layers["coacd"].append(srv.scene.add_mesh_simple(
@@ -660,12 +694,24 @@ class Studio:
         self._make_step_slider(data["n"])
         self.pb_pos = 0.0
         self._update_highlight(0)
-        self.info.content = "\n".join([
+        adjacency = data.get("adjacency")
+        adjacency_info = ""
+        if adjacency is not None:
+            astats = adjacency.get("stats", {})
+            adjacency_info = (
+                f"**Delaunay:** `{len(adjacency.get('edges', []))} edges` · "
+                f"`{int(astats.get('num_components', 0))} components` · "
+                f"`{int(astats.get('num_isolated', 0))} isolated`"
+            )
+        lines = [
             f"**Source:** `{source}`",
             f"**Viewpoints:** `{data['n']}`",
             f"**Clusters:** `{len(data['cluster_order'])}`",
             f"**Working dist:** `{data['wd_m'] * 1000:.0f} mm`",
-        ])
+        ]
+        if adjacency_info:
+            lines.append(adjacency_info)
+        self.info.content = "\n".join(lines)
         print(f"Scene: {source} ({data['n']} vp, {len(data['cluster_order'])} clusters)")
 
     def _update_highlight(self, step: int) -> None:

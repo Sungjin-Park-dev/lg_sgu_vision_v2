@@ -92,6 +92,24 @@ uv run scripts/core/plan_trajectory.py \
 - `--reconfig-threshold 29.0` — reconfig 판정 임계값 (degrees)
 - `--spacing 0.05` — uniform resample 간격 (radians)
 
+### 2-1. Delaunay + GLNS 경로 실험 (선택)
+
+기존 trajectory pipeline과 별도로 Delaunay 인접 viewpoint만 허용하면서 viewpoint 순서와
+IK branch를 GLNS로 함께 선택할 수 있다.
+
+```bash
+julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
+
+uv run --no-sync scripts/core/solve_glns_path.py \
+  --object sample \
+  --viewpoints data/sample/viewpoint/74/viewpoints_coacd+agglomerative.h5
+
+uv run --no-sync scripts/apps/glns_inspector.py \
+  --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5
+```
+
+자세한 모델과 결과 형식: [docs/glns_path.md](docs/glns_path.md).
+
 ### 3. Isaac Sim 시뮬레이션 (선택)
 
 ```bash

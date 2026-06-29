@@ -135,6 +135,7 @@ def visualize_clusters_html(
     compare_modes: dict,
     original_path_length_mm: float,
     output_html: str,
+    adjacency_edges: np.ndarray | None = None,
 ):
     """Plotly HTML 시각화 (드롭다운 비교 지원).
 
@@ -154,6 +155,26 @@ def visualize_clusters_html(
         color='lightgray', opacity=0.25,
         name='Mesh', hoverinfo='skip',
     ))
+
+    if adjacency_edges is not None:
+        edges = np.asarray(adjacency_edges, dtype=np.int32)
+        if edges.size:
+            if edges.ndim != 2 or edges.shape[1] != 2:
+                raise ValueError(f"adjacency_edges must have shape (E, 2), got {edges.shape}")
+            # Plotly에서 독립 line segment를 한 trace로 그리기 위해 None separator를 삽입.
+            xs, ys, zs = [], [], []
+            for a, b in edges:
+                p0, p1 = camera_positions[a], camera_positions[b]
+                xs.extend([p0[0], p1[0], None])
+                ys.extend([p0[1], p1[1], None])
+                zs.extend([p0[2], p1[2], None])
+            base_traces.append(go.Scatter3d(
+                x=xs, y=ys, z=zs,
+                mode='lines',
+                line=dict(color='rgba(0,180,220,0.35)', width=2),
+                name=f'Delaunay adjacency ({len(edges)} edges)',
+                hoverinfo='skip',
+            ))
     n_base = len(base_traces)
 
     # --- Per-mode traces ---
