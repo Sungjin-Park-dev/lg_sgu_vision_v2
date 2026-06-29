@@ -127,11 +127,17 @@ TRANSIT_ENABLE_GRAPH_ATTEMPT = 99   # >max_attempts → graph 미사용(trajopt-
 # transit 은 BatchMotionPlanner 로 후보 leg 를 GPU 배치 병렬 계획한다(경계내 순차 탐색 제거).
 # 한 plan_cspace 호출이 batch_size 문제를 동시에 푼다 — direct 는 전 경계를 한 배치로, via-roll/tilt 는
 # 경계내 후보(leg + bridge)를 joint-closest 순 chunk 로 풀되 가교쌍이 나오면 즉시 멈춘다(short-circuit).
-# batch_size 는 한 경계의 후보(leg 2*MAX_REPS + bridge (MAX_REPS+1)²-1 ≈ 8+24)가 한 chunk 에 들도록
-# (MAX_REPS+1)² 근처로 맞춘다 — easy 경계가 1 chunk 로 끝나 빠르다. 크면 padding 낭비·메모리↑(64 는
-# 과거 OOM, cuda_graph 켜면 32 도 OOM), 작으면 chunk↑. plan_cspace 1 chunk ≈ 2.2s(compute-bound,
-# cuda_graph 효과 없음). 32 가 균형.
-TRANSIT_BATCH_SIZE = 32
+# batch_size 는 한 경계의 후보(leg 2*MAX_REPS + bridge (MAX_REPS+1)²-1 ≈ 8+24)가 한 chunk 에 들면 빠르다.
+# plan_cspace 1 chunk ≈ 2.2s(compute-bound). 작으면 via-roll 경계가 2 chunk 로 쪼개져 생성 약간↑.
+# ★ 메모리(2026-06-29 probe_planner_vram.py 실측): BatchMotionPlanner warmup 의 trajopt 버퍼가 batch_size 에
+#   ~선형(≈375 MB/slot, build 자체는 11 MB) → peak reserved bs8≈3.0 / bs16≈6.0 / bs24≈9.0 / bs32≈12 GB.
+#   Phase-1 IK 는 ~200 MB 로 무관(과거 "IK 11 GB" 기록은 오귀속 — 진짜 hog 는 이 planner warmup).
+#   16 GB GPU 에 Isaac Sim(~3.8 GB) 공존 시 bs32(12 GB)는 OOM, bs24(9 GB)는 fit → **24** 채택.
+# ★ batch 축소 안전성: bs 를 낮추면 plan_cspace batch-composition 이 바뀌어 transit 궤적이 달라질 수 있고
+#   (결정적이나 baseline 과 다름), 과거엔 그게 grazing transit 을 만들어 최종 collision 검증을 깨뜨렸다.
+#   이제 via-roll/direct 가 채택 전 `_transit_safe`(densify-검증, 최종과 동일 기준)로 grazing 후보를 거부
+#   하므로 bs 가 뭐든 **항상 유효한 transit 만** 선택 → bs 가 안전한 메모리/속도 노브가 됐다.
+TRANSIT_BATCH_SIZE = 24
 
 # transit이 끝내 실패한 reconfig를 직선 보간으로 메우면 카메라/팔이 물체를 관통한다.
 # 대신 아웃라이어 viewpoint를 최대 이 개수까지 건너뛰어(skip), 시작 자세와 다시
@@ -806,10 +812,25 @@ def plan_reconfig_transits(
         _vcache[(k, mode)] = kept
         return kept
 
+    _w3lock = float(home_q[-1])   # scan/HOME wrist_3 잠금값 (= config.ROBOT_START_STATE[-1])
+
+    def _transit_safe(wp):
+        """transit 후보가 '최종 validation 과 동일 기준'(densify + COLLISION_MARGIN)으로 충돌-free 인지.
+        plan_cspace 의 success 는 자기 trajopt 해상도·soft-cost tolerance 기준이라, 우리 densify 해상도·
+        margin 에선 waypoint 사이를 스치며 관통할 수 있다(특히 물체 근처를 지나는 reconfig transit).
+        그래서 채택 전에 같은 검사를 걸어 통과한 후보만 쓴다 → 최종 collision 검증이 transit 때문에
+        실패하는 일을 없애고, batch 변동에도 '항상 유효한' transit 만 선택(plan_cspace success 맹신 제거)."""
+        if wp is None or len(wp) < 2:
+            return False
+        _, ncol = batch_collision_check(densify_for_collision_check(wp), robot_cfg, world_scene)
+        return ncol == 0
+
     def _via_variant(idx, mode):
         """변형 중간자세 경유 3-leg transit. 후보 leg 를 joint-closest 순으로 batch chunk 씩 풀고
         가교쌍이 나오면 즉시 멈춘다 — easy 경계는 1 chunk 로 끝나고(가까운 쌍이 바로 가교), hard
-        경계만 더 깊이 탐색한다(short-circuit). 선택 규칙(전 쌍 중 joint-최근접 가교쌍)은 불변 = coverage 동일.
+        경계만 더 깊이 탐색한다(short-circuit). 선택 규칙 = joint-최근접 가교쌍 중 **densify-검증
+        (최종 collision 검증과 동일 기준) 통과**한 첫 쌍 — plan_cspace success 만으론 grazing 일 수 있어
+        채택 전 `_transit_safe` 로 거른다(grazing 후보는 거부하고 다음 후보로).
 
         scan↔변형 leg(소수, ≤(MAX_REPS)*2)를 job 목록 앞에 둬 첫 chunk 에 모두 들어가게 한다
         (이후 어느 bridge chunk 든 leg 가 이미 있어 가교 판정 가능). VIA_ROLL_MAX_REPS 가 커져
@@ -839,6 +860,7 @@ def plan_reconfig_transits(
 
         leg1, leg3, bridge = {}, {}, {}
         tested = set()
+        rejected = set()   # 미완성 or densify-검증 실패(grazing)한 가교쌍 — 다음 chunk 재검사 방지
         for c0 in range(0, len(jobs), bs):
             sub = jobs[c0:c0 + bs]
             res = _plan_chunk([j[0] for j in sub], [j[1] for j in sub])
@@ -850,24 +872,25 @@ def plan_reconfig_transits(
                 else:
                     bridge[j[3]] = wp
                     tested.add(j[3])
-            # 지금까지 테스트된 가교쌍 중 joint-최근접으로 3-leg 모두 성공한 것 채택(없으면 다음 chunk).
+            # 테스트된 가교쌍을 joint-최근접 순으로 보며, 3-leg 완성 + densify-검증 통과한 첫 쌍 채택.
+            # leg 는 job 앞쪽이라 bridge 가 테스트될 땐 이미 테스트됨 → 미완성 쌍은 영구 거부(reject).
             for _, ia, ib in order:
-                if (ia, ib) not in tested:
+                if (ia, ib) in rejected or (ia, ib) not in tested:
                     continue
-                legm = bridge[(ia, ib)]                # A'→B' (가교부)
-                if legm is None:
-                    continue
-                l1 = leg1.get(ia) if ia != 0 else None     # scan→A' (roll, 보통 쉬움)
-                if ia != 0 and l1 is None:
-                    continue
-                l3 = leg3.get(ib) if ib != 0 else None      # B'→scan (roll)
-                if ib != 0 and l3 is None:
-                    continue
-                segs = [l1, legm[1:]] if ia != 0 else [legm]   # 중복 endpoint 제거
-                if ib != 0:
-                    segs.append(l3[1:])
-                wp = np.concatenate(segs, axis=0)
-                return wp if len(wp) >= 2 else None
+                legm = bridge[(ia, ib)]                       # A'→B' (가교부)
+                l1 = leg1.get(ia) if ia != 0 else None        # scan→A'
+                l3 = leg3.get(ib) if ib != 0 else None        # B'→scan
+                complete = (legm is not None
+                            and (ia == 0 or l1 is not None)
+                            and (ib == 0 or l3 is not None))
+                if complete:
+                    segs = [l1, legm[1:]] if ia != 0 else [legm]   # 중복 endpoint 제거
+                    if ib != 0:
+                        segs.append(l3[1:])
+                    wp = np.concatenate(segs, axis=0)
+                    if len(wp) >= 2 and _transit_safe(wp):    # ★ 최종 검증과 동일 기준 통과만 채택
+                        return wp
+                rejected.add((ia, ib))                        # 미완성 or grazing → 거부, 다음 후보로
         return None
 
     transit_segments = {}
@@ -899,10 +922,14 @@ def plan_reconfig_transits(
     _tick("transit_direct", t0)
     pending = []
     for k, idx in enumerate(recon):
-        if direct_wps[k] is not None:
-            _record(idx, direct_wps[k], "direct", dt0, announce=False)
-        else:
-            pending.append(idx)
+        wp = direct_wps[k]
+        if wp is not None:
+            wp = wp.copy()
+            wp[:, -1] = _w3lock                 # main 이 direct 에 거는 wrist_3 lock 을 미리 적용해 검증
+            if _transit_safe(wp):               # plan_cspace success 가 아니라 densify-검증으로 채택
+                _record(idx, wp, "direct", dt0, announce=False)
+                continue
+        pending.append(idx)                     # 실패 or grazing → via-roll 사다리로
     print(f"    Direct batch: {len(recon) - len(pending)}/{len(recon)} ok ({dt0:.2f}s)")
 
     # Round 1+: 실패 경계만 사다리(via-roll → via-tilt → via-home), 각 경계내 후보는 _via_variant 가 배치 탐색.
@@ -921,8 +948,11 @@ def plan_reconfig_transits(
             legs = _plan_batch([selected[idx], home_q],
                                [home_q, selected[idx + 1]])
             if legs[0] is not None and legs[1] is not None:
-                waypoints = np.concatenate([legs[0], legs[1][1:]], axis=0)  # HOME 중복 제거
-                route = "via-home"
+                cand = np.concatenate([legs[0], legs[1][1:]], axis=0)  # HOME 중복 제거
+                cand[:, -1] = _w3lock                                  # via-home 도 wrist_3 lock 후 검증
+                if _transit_safe(cand):
+                    waypoints = cand
+                    route = "via-home"
 
         dt = time.time() - t0
         if waypoints is not None:
