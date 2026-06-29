@@ -42,6 +42,64 @@ from common.math_utils import quaternion_to_rotation_matrix, normalize_vectors
 
 
 # =========================================================================
+# Profiling (생성시간 분해 측정 — 동작 무변경, main() 끝에서 분해표 출력)
+# =========================================================================
+
+_TIMINGS = []  # [(label, seconds)]
+
+
+def _tick(label, t0):
+    """t0(=time.time() 시작) 이후 경과를 label 로 _TIMINGS 에 누적."""
+    _TIMINGS.append((label, time.time() - t0))
+
+
+# =========================================================================
+# Solver/checker 재사용 — Kinematics·RobotCollisionChecker 를 run 당 1회만 빌드
+# =========================================================================
+# compute_fk·batch_collision_check 는 매 호출 cuRobo 객체를 새로 빌드했다. 한 run 내
+# robot_cfg·world_scene 는 불변(main 에서 1개씩)이라 결과는 빌드 횟수와 무관 → id 캐시로
+# 1회만 빌드해 반복 빌드비를 없앤다(궤적 보존, plan_cspace/IK 결과 불변). 캐시가 객체 참조를
+# 들고 있어 id 재사용 위험 없음.
+
+_KIN_CACHE = {}      # id(robot_cfg) -> Kinematics
+_CC_CACHE = {}       # (id(robot_cfg), id(world_scene)) -> RobotCollisionChecker
+_REUSE_HITS = {"kin": 0, "cc": 0}   # 캐시 히트(=절약된 빌드) 수
+
+
+def _get_kinematics(robot_cfg):
+    kin = _KIN_CACHE.get(id(robot_cfg))
+    if kin is None:
+        _t = time.time()
+        kin = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_cfg))
+        _KIN_CACHE[id(robot_cfg)] = kin
+        _tick("kin_build(1x)", _t)
+    else:
+        _REUSE_HITS["kin"] += 1
+    return kin
+
+
+def _get_collision_checker(robot_cfg, world_scene):
+    key = (id(robot_cfg), id(world_scene))
+    checker = _CC_CACHE.get(key)
+    if checker is None:
+        _t = time.time()
+        cfg = RobotCollisionCheckerCfg.load_from_config(
+            robot_config=robot_cfg,
+            scene_model=world_scene,
+            n_cuboids=max(1, len(world_scene.cuboid)),
+            n_meshes=max(1, len(world_scene.mesh)),
+            collision_activation_distance=float(config.COLLISION_MARGIN),
+            self_collision_activation_distance=0.0,
+        )
+        checker = RobotCollisionChecker(cfg)
+        _CC_CACHE[key] = checker
+        _tick("cc_build(1x)", _t)
+    else:
+        _REUSE_HITS["cc"] += 1
+    return checker
+
+
+# =========================================================================
 # Pipeline defaults
 # =========================================================================
 
@@ -331,7 +389,7 @@ def build_collision_world(object_name: str):
 
 def compute_fk(solutions, robot_cfg):
     """Compute FK for joint solutions. Returns (N,3) positions and (N,4) quats (x,y,z,w)."""
-    kin = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_cfg))
+    kin = _get_kinematics(robot_cfg)            # run 당 1회만 빌드(재사용)
     q_batch = torch.tensor(solutions, device="cuda:0", dtype=torch.float32)
     js = JointState.from_position(q_batch, joint_names=kin.joint_names)
     state = kin.compute_kinematics(js)
@@ -377,6 +435,7 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
         "obb": max(1, len(world_scene.cuboid)),
         "mesh": max(1, len(world_scene.mesh)),
     }
+    _t_build = time.time()
     cfg = InverseKinematicsCfg.create(
         robot=robot_cfg,
         scene_model={},
@@ -389,6 +448,7 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
     ik = InverseKinematics(cfg)
     ik.update_world(world_scene)
     tool = ik.tool_frames[0]
+    _tick("ik_build", _t_build)
 
     N = len(positions_np)
     n_dof = 6
@@ -420,6 +480,8 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
         if (b + 1) % 50 == 0 or b == n_batches - 1:
             elapsed = time.time() - t0
             print(f"    IK batch {b+1}/{n_batches} ({elapsed:.1f}s)")
+
+    _tick("ik_solve", t0)
 
     # [-π, π]로 정규화 — 2π 차이 oscillation 방지
     all_solutions = normalize_joints(all_solutions)
@@ -606,6 +668,7 @@ def plan_reconfig_transits(
         "obb": max(1, len(world_scene.cuboid)),
         "mesh": max(1, len(world_scene.mesh)),
     }
+    _t_build = time.time()
     cfg = MotionPlannerCfg.create(
         robot=robot_cfg,
         collision_cache=cache,
@@ -617,6 +680,7 @@ def plan_reconfig_transits(
     # trajopt-only — graph(PRM) 미사용(via-roll/tilt 가 빡센 transit 흡수). warmup 도 graph 없이.
     print(f"    Warming up BatchMotionPlanner (batch={TRANSIT_BATCH_SIZE}, trajopt-only, no graph)...")
     planner.warmup(enable_graph=False, num_warmup_iterations=2)
+    _tick("transit_build_warmup", _t_build)
 
     n_dof = selected.shape[-1]
     bs = planner.batch_size
@@ -681,6 +745,7 @@ def plan_reconfig_transits(
         """via-roll/tilt용 IK solver + endpoint FK pose를 최초 1회만 lazy 빌드(미사용 시 비용 0)."""
         if _via["ready"]:
             return
+        _t_build = time.time()
         ep_set = sorted(set([int(i) for i in reconfig_indices]
                             + [int(i) + 1 for i in reconfig_indices]))
         ee_pos, ee_quat = compute_fk(selected[ep_set], robot_cfg)   # (M,3), (M,4 xyzw)
@@ -696,6 +761,7 @@ def plan_reconfig_transits(
         ik.update_world(world_scene)
         _via["ik"], _via["tool"] = ik, ik.tool_frames[0]
         _via["ready"] = True
+        _tick("via_ik_build", _t_build)
 
     def _variant_configs(k, mode):
         """sel index k 의 변형(roll/tilt) IK 후보 — 광축 둘레 회전/기울임 타깃을 IK로 풀어
@@ -748,6 +814,11 @@ def plan_reconfig_transits(
         scan↔변형 leg(소수, ≤(MAX_REPS)*2)를 job 목록 앞에 둬 첫 chunk 에 모두 들어가게 한다
         (이후 어느 bridge chunk 든 leg 가 이미 있어 가교 판정 가능). VIA_ROLL_MAX_REPS 가 커져
         leg 수가 batch_size 를 넘으면 이 가정이 깨진다(현재 ≤12 ≪ 32).
+
+        NOTE(2026-06-29): pending 경계들을 한 배치로 pool 하는 cross-boundary 배치를 시도했으나,
+        plan_cspace 가 batch-composition 의존이라 같은 leg/bridge 문제가 섞인 배치에서 다른(유효하나
+        다른) 궤적·성공집합을 내 transit 선택이 임의로 바뀌고 실행 cycle 이 흔들림(curved +25%) → 폐기,
+        경계당 1 chunk 순차 유지. 자세히 [[plan-trajectory-cross-boundary-batch-rejected]].
         """
         qi, qj = selected[idx], selected[idx + 1]
         poolA = [qi] + _variant_configs(idx, mode)
@@ -825,6 +896,7 @@ def plan_reconfig_transits(
     direct_wps = _plan_batch([selected[i] for i in recon],
                              [selected[i + 1] for i in recon])
     dt0 = time.time() - t0
+    _tick("transit_direct", t0)
     pending = []
     for k, idx in enumerate(recon):
         if direct_wps[k] is not None:
@@ -834,6 +906,7 @@ def plan_reconfig_transits(
     print(f"    Direct batch: {len(recon) - len(pending)}/{len(recon)} ok ({dt0:.2f}s)")
 
     # Round 1+: 실패 경계만 사다리(via-roll → via-tilt → via-home), 각 경계내 후보는 _via_variant 가 배치 탐색.
+    _t_pending = time.time()
     for idx in pending:
         t0 = time.time()
         waypoints = _via_variant(idx, "roll")                      # 2) 광축 roll 중간자세 경유
@@ -857,6 +930,7 @@ def plan_reconfig_transits(
         else:
             transit_stats.append({"idx": int(idx), "success": False, "time": dt})
             print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED [genuinely-unbridgeable] ({dt:.2f}s)")
+    _tick("transit_pending", _t_pending)
 
     n_ok = sum(1 for s in transit_stats if s["success"])
     by_route = []
@@ -1155,15 +1229,7 @@ def batch_collision_check(trajectory, robot_cfg, world_scene):
     # 20 cm 이내에서 양수가 되므로(카메라는 작업거리 46 mm 라 항상 그 안), cost > 0 검사가
     # 모든 waypoint 를 충돌로 판정해 버린다. 최종 검증에서는 실제 침투만 잡도록
     # activation distance 를 COLLISION_MARGIN(기본 0)으로 둔다 → cost > 0 ⇔ 실제 침투.
-    cfg = RobotCollisionCheckerCfg.load_from_config(
-        robot_config=robot_cfg,
-        scene_model=world_scene,
-        n_cuboids=max(1, len(world_scene.cuboid)),
-        n_meshes=max(1, len(world_scene.mesh)),
-        collision_activation_distance=float(config.COLLISION_MARGIN),
-        self_collision_activation_distance=0.0,
-    )
-    checker = RobotCollisionChecker(cfg)
+    checker = _get_collision_checker(robot_cfg, world_scene)   # run 당 1회만 빌드(재사용)
 
     # NOTE: cuRobo v0.8 RobotSceneCollision.get_scene_self_collision_distance_from_joints
     # is buggy (passes a tensor where the underlying cost expects a KinematicsState).
@@ -1478,6 +1544,7 @@ def main():
         config.TARGET_OBJECT["rotation"] = np.array(args.object_quat, dtype=np.float64)
         print(f"  Object rotation override (w,x,y,z): {args.object_quat}")
 
+    _t = time.time()
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")
     h5_path = Path(args.viewpoints) if args.viewpoints \
@@ -1502,20 +1569,25 @@ def main():
     positions_np = world_poses[:, :3, 3]
     quats_np = rot_to_quat_batch(world_poses[:, :3, :3])  # (w, x, y, z)
     print(f"  {N} camera poses built")
+    _tick("load+poses", _t)
 
     # [3] Phase 1: Multi-seed IK
     print("[3/6] Phase 1 — Multi-seed IK...")
+    _t = time.time()
     world_config = build_collision_world(args.object)
     robot_cfg = _resolve_robot_config(ROBOT_CONFIG)
     print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
     collision_buffer = _collision_sphere_buffer_summary(robot_cfg)
     if collision_buffer:
         print(f"  Collision sphere buffer: {collision_buffer} (from robot YAML)")
+    _tick("build_world+robotcfg", _t)
 
+    _t = time.time()
     all_solutions, all_success = solve_ik_multi_seed(
         robot_cfg, world_config, positions_np, quats_np,
         num_seeds=NUM_IK_SEEDS, batch_size=IK_BATCH_SIZE,
     )
+    _tick("phase1_ik_total", _t)
 
     # [4] Phase 2 + 3: 대표해 추출 → DP
     print("[4/6] Phase 2 — per-viewpoint 대표해 (greedy dedup)...")
@@ -1537,6 +1609,7 @@ def main():
     # 충돌하는 대표 해 제거 (DP는 충돌을 안 보므로). 최종검사와 동일한 batch_collision_check로
     # wrist_3 잠금 후 자세를 검사 → 충돌 자세를 후보에서 빼 DP가 충돌-free만 고르게 한다.
     # 충돌-free가 0개가 된 viewpoint는 아래 empty-drop이 unreachable로 처리한다.
+    _t = time.time()
     spans = []   # (vp, flat_start, count)
     flat = []
     for i, r in enumerate(representatives):
@@ -1562,6 +1635,7 @@ def main():
                   f"{n_emptied} viewpoints emptied → unreachable")
         else:
             print(f"  Collision-filtered reps: 0 colliding (all candidates collision-free)")
+    _tick("collision_filter_reps", _t)
 
     # 못 가는(empty) viewpoint 제거 — IK 해가 없거나 충돌 필터로 비워진 viewpoint는
     # carry-forward로 메우지 않고 경로에서 뺀다.
@@ -1586,7 +1660,9 @@ def main():
             )
 
     print("[5/6] Phase 3 — DP optimal path...")
+    _t = time.time()
     selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
+    _tick("dp", _t)
 
     # 클러스터 간/내 reconfig 분석
     if cluster_id is not None:
@@ -1637,6 +1713,7 @@ def main():
     # Phase 4: BatchMotionPlanner transit at reconfig points
     reconfig_indices = np.where(is_reconfig)[0] if cluster_id is not None else np.array([], dtype=int)
     transit_segments = {}
+    _t = time.time()
     if len(reconfig_indices) > 0:
         print(f"\n[Phase 4] BatchMotionPlanner transit for {len(reconfig_indices)} reconfig points...")
         transit_segments, transit_stats = plan_reconfig_transits(
@@ -1649,14 +1726,17 @@ def main():
         for idx in transit_segments:
             if _routes.get(idx) in ("direct", "via-home"):
                 transit_segments[idx][:, -1] = wrist3_fixed
+    _tick("phase4_transit_total", _t)
 
     # Phase 5: Uniform resample + collision check
     print(f"\n[Phase 5] Interpolation + uniform resample (mode={RESAMPLE_MODE})...")
+    _t = time.time()
     final_traj, final_is_transit, skipped_vps, runs_info = interpolate_and_resample(
         selected, transit_segments, robot_cfg,
         mode=RESAMPLE_MODE, spacing=args.spacing,
         reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
     )
+    _tick("phase5_resample", _t)
     skipped_orig = [int(orig_idx[i]) for i in skipped_vps]   # 원본 viewpoint 번호로 표기
     if len(runs_info["runs"]) > 1:
         kl = runs_info["kept"][2]
@@ -1682,6 +1762,7 @@ def main():
 
     # Collision check
     print("  Collision check...")
+    _t = time.time()
     collision_traj = densify_for_collision_check(final_traj)
     if len(collision_traj) != len(final_traj):
         print(
@@ -1691,9 +1772,12 @@ def main():
             + (", excluding wrist_3 metric" if config.COLLISION_INTERP_EXCLUDE_LAST_JOINT else "")
             + ")"
         )
+    _tick("phase5_densify", _t)
+    _t = time.time()
     is_collision, n_collisions = batch_collision_check(
         collision_traj, robot_cfg, world_config,
     )
+    _tick("phase5_collision_check", _t)
     if n_collisions > 0:
         collision_pct = 100 * n_collisions / len(collision_traj)
         raise RuntimeError(
@@ -1705,6 +1789,7 @@ def main():
         print(f"  No collisions detected ({len(collision_traj)} dense waypoints)")
 
     # FK + 저장
+    _t = time.time()
     ee_positions, ee_quaternions = compute_fk(final_traj, robot_cfg)
     print(f"  Computed FK for {len(final_traj)} waypoints")
 
@@ -1728,7 +1813,9 @@ def main():
           f"corners={time_stats['n_slow_segments']} seg "
           f"(max angle={time_stats['max_corner_angle_deg']:.1f}°, "
           f"slowdown={time_stats['max_slowdown']:.2f}x)")
+    _tick("fk+time", _t)
 
+    _t = time.time()
     traj_dir = config.get_trajectory_path(args.object, args.num_viewpoints, "dummy").parent
     traj_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1747,6 +1834,7 @@ def main():
         final_traj, ee_positions, ee_quaternions, csv_path,
         times=traj_times,
     )
+    _tick("save", _t)
 
     n_transit_ok = len(transit_segments)
     covered = runs_info["kept"][2]
@@ -1755,6 +1843,26 @@ def main():
           f"reconfigs={stats['n_reconfigs']} (inter={rc_inter}, intra={rc_intra}), "
           f"transit={n_transit_ok}/{len(reconfig_indices)} OK, "
           f"collisions={n_collisions}, final={len(final_traj)} waypoints")
+
+    # === Timing breakdown (생성시간 분해 — 레버 선택용) ===
+    # phase1_ik_total = ik_build + ik_solve, phase4_transit_total = transit_build_warmup
+    # + transit_direct + transit_pending (+ via_ik_build) 라 합산 중복 → 'sub' 표시로 제외 표기.
+    # kin_build/cc_build(1x)는 다른 phase(collision_filter_reps·fk+time 등) 안에서 일어나므로 sub.
+    _SUBS = {"ik_build", "ik_solve", "transit_build_warmup", "transit_direct",
+             "transit_pending", "via_ik_build", "kin_build(1x)", "cc_build(1x)"}
+    _total = sum(s for lbl, s in _TIMINGS if lbl not in _SUBS)
+    print("\n=== Timing breakdown (top-level phases; sub = 중복분해, TOTAL 미포함) ===")
+    for label, sec in sorted(_TIMINGS, key=lambda kv: kv[1], reverse=True):
+        tag_sub = " (sub)" if label in _SUBS else ""
+        pct = 100 * sec / _total if _total > 0 else 0.0
+        print(f"  {label:<22} {sec:7.2f}s  {pct:5.1f}%{tag_sub}")
+    print(f"  {'-' * 44}")
+    print(f"  {'TOTAL (measured)':<22} {_total:7.2f}s")
+    _cc = next((s for lbl, s in _TIMINGS if lbl == 'cc_build(1x)'), 0.0)
+    _kn = next((s for lbl, s in _TIMINGS if lbl == 'kin_build(1x)'), 0.0)
+    print(f"  Solver reuse: collision-checker {_REUSE_HITS['cc']} hits (~{_cc:.2f}s/build saved each), "
+          f"kinematics {_REUSE_HITS['kin']} hits (~{_kn:.2f}s/build saved each)")
+    print("  (이 합 vs `/usr/bin/time -v` wall 차이 = Python import + CUDA init 등 미계측 고정비)")
 
 
 if __name__ == "__main__":
