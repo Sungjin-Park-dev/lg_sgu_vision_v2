@@ -1873,6 +1873,16 @@ def main():
         final_traj, ee_positions, ee_quaternions, csv_path,
         times=traj_times,
     )
+    # NPZ sidecar (dense playback): same {joints, ee_positions, is_transit, times}
+    # schema verify_glns_trajectory emits, so trajectory_studio plays DP and GLNS
+    # back identically (transit/scan coloring). CSV stays the publish artifact.
+    npz_path = str(Path(csv_path).with_suffix(".npz"))
+    np.savez(
+        npz_path,
+        joints=final_traj, ee_positions=ee_positions,
+        is_transit=final_is_transit, times=traj_times,
+    )
+    print(f"  NPZ saved to {npz_path}")
     _tick("save", _t)
 
     n_transit_ok = len(transit_segments)

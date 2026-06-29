@@ -104,7 +104,7 @@ uv run --no-sync scripts/core/solve_glns_path.py \
   --object sample \
   --viewpoints data/sample/viewpoint/74/viewpoints_coacd+agglomerative.h5
 
-uv run --no-sync scripts/apps/glns_inspector.py \
+uv run --no-sync scripts/apps/trajectory_studio.py \
   --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5
 ```
 

@@ -3,7 +3,7 @@
 
 This is an experimental, standalone stage. It computes fresh collision-aware
 IK candidates, solves one open GTSP per induced Delaunay component, and writes a
-``glns_result_*.h5`` artifact for ``scripts/apps/glns_inspector.py``. It does
+``glns_result_*.h5`` artifact for ``scripts/apps/trajectory_studio.py``. It does
 not alter the source viewpoint HDF5 or invoke the trajectory/motion planner.
 """
 

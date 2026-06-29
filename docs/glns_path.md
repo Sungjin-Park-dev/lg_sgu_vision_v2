@@ -56,7 +56,7 @@ resampling을 거치지 않았다.
 ## Viser 확인
 
 ```bash
-uv run --no-sync scripts/apps/glns_inspector.py \
+uv run --no-sync scripts/apps/trajectory_studio.py \
   --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5
 ```
 

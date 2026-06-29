@@ -11,7 +11,7 @@
 | 1. 뷰포인트 생성 | `apps/viewpoint_studio.py` (viser) | `core/generate_viewpoints.py` |
 | 2. 포즈 조절 + 궤적 생성/preview | `apps/isaac_pipeline.py` (Isaac Sim) | `core/plan_trajectory.py`, `isaac/scene.py` |
 | 3. 실제 로봇 전송 | `apps/isaac_pipeline.py`의 Publish 패널, `robot/move_to_start.py` | `core/publish_trajectory.py` |
-| 실험. Delaunay+GLNS | `apps/glns_inspector.py` (viser) | `core/solve_glns_path.py`, Julia GLNS |
+| 실험. Delaunay+GLNS | `apps/trajectory_studio.py` (viser) | `core/solve_glns_path.py`, Julia GLNS |
 
 ```
 scripts/
@@ -56,7 +56,7 @@ Stage 3: 로봇 실행 (ROS2)
 
 별도 실험 경로인 `solve_glns_path.py`는 Delaunay 연결 성분별로 viewpoint와 IK 해를
 GLNS로 함께 선택해 `data/{object}/ik/{N}/glns_result_*.h5`를 생성한다. 이 결과는
-`glns_inspector.py`에서 재생하며 Stage 2 motion planning에는 자동 연결하지 않는다.
+`trajectory_studio.py`에서 재생하며 Stage 2 motion planning에는 자동 연결하지 않는다.
 
 ## 데이터 형식
 
