@@ -89,6 +89,8 @@ def _parse_args() -> argparse.Namespace:
                         help="성분 방문 순서: optimized(seam 거리 최소) / fixed(id 순서). default optimized")
     parser.add_argument("--no-home-bracket", action="store_true",
                         help="joined 궤적 양 끝의 HOME 접근/복귀 생략 — 성분만 연결")
+    parser.add_argument("--require-full-coverage", action="store_true",
+                        help="fail a component and joined output if any viewpoint is skipped")
     args = parser.parse_args()
     if not args.result.exists():
         parser.error(f"Result not found: {args.result}")
@@ -114,7 +116,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
 
     # reconfig 경계는 plan_trajectory main()/Phase 5(_build_runs) 와 동일하게 selected 의
     # 6-DoF L∞ 로 재산출한다(Phase 4 transit 대상과 Phase 5 run-building 이 일치해야 함).
-    # roll-augment 시 wr3 변화가 작아(≤~13°) 6-DoF=5-DoF 와 동일 → GLNS 5-DoF 판정과도 일치.
+    # GLNS strict r_any and continuous verifier both use all six joints.
     # transit 은 wr3 를 0 으로 평탄화해 계획한다(검사 무관 DOF, lock_wrist3 기본 True).
     jumps = np.max(np.abs(np.diff(selected, axis=0)), axis=1)              # (M-1,)
     is_reconfig = jumps > reconfig_rad
@@ -220,7 +222,8 @@ def _collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_c
 
 
 def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
-                      wrist3_fixed, spacing, out_csv, enable_via_ladder=True):
+                      wrist3_fixed, spacing, out_csv, enable_via_ladder=True,
+                      require_full_coverage=False):
     """한 성분을 Phase 4-6 으로 검증(per-component CSV/npz 기록). 결과 dict 반환."""
     pr = _plan_and_resample_component(
         component, robot_cfg=robot_cfg, world_config=world_config,
@@ -236,6 +239,20 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "reconfig_mismatch": pr.get("reconfig_mismatch", 0), "csv": None,
             "final_traj": None, "final_is_transit": None,
             "entry": None, "exit": None, "error": pr["error"],
+        }
+    if require_full_coverage and pr["dropped"]:
+        Path(out_csv).unlink(missing_ok=True)
+        Path(out_csv).with_suffix(".npz").unlink(missing_ok=True)
+        return {
+            "M": pr["M"], "covered": pr["covered"], "dropped": pr["dropped"],
+            "n_runs": pr["n_runs"], "reconfig_req": pr["reconfig_req"],
+            "transit_ok": pr["transit_ok"], "n_collisions": 0,
+            "collision_free": False, "total_time": float("nan"),
+            "transit_time": float("nan"), "n_waypoints": len(pr["final_traj"]),
+            "reconfig_mismatch": pr["reconfig_mismatch"], "csv": None,
+            "final_traj": None, "final_is_transit": None,
+            "entry": None, "exit": None,
+            "error": "full coverage required but viewpoint(s) were skipped",
         }
     gate = _collision_gate_and_save(
         pr["final_traj"], pr["final_is_transit"],
@@ -479,6 +496,7 @@ def main() -> int:
             component, robot_cfg=robot_cfg, world_config=world_config,
             reconfig_rad=reconfig_rad, wd_m=wd_m, wrist3_fixed=wrist3_fixed,
             spacing=args.spacing, out_csv=out_csv, enable_via_ladder=not args.no_via,
+            require_full_coverage=args.require_full_coverage,
         )
         rows.append((cid, "solved", n_members, res))
 
@@ -548,6 +566,12 @@ def main() -> int:
     if args.join:
         print("JOIN COMPONENTS → single continuous trajectory")
         print("-" * 64)
+        if args.require_full_coverage and any_dropped:
+            (out_dir / "glns_trajectory_joined.csv").unlink(missing_ok=True)
+            (out_dir / "glns_trajectory_joined.npz").unlink(missing_ok=True)
+            print("  FAIL — --require-full-coverage: skipped viewpoint detected; joined 미생성.")
+            print("=" * 64)
+            return 1
         if not join_inputs:
             print("  연결할 충돌-free 성분이 없음 — joined 미생성.")
             print("=" * 64)

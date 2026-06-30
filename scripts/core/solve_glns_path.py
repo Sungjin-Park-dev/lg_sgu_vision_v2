@@ -31,10 +31,12 @@ from common import config  # noqa: E402
 from common.glns_utils import (  # noqa: E402
     build_gtsp_problem,
     decode_and_validate_tour,
+    effective_candidate_cap,
     expand_edges_by_hops,
     find_hamiltonian_open_path,
     induce_adjacency,
     parse_glns_tour,
+    prune_candidate_sets,
     write_result_hdf5,
     write_simple_gtsp,
 )
@@ -45,6 +47,8 @@ JULIA_PROJECT = PROJECT_ROOT / "scripts" / "julia" / "glns"
 JULIA_WRAPPER = JULIA_PROJECT / "run_glns.jl"
 DEFAULT_FEASIBILITY_TIMEOUT_S = 5.0
 DEFAULT_MAX_MATRIX_MIB = 512.0
+DEFAULT_MATRIX_TARGET_MIB = 256.0
+DEFAULT_MAX_CANDIDATES = 16
 
 # Joint-differentiated reconfiguration cost (default). base = pan/lift/elbow must
 # stay put within a component; wrist (1/2/3) may reconfigure cheaply. L2 tiebreak
@@ -88,10 +92,19 @@ def _parse_args() -> argparse.Namespace:
                         help="옛 동작: 6-DoF 단일 binary reconfig + 균일 L2 가중치(비교용). "
                              "base/wrist 차등을 끈다.")
     parser.add_argument("--roll-augment", action="store_true",
-                        help="광축 roll 둘레 IK 후보 증강 + 5-DoF(wr3 제외) reconfig 비용 "
-                             "(wrist flip 대신 rolled 자세로 pointing 연속 해 선택)")
+                        help="add nonzero optical-axis roll IK pose variants")
     parser.add_argument("--roll-step-deg", type=float, default=30.0,
-                        help="[--roll-augment] roll sweep 간격 deg (default: 30 → 12 각도)")
+                        help="[--roll-augment] nonzero roll sweep 간격 deg (default: 30 → 11 poses)")
+    parser.add_argument("--tilt-augment", action="store_true",
+                        help="nominal camera XY axes around off-normal tilt IK poses")
+    parser.add_argument("--tilt-angles-deg", type=float, nargs="+", default=[5.0, 10.0],
+                        help="[--tilt-augment] tilt magnitudes (default: 5 10)")
+    parser.add_argument("--tilt-azimuths", type=int, default=8,
+                        help="[--tilt-augment] evenly spaced nominal-XY tilt axes (default: 8)")
+    parser.add_argument("--max-candidates-per-viewpoint", type=int,
+                        default=DEFAULT_MAX_CANDIDATES)
+    parser.add_argument("--matrix-target-mib", type=float, default=DEFAULT_MATRIX_TARGET_MIB,
+                        help="automatic candidate-cap target per component (default: 256)")
     parser.add_argument("--tilt-repair", action="store_true",
                         help="GLNS 후 강제 big-base reconfig outlier viewpoint 를 ±tilt 재-IK 로 "
                              "복구(이웃과 호환되는 해로 교체, 없으면 drop)")
@@ -134,10 +147,18 @@ def _parse_args() -> argparse.Namespace:
             parser.error("--tilt-repair-max-deg must be in (0, 45]")
         if args.tilt_repair_azimuths < 1 or args.outlier_max_len < 1 or args.big_base_deg <= 0.0:
             parser.error("--tilt-repair-azimuths/--outlier-max-len/--big-base-deg must be positive")
+    if args.tilt_augment and args.tilt_repair:
+        parser.error("--tilt-augment and --tilt-repair are mutually exclusive")
+    if any(a <= 0.0 or a > 45.0 for a in args.tilt_angles_deg):
+        parser.error("--tilt-angles-deg values must be in (0, 45]")
+    if args.tilt_azimuths < 1 or args.max_candidates_per_viewpoint < 1:
+        parser.error("--tilt-azimuths and --max-candidates-per-viewpoint must be positive")
     if args.glns_timeout <= 0 or args.feasibility_timeout <= 0.0:
         parser.error("solver timeouts must be > 0")
-    if args.max_matrix_mib <= 0.0:
-        parser.error("--max-matrix-mib must be > 0")
+    if args.max_matrix_mib <= 0.0 or args.matrix_target_mib <= 0.0:
+        parser.error("matrix limits must be > 0")
+    if args.matrix_target_mib > args.max_matrix_mib:
+        parser.error("--matrix-target-mib must not exceed --max-matrix-mib")
     return args
 
 
@@ -209,7 +230,7 @@ def _run_glns(
     return elapsed
 
 
-def _collision_filter_representatives(representatives, robot_cfg, world):
+def _collision_filter_representatives(representatives, robot_cfg, world, metadata=None):
     offsets = []
     flat = []
     cursor = 0
@@ -226,6 +247,10 @@ def _collision_filter_representatives(representatives, robot_cfg, world):
         free = ~colliding[start:start + count]
         removed += count - int(free.sum())
         representatives[viewpoint] = representatives[viewpoint][free]
+        if metadata is not None:
+            metadata[viewpoint] = {
+                key: np.asarray(value)[free] for key, value in metadata[viewpoint].items()
+            }
     return removed
 
 
@@ -234,34 +259,75 @@ def _default_output(object_name: str, count: int) -> Path:
     return config.get_ik_path(object_name, count, f"glns_result_{stamp}.h5")
 
 
-def _roll_augmented_representatives(world_poses, world, robot_cfg,
-                                   num_seeds, batch_size, roll_step_deg):
-    """viewpoint마다 광축(+z) 둘레 roll 각도들로 IK 후보 생성 (wr3 고정 안 함).
+def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg=30.0,
+                         tilt_augment=False, tilt_angles_deg=(5.0, 10.0),
+                         tilt_azimuths=8):
+    """Return flattened nominal + roll + tilt pose targets and their metadata."""
+    records = []
+    roll_angles = np.arange(roll_step_deg, 360.0 - 1e-9, roll_step_deg)
+    azimuths = np.linspace(0.0, 360.0, int(tilt_azimuths), endpoint=False)
+    for vp, pose in enumerate(np.asarray(world_poses, dtype=np.float64)):
+        R, p = pose[:3, :3], pose[:3, 3]
+        surf = p + R[:, 2] * wd_m
+        records.append((vp, "nominal", 0.0, 0.0, np.nan, p.copy(), R.copy()))
+        if roll_augment:
+            for angle in roll_angles:
+                Rp = R @ Rotation.from_euler("z", angle, degrees=True).as_matrix()
+                records.append((vp, "roll", float(angle), 0.0, np.nan, p.copy(), Rp))
+        if tilt_augment:
+            for tilt in tilt_angles_deg:
+                for az in azimuths:
+                    axis = R @ np.array([np.cos(np.deg2rad(az)), np.sin(np.deg2rad(az)), 0.0])
+                    Rp = Rotation.from_rotvec(axis * np.deg2rad(tilt)).as_matrix() @ R
+                    pp = surf - Rp[:, 2] * wd_m
+                    records.append((vp, "tilt", 0.0, float(tilt), float(az), pp, Rp))
+    positions = np.stack([r[5] for r in records])
+    rotations = np.stack([r[6] for r in records])
+    return {
+        "viewpoint": np.asarray([r[0] for r in records], dtype=np.int32),
+        "variant": np.asarray([r[1] for r in records], dtype="U16"),
+        "roll_deg": np.asarray([r[2] for r in records], dtype=np.float64),
+        "tilt_deg": np.asarray([r[3] for r in records], dtype=np.float64),
+        "tilt_azimuth_deg": np.asarray([r[4] for r in records], dtype=np.float64),
+        "position": positions,
+        "quaternion": PT.rot_to_quat_batch(rotations),
+        "rotation": rotations,
+    }
 
-    rolled pose 를 IK 로 풀면 pan~wrist_2 분기가 다양하게 확보돼, GLNS 가 wrist flip 대신
-    rolled 자세로 이웃과 pointing 연속인 해를 고를 수 있다. wr3 는 각 해가 실제로 가진 값을
-    유지한다(나중에 5-DoF reconfig 비용이 wr3 차이를 reconfig 로 안 세고, 2차 L2 가 과한
-    roll 만 억제). solve_ik_multi_seed 가 내부에서 normalize_joints 처리.
-    """
-    angles = np.arange(0.0, 360.0, roll_step_deg)
-    n_roll = len(angles)
-    n_vp = len(world_poses)
-    rotz = np.stack([Rotation.from_euler("z", a, degrees=True).as_matrix() for a in angles])
-    Rs = np.empty((n_vp * n_roll, 3, 3), dtype=np.float64)
-    ps = np.empty((n_vp * n_roll, 3), dtype=np.float64)
-    for v in range(n_vp):
-        Rs[v * n_roll:(v + 1) * n_roll] = world_poses[v, :3, :3] @ rotz   # (n_roll,3,3)
-        ps[v * n_roll:(v + 1) * n_roll] = world_poses[v, :3, 3]
-    quats = PT.rot_to_quat_batch(Rs)
-    print(f"  Roll-augmented IK: {n_vp} viewpoints × {n_roll} rolls "
-          f"(step {roll_step_deg:.0f}°) = {n_vp * n_roll} poses...")
-    sols, succ = PT.solve_ik_multi_seed(
-        robot_cfg, world, ps, quats, num_seeds=num_seeds, batch_size=batch_size,
+
+def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
+                                   num_seeds, batch_size, wrist3_fixed,
+                                   lock_nominal_wrist3):
+    sols, success = PT.solve_ik_multi_seed(
+        robot_cfg, world, targets["position"], targets["quaternion"],
+        num_seeds=num_seeds, batch_size=batch_size,
     )
-    seeds, dof = sols.shape[1], sols.shape[2]
-    sols = sols.reshape(n_vp, n_roll * seeds, dof)   # viewpoint 별로 전 roll 후보 묶기
-    succ = succ.reshape(n_vp, n_roll * seeds)
-    return PT.cluster_ik_solutions(sols, succ)
+    representatives, metadata = [], []
+    for vp in range(n_viewpoints):
+        kept, fields = [], {key: [] for key in (
+            "variant", "roll_deg", "tilt_deg", "tilt_azimuth_deg",
+            "target_position", "target_quaternion",
+        )}
+        for pose_idx in np.flatnonzero(targets["viewpoint"] == vp):
+            for q in sols[pose_idx][success[pose_idx]]:
+                q = np.asarray(q, dtype=np.float64).copy()
+                if lock_nominal_wrist3:
+                    q[-1] = wrist3_fixed
+                if any(np.max(np.abs(q - prior)) <= PT.DP_CANDIDATE_DEDUP_RAD for prior in kept):
+                    continue
+                kept.append(q)
+                fields["variant"].append(targets["variant"][pose_idx])
+                fields["roll_deg"].append(targets["roll_deg"][pose_idx])
+                fields["tilt_deg"].append(targets["tilt_deg"][pose_idx])
+                fields["tilt_azimuth_deg"].append(targets["tilt_azimuth_deg"][pose_idx])
+                fields["target_position"].append(targets["position"][pose_idx])
+                fields["target_quaternion"].append(targets["quaternion"][pose_idx])
+        representatives.append(np.asarray(kept, dtype=np.float64).reshape(-1, 6))
+        metadata.append({
+            key: np.asarray(value, dtype=("U16" if key == "variant" else np.float64))
+            for key, value in fields.items()
+        })
+    return representatives, metadata
 
 
 # ============================================================================
@@ -438,12 +504,9 @@ def main() -> int:
     print(f"  Reconfig cost: base joints={base_joints}, wrist joints={wrist_joints}, "
           f"L2 weights={joint_weights.round(3).tolist()}, "
           f"penalty base:wrist = {weight_base}:{weight_wrist}")
-    # Effective per-tier joint indices used to *re-derive* is_reconfiguration from
-    # the chosen tour; must mirror build_gtsp_problem (roll-augment drops wr3).
-    base_idx_arr = np.asarray(sorted(set(base_joints)), dtype=int)
-    wrist_idx_arr = np.asarray(
-        sorted(set(wrist_joints) - ({5} if args.roll_augment else set())), dtype=int,
-    )
+    # Strict objective/verifier definitions: q0:q3 base, q0:q6 any.
+    base_idx_arr = np.arange(3, dtype=int)
+    any_idx_arr = np.arange(6, dtype=int)
 
     source_path = (args.viewpoints.resolve() if args.viewpoints is not None
                    else config.get_viewpoint_path(args.object, args.num_viewpoints).resolve())
@@ -466,29 +529,27 @@ def main() -> int:
 
     print("[3/6] Computing fresh collision-aware IK candidates...")
     world_poses = PT.build_camera_poses(positions, normals, source["wd_m"])
-    pose_positions = world_poses[:, :3, 3]
-    pose_quats = PT.rot_to_quat_batch(world_poses[:, :3, :3])
     world = PT.build_collision_world(args.object)
     robot_cfg = PT._resolve_robot_config(PT.ROBOT_CONFIG)
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
-    if args.roll_augment:
-        representatives = _roll_augmented_representatives(
-            world_poses, world, robot_cfg, args.num_seeds, args.ik_batch_size,
-            args.roll_step_deg,
-        )
-        # wr3 고정 안 함 — rolled 후보의 실제 wr3 유지(5-DoF reconfig 비용이 처리).
-    else:
-        all_solutions, all_success = PT.solve_ik_multi_seed(
-            robot_cfg, world, pose_positions, pose_quats,
-            num_seeds=args.num_seeds, batch_size=args.ik_batch_size,
-        )
-        representatives = PT.cluster_ik_solutions(all_solutions, all_success)
-        for reps in representatives:
-            if len(reps):
-                reps[:, -1] = wrist3_fixed
-    removed_collision = _collision_filter_representatives(representatives, robot_cfg, world)
-    candidate_counts = np.asarray([len(reps) for reps in representatives], dtype=np.int32)
-    reachable = candidate_counts > 0
+    targets = _build_pose_variants(
+        world_poses, source["wd_m"], roll_augment=args.roll_augment,
+        roll_step_deg=args.roll_step_deg, tilt_augment=args.tilt_augment,
+        tilt_angles_deg=args.tilt_angles_deg, tilt_azimuths=args.tilt_azimuths,
+    )
+    print(f"  Pose variants: {len(targets['position'])} total "
+          f"({len(targets['position']) / n_viewpoints:.0f}/viewpoint)")
+    representatives_raw, candidate_metadata_raw = _solve_pose_variant_candidates(
+        targets, n_viewpoints, world, robot_cfg, args.num_seeds, args.ik_batch_size,
+        wrist3_fixed, lock_nominal_wrist3=not (args.roll_augment or args.tilt_augment),
+    )
+    removed_collision = _collision_filter_representatives(
+        representatives_raw, robot_cfg, world, candidate_metadata_raw,
+    )
+    candidate_counts_raw = np.asarray(
+        [len(reps) for reps in representatives_raw], dtype=np.int32,
+    )
+    reachable = candidate_counts_raw > 0
     print(f"  Reachable: {int(reachable.sum())}/{n_viewpoints}; "
           f"collision candidates removed: {removed_collision}")
     if not np.any(reachable):
@@ -497,6 +558,24 @@ def main() -> int:
     print("[4/6] Recomputing induced Delaunay components...")
     induced_edges, component_id, components = induce_adjacency(graph_edges, reachable)
     print(f"  {len(components)} components after dropping unreachable viewpoints")
+
+    cap_by_viewpoint = np.ones(n_viewpoints, dtype=np.int32)
+    component_caps = {}
+    for cid, members in enumerate(components):
+        cap = effective_candidate_cap(
+            len(members), args.max_candidates_per_viewpoint, args.matrix_target_mib,
+        )
+        cap_by_viewpoint[members] = cap
+        component_caps[cid] = cap
+    representatives, candidate_metadata = prune_candidate_sets(
+        representatives_raw, candidate_metadata_raw, induced_edges, cap_by_viewpoint,
+        np.deg2rad(args.reconfig_threshold_deg), joint_weights,
+        reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
+    )
+    candidate_counts = np.asarray([len(reps) for reps in representatives], dtype=np.int32)
+    if len(components):
+        print("  Candidate caps: " + ", ".join(
+            f"component {cid}=K{component_caps[cid]}" for cid in range(len(components))))
 
     print("[5/6] Solving one open GTSP per component...")
     threshold_rad = np.deg2rad(args.reconfig_threshold_deg)
@@ -513,7 +592,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="delaunay_glns_") as temp_dir:
         temp_root = Path(temp_dir)
         for cid, members in enumerate(components):
-            print(f"  component {cid}: {len(members)} viewpoints")
+            print(f"  component {cid}: {len(members)} viewpoints, K_eff={component_caps[cid]}")
             feasibility_status, witness = find_hamiltonian_open_path(
                 members, induced_edges, timeout_s=args.feasibility_timeout,
             )
@@ -522,6 +601,8 @@ def main() -> int:
                 "status": "pending",
                 "reason": "",
                 "feasibility_witness": witness,
+                "candidate_counts": candidate_counts[members],
+                "candidate_counts_raw": candidate_counts_raw[members],
             }
             if witness is None:
                 base.update(
@@ -549,7 +630,17 @@ def main() -> int:
                     is_reconfiguration_base=np.empty((0,), dtype=bool),
                     is_reconfiguration_wrist=np.empty((0,), dtype=bool),
                     num_reconfigurations=0, num_reconfigurations_base=0,
-                    num_reconfigurations_wrist=0, solver_seconds=0.0, matrix_mib=0.0,
+                    num_reconfigurations_any=0, num_reconfigurations_wrist=0,
+                    objective_base_cost=0, objective_any_cost=0,
+                    objective_tilt_cost=int(round((candidate_metadata[viewpoint]["tilt_deg"][candidate] / 5.0) ** 2)),
+                    objective_joint_cost=0,
+                    selected_pose_variant=np.asarray([candidate_metadata[viewpoint]["variant"][candidate]]),
+                    selected_roll_deg=np.asarray([candidate_metadata[viewpoint]["roll_deg"][candidate]]),
+                    selected_tilt_deg=np.asarray([candidate_metadata[viewpoint]["tilt_deg"][candidate]]),
+                    selected_tilt_azimuth_deg=np.asarray([candidate_metadata[viewpoint]["tilt_azimuth_deg"][candidate]]),
+                    selected_target_position=np.asarray([candidate_metadata[viewpoint]["target_position"][candidate]]),
+                    selected_target_quaternion=np.asarray([candidate_metadata[viewpoint]["target_quaternion"][candidate]]),
+                    solver_seconds=0.0, matrix_mib=0.0,
                 )
                 component_results.append(base)
                 continue
@@ -574,7 +665,11 @@ def main() -> int:
                     reconfig_wrist_joints=wrist_joints,
                     reconfig_weight_base=weight_base,
                     reconfig_weight_wrist=weight_wrist,
-                    reconfig_exclude_last=args.roll_augment,
+                    reconfig_exclude_last=False,
+                    candidate_tilt_costs=[
+                        np.rint((np.asarray(md["tilt_deg"]) / 5.0) ** 2).astype(np.int64)
+                        for md in candidate_metadata
+                    ],
                 )
                 instance = temp_root / f"component_{cid:03d}.gtsp"
                 tour_file = temp_root / f"component_{cid:03d}.tour.txt"
@@ -592,33 +687,55 @@ def main() -> int:
                 ])
                 diff = np.diff(selected, axis=0)
                 absd = np.abs(diff)
-                # base/wrist 그룹 L∞ 를 같은 29° 임계로 판정 — build_gtsp_problem 과 동일.
-                linf_base = (np.max(absd[:, base_idx_arr], axis=1) if base_idx_arr.size
-                             else np.zeros(len(diff)))
-                linf_wrist = (np.max(absd[:, wrist_idx_arr], axis=1) if wrist_idx_arr.size
-                              else np.zeros(len(diff)))
+                linf_base = np.max(absd[:, base_idx_arr], axis=1)
+                linf_any = np.max(absd[:, any_idx_arr], axis=1)
                 linf = np.max(absd, axis=1)            # 6-DoF 전체(시각화/호환용)
+                weighted_l2 = np.linalg.norm(diff * joint_weights, axis=1)
                 l2 = np.linalg.norm(diff, axis=1)
                 is_reconfig_base = linf_base > threshold_rad
-                is_reconfig_wrist = linf_wrist > threshold_rad
-                is_reconfig = is_reconfig_base | is_reconfig_wrist
+                is_reconfig_any = linf_any > threshold_rad
+                is_reconfig = is_reconfig_any
+                selected_md = [candidate_metadata[int(vp)] for vp in order]
+                selected_tilt_cost = np.asarray([
+                    int(round((md["tilt_deg"][int(c)] / 5.0) ** 2))
+                    for md, c in zip(selected_md, candidates)
+                ], dtype=np.int64)
                 base.update(
                     status="solved", solver_cost=decoded["cost"],
                     reconfig_unit=problem["reconfig_unit"],
                     reconfig_unit_base=problem["reconfig_unit_base"],
-                    reconfig_unit_wrist=problem["reconfig_unit_wrist"],
+                    reconfig_unit_any=problem["reconfig_unit_any"],
+                    reconfig_unit_wrist=problem["reconfig_unit_any"],
+                    tilt_unit=problem["tilt_unit"],
                     forbidden_cost=problem["forbidden_cost"],
                     joint_cost_scale=problem["joint_cost_scale"],
                     viewpoint_order=order, selected_candidate_index=candidates,
                     selected_joints=selected, edge_linf_rad=linf,
-                    edge_linf_base_rad=linf_base, edge_linf_wrist_rad=linf_wrist,
+                    edge_linf_base_rad=linf_base, edge_linf_wrist_rad=linf_any,
                     edge_l2_rad=l2,
                     is_reconfiguration=is_reconfig,
                     is_reconfiguration_base=is_reconfig_base,
-                    is_reconfiguration_wrist=is_reconfig_wrist,
+                    is_reconfiguration_wrist=is_reconfig_any,
                     num_reconfigurations=int(is_reconfig.sum()),
                     num_reconfigurations_base=int(is_reconfig_base.sum()),
-                    num_reconfigurations_wrist=int(is_reconfig_wrist.sum()),
+                    num_reconfigurations_any=int(is_reconfig_any.sum()),
+                    num_reconfigurations_wrist=int(is_reconfig_any.sum()),
+                    objective_base_cost=int(is_reconfig_base.sum()),
+                    objective_any_cost=int(is_reconfig_any.sum()),
+                    objective_tilt_cost=int(selected_tilt_cost.sum()),
+                    objective_joint_cost=int(np.rint(weighted_l2 * problem["joint_cost_scale"]).sum()),
+                    selected_pose_variant=np.asarray([
+                        md["variant"][int(c)] for md, c in zip(selected_md, candidates)]),
+                    selected_roll_deg=np.asarray([
+                        md["roll_deg"][int(c)] for md, c in zip(selected_md, candidates)]),
+                    selected_tilt_deg=np.asarray([
+                        md["tilt_deg"][int(c)] for md, c in zip(selected_md, candidates)]),
+                    selected_tilt_azimuth_deg=np.asarray([
+                        md["tilt_azimuth_deg"][int(c)] for md, c in zip(selected_md, candidates)]),
+                    selected_target_position=np.stack([
+                        md["target_position"][int(c)] for md, c in zip(selected_md, candidates)]),
+                    selected_target_quaternion=np.stack([
+                        md["target_quaternion"][int(c)] for md, c in zip(selected_md, candidates)]),
                     solver_seconds=elapsed, matrix_mib=matrix_mib,
                 )
                 if debug_root is not None:
@@ -626,7 +743,7 @@ def main() -> int:
                     shutil.copy2(tour_file, debug_root / tour_file.name)
                 print(f"    SOLVED: reconfigs={int(is_reconfig.sum())} "
                       f"(base={int(is_reconfig_base.sum())}, "
-                      f"wrist={int(is_reconfig_wrist.sum())}), "
+                      f"any={int(is_reconfig_any.sum())}), "
                       f"cost={decoded['cost']}, {elapsed:.2f}s")
                 if args.tilt_repair and len(order) >= 2:
                     try:
@@ -645,7 +762,7 @@ def main() -> int:
                     if (repaired or dropped) and len(rep_sel) >= 1:
                         rep_sel = np.stack(rep_sel)
                         fields = _path_reconfig_fields(
-                            rep_sel, threshold_rad, base_idx_arr, wrist_idx_arr)
+                            rep_sel, threshold_rad, base_idx_arr, any_idx_arr)
                         base.update(
                             viewpoint_order=np.asarray(rep_order, dtype=np.int32),
                             selected_candidate_index=np.asarray(rep_cand, dtype=np.int32),
@@ -665,7 +782,8 @@ def main() -> int:
     failed = [c for c in component_results if c["status"] != "solved"]
     total_reconfigs = sum(int(c.get("num_reconfigurations", 0)) for c in solved)
     total_reconfigs_base = sum(int(c.get("num_reconfigurations_base", 0)) for c in solved)
-    total_reconfigs_wrist = sum(int(c.get("num_reconfigurations_wrist", 0)) for c in solved)
+    total_reconfigs_any = sum(int(c.get("num_reconfigurations_any", 0)) for c in solved)
+    total_reconfigs_wrist = total_reconfigs_any  # v1 metadata compatibility
     try:
         source_ref = str(source_path.relative_to(PROJECT_ROOT))
     except ValueError:
@@ -680,9 +798,16 @@ def main() -> int:
         "robot_config": PT.ROBOT_CONFIG,
         "num_ik_seeds": args.num_seeds,
         "ik_batch_size": args.ik_batch_size,
-        "wrist3_fixed_rad": (float("nan") if args.roll_augment else wrist3_fixed),
+        "wrist3_fixed_rad": (float("nan") if (args.roll_augment or args.tilt_augment)
+                              else wrist3_fixed),
         "roll_augmented": bool(args.roll_augment),
         "roll_step_deg": float(args.roll_step_deg),
+        "tilt_augmented": bool(args.tilt_augment),
+        "tilt_angles_deg": [float(x) for x in args.tilt_angles_deg],
+        "tilt_azimuths": int(args.tilt_azimuths),
+        "max_candidates_per_viewpoint": int(args.max_candidates_per_viewpoint),
+        "matrix_target_mib": float(args.matrix_target_mib),
+        "max_matrix_mib": float(args.max_matrix_mib),
         "reconfig_threshold_deg": args.reconfig_threshold_deg,
         "joint_weights": joint_weights.astype(float).tolist(),
         "reconfig_base_joints": list(base_joints),
@@ -708,16 +833,18 @@ def main() -> int:
         "failed_components": len(failed),
         "total_reconfigurations": total_reconfigs,
         "total_reconfigurations_base": total_reconfigs_base,
+        "total_reconfigurations_any": total_reconfigs_any,
         "total_reconfigurations_wrist": total_reconfigs_wrist,
         "created_at": datetime.now().isoformat(),
     }
     write_result_hdf5(
         output_path, metadata, reachable, candidate_counts,
         induced_edges, component_id, component_results,
+        candidate_counts_raw=candidate_counts_raw,
     )
     print(f"  GLNS_RESULT_H5 {output_path}")
     print(f"  solved={len(solved)}/{len(components)}, reconfigs={total_reconfigs} "
-          f"(base={total_reconfigs_base}, wrist={total_reconfigs_wrist}), "
+          f"(base={total_reconfigs_base}, any={total_reconfigs_any}), "
           f"unreachable={int((~reachable).sum())}")
     if args.tilt_repair and (repaired_all or dropped_all):
         print(f"  tilt-repair: repaired={len(repaired_all)} {repaired_all}, "

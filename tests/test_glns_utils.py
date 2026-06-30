@@ -7,10 +7,12 @@ import numpy as np
 from common.glns_utils import (
     build_gtsp_problem,
     decode_and_validate_tour,
+    effective_candidate_cap,
     expand_edges_by_hops,
     find_hamiltonian_open_path,
     induce_adjacency,
     parse_glns_tour,
+    prune_candidate_sets,
     read_result_hdf5,
     write_result_hdf5,
     write_simple_gtsp,
@@ -71,8 +73,59 @@ class GlnsUtilsTests(unittest.TestCase):
 
         # vp0 vertex 0 -> vp2 vertex 4 is not a Delaunay transition.
         self.assertEqual(costs[0, 4], problem["forbidden_cost"])
-        # Dummy has zero cost to every real candidate.
+        # Zero-tilt dummy endpoints remain free.
         self.assertTrue(np.all(costs[problem["dummy_vertex"], :-1] == 0))
+
+    def test_strict_tiers_and_dummy_tilt_cost(self):
+        tilt = [np.array([0, 4]), np.array([1, 0]), np.array([0, 0]), np.array([0, 0])]
+        problem = build_gtsp_problem(
+            np.arange(4), self.reps, self.edges, 0.5,
+            candidate_tilt_costs=tilt,
+        )
+        self.assertGreater(problem["tilt_unit"], problem["max_l2_sum"])
+        self.assertGreater(
+            problem["reconfig_unit_any"],
+            problem["max_tilt_sum"] + problem["max_l2_sum"],
+        )
+        self.assertGreater(
+            problem["reconfig_unit_base"],
+            problem["max_any_sum"] + problem["max_tilt_sum"] + problem["max_l2_sum"],
+        )
+        self.assertGreater(problem["forbidden_cost"], problem["max_allowed_tour"])
+        dummy = problem["dummy_vertex"]
+        self.assertEqual(problem["costs"][dummy, 1], 4 * problem["tilt_unit"])
+
+    def test_candidate_cap_and_deterministic_pruning(self):
+        cap = effective_candidate_cap(471, 16, 256.0)
+        self.assertEqual(cap, 12)
+        matrix_mib = (471 * cap + 1) ** 2 * 8 / 1024 ** 2
+        self.assertLessEqual(matrix_mib, 256.0)
+
+        reps = [
+            np.array([[0.0] * 6, [0.1] * 6, [1.0] * 6]),
+            np.array([[0.15] * 6, [1.1] * 6]),
+        ]
+        metadata = []
+        for count in (3, 2):
+            metadata.append({
+                "variant": np.array(["nominal"] + ["tilt"] * (count - 1)),
+                "tilt_deg": np.array([0.0] + [5.0] * (count - 1)),
+                "roll_deg": np.zeros(count),
+                "tilt_azimuth_deg": np.full(count, np.nan),
+                "target_position": np.zeros((count, 3)),
+                "target_quaternion": np.zeros((count, 4)),
+            })
+        kwargs = dict(
+            representatives=reps, metadata=metadata,
+            edges=np.array([[0, 1]], dtype=np.int32),
+            cap_by_viewpoint=np.array([2, 2]), threshold_rad=0.3,
+            joint_weights=np.ones(6),
+        )
+        p1, m1 = prune_candidate_sets(**kwargs)
+        p2, m2 = prune_candidate_sets(**kwargs)
+        np.testing.assert_array_equal(p1[0], p2[0])
+        self.assertEqual(m1[0]["variant"][0], "nominal")
+        self.assertLessEqual(len(p1[0]), 2)
 
     def test_decode_open_tour_and_reject_forbidden_transition(self):
         problem = build_gtsp_problem(
@@ -113,6 +166,12 @@ class GlnsUtilsTests(unittest.TestCase):
             "is_reconfiguration": np.zeros(3, dtype=bool),
             "is_reconfiguration_base": np.zeros(3, dtype=bool),
             "is_reconfiguration_wrist": np.zeros(3, dtype=bool),
+            "selected_pose_variant": np.array(["nominal", "roll", "tilt", "nominal"]),
+            "selected_roll_deg": np.array([0.0, 30.0, 0.0, 0.0]),
+            "selected_tilt_deg": np.array([0.0, 0.0, 5.0, 0.0]),
+            "selected_tilt_azimuth_deg": np.array([np.nan, np.nan, 45.0, np.nan]),
+            "selected_target_position": np.zeros((4, 3)),
+            "selected_target_quaternion": np.zeros((4, 4)),
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -130,6 +189,7 @@ class GlnsUtilsTests(unittest.TestCase):
                 {"object": "synthetic", "object_position": [0, 0, 0]},
                 np.ones(4, dtype=bool), np.full(4, 2), self.edges,
                 np.zeros(4, dtype=np.int32), [component],
+                candidate_counts_raw=np.full(4, 5),
             )
             loaded = read_result_hdf5(result_path)
             self.assertEqual(loaded["components"][0]["status"], "solved")
@@ -143,6 +203,21 @@ class GlnsUtilsTests(unittest.TestCase):
             )
             self.assertEqual(
                 int(loaded["components"][0]["attrs"]["num_reconfigurations_wrist"]), 0,
+            )
+            np.testing.assert_array_equal(loaded["candidate_counts_raw"], np.full(4, 5))
+            np.testing.assert_array_equal(
+                loaded["components"][0]["selected_tilt_deg"],
+                np.array([0.0, 0.0, 5.0, 0.0]),
+            )
+
+            # A v1 file has no raw-count dataset; the reader falls back to pruned counts.
+            import h5py
+            with h5py.File(result_path, "a") as f:
+                f.attrs["format_version"] = 1
+                del f["input/candidate_counts_raw"]
+            loaded_v1 = read_result_hdf5(result_path)
+            np.testing.assert_array_equal(
+                loaded_v1["candidate_counts_raw"], loaded_v1["candidate_counts"],
             )
 
 

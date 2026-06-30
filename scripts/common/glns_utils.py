@@ -19,8 +19,98 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 
-RESULT_FORMAT_VERSION = 1
+RESULT_FORMAT_VERSION = 2
 JOINT_COST_SCALE = 1000
+
+
+def effective_candidate_cap(
+    component_size: int,
+    requested_cap: int = 16,
+    matrix_target_mib: float = 256.0,
+) -> int:
+    """Largest uniform per-viewpoint cap fitting the target dense Int64 matrix."""
+    if component_size <= 0 or requested_cap <= 0 or matrix_target_mib <= 0.0:
+        raise ValueError("component_size, requested_cap and matrix_target_mib must be positive")
+    matrix_bytes = float(matrix_target_mib) * 1024.0 ** 2
+    cap = int(np.floor((np.sqrt(matrix_bytes / 8.0) - 1.0) / component_size))
+    return max(1, min(int(requested_cap), cap))
+
+
+def prune_candidate_sets(
+    representatives: list[np.ndarray],
+    metadata: list[dict[str, np.ndarray]],
+    edges: np.ndarray,
+    cap_by_viewpoint: np.ndarray,
+    threshold_rad: float,
+    joint_weights: np.ndarray,
+    reference_joints: np.ndarray | None = None,
+) -> tuple[list[np.ndarray], list[dict[str, np.ndarray]]]:
+    """Deterministically retain connected, diverse IK candidates per viewpoint.
+
+    Nominal candidates are selected before augmented candidates. Within each
+    pool the greedy ordering is incident base-connectivity, incident full-6D
+    connectivity, lower tilt, greater distance from already selected branches,
+    then lower weighted distance to the reference configuration.
+    """
+    n = len(representatives)
+    if len(metadata) != n or np.asarray(cap_by_viewpoint).shape != (n,):
+        raise ValueError("candidate arrays and cap_by_viewpoint must have matching lengths")
+    weights = np.asarray(joint_weights, dtype=np.float64)
+    ref = np.zeros(6) if reference_joints is None else np.asarray(reference_joints, dtype=np.float64)
+    if weights.shape != (6,) or ref.shape != (6,):
+        raise ValueError("joint_weights and reference_joints must have shape (6,)")
+
+    incident: list[list[int]] = [[] for _ in range(n)]
+    for a, b in np.asarray(edges, dtype=np.int32):
+        incident[int(a)].append(int(b))
+        incident[int(b)].append(int(a))
+
+    out_reps: list[np.ndarray] = []
+    out_meta: list[dict[str, np.ndarray]] = []
+    for vp in range(n):
+        reps = np.asarray(representatives[vp], dtype=np.float64)
+        md = metadata[vp]
+        k = len(reps)
+        cap = min(k, max(1, int(cap_by_viewpoint[vp])))
+        if k <= cap:
+            chosen = list(range(k))
+        else:
+            base_conn = np.zeros(k, dtype=np.int32)
+            any_conn = np.zeros(k, dtype=np.int32)
+            for nb in sorted(set(incident[vp])):
+                other = np.asarray(representatives[nb], dtype=np.float64)
+                if not len(other):
+                    continue
+                delta = np.abs(reps[:, None, :] - other[None, :, :])
+                base_conn += np.any(np.max(delta[..., :3], axis=2) <= threshold_rad, axis=1)
+                any_conn += np.any(np.max(delta, axis=2) <= threshold_rad, axis=1)
+            variants = np.asarray(md["variant"]).astype("U")
+            tilt = np.asarray(md["tilt_deg"], dtype=np.float64)
+            distance = np.linalg.norm((reps - ref) * weights, axis=1)
+            chosen: list[int] = []
+
+            def choose_from(pool: list[int], limit: int) -> None:
+                remaining = list(pool)
+                while remaining and len(chosen) < limit:
+                    def key(i: int):
+                        diversity = (np.inf if not chosen else
+                                     min(np.linalg.norm((reps[i] - reps[j]) * weights)
+                                         for j in chosen))
+                        return (-int(base_conn[i]), -int(any_conn[i]), float(tilt[i]),
+                                -float(diversity), float(distance[i]), int(i))
+                    best = min(remaining, key=key)
+                    chosen.append(best)
+                    remaining.remove(best)
+
+            nominal = [i for i in range(k) if variants[i] == "nominal"]
+            augmented = [i for i in range(k) if variants[i] != "nominal"]
+            choose_from(nominal, cap)
+            choose_from(augmented, cap)
+
+        idx = np.asarray(chosen, dtype=np.int32)
+        out_reps.append(reps[idx])
+        out_meta.append({key: np.asarray(value)[idx] for key, value in md.items()})
+    return out_reps, out_meta
 
 
 def induce_adjacency(
@@ -187,6 +277,7 @@ def build_gtsp_problem(
     reconfig_weight_base: float = 12.0,
     reconfig_weight_wrist: float = 1.0,
     reconfig_exclude_last: bool = False,
+    candidate_tilt_costs: list[np.ndarray] | None = None,
 ) -> dict:
     """Build a complete integer GTSP matrix with Delaunay non-edges forbidden.
 
@@ -194,21 +285,14 @@ def build_gtsp_problem(
     representative is a vertex in that set. A final singleton dummy set opens
     the otherwise cyclic GLNS tour.
 
-    Reconfiguration cost is **joint-differentiated** with a single lexicographic
-    step over the weighted-L2 tiebreak. A base-joint jump (``reconfig_base_joints``,
-    default shoulder_pan/lift/elbow) over the threshold costs
-    ``reconfig_weight_base`` reconfig units; a wrist jump costs
-    ``reconfig_weight_wrist`` units. Both dominate the L2 sum (one reconfig unit
-    already exceeds every L2 cost combined), so the primary objective is to
-    minimize the *weighted* reconfiguration count — trading one base reconfig for
-    up to ``reconfig_weight_base / reconfig_weight_wrist`` wrist reconfigs — and
-    the secondary objective is per-joint-weighted L2 travel. Keeping the ratio
-    finite (a "soft" rather than strict-lexicographic base priority) bounds the
-    cost magnitude at ~n²·max_joint_cost·W_base, which GLNS's heuristic solves
-    far more reliably than a strict n³ tiering. ``joint_weights`` (length 6)
-    scales the L2 term per joint so cheap DOFs (e.g. wrist roll) barely register.
-    Setting ``reconfig_wrist_joints=()`` with even weights reproduces the legacy
-    single-binary behaviour.
+    The integer objective is strict lexicographic, in this order: number of
+    base-joint (q0:q3) reconfigurations, number of any-six-joint
+    reconfigurations, accumulated vertex tilt cost, weighted joint L2 travel.
+    Tilt vertex costs are placed on both incident symmetric edges, including
+    dummy endpoint edges, so every selected pose contributes exactly twice.
+
+    The legacy reconfiguration arguments remain accepted for API compatibility;
+    the strict tiers deliberately use q0:q3 and q0:q6 to match the verifier.
     """
     members = np.asarray(members, dtype=np.int32)
     if len(members) < 2:
@@ -222,19 +306,8 @@ def build_gtsp_problem(
                else np.asarray(joint_weights, dtype=np.float64))
     if weights.shape != (6,) or np.any(weights < 0.0):
         raise ValueError("joint_weights must be 6 non-negative values")
-    base_idx = np.asarray(
-        sorted(int(j) for j in set(reconfig_base_joints)), dtype=np.int32,
-    )
-    wrist_idx = np.asarray(
-        sorted(set(int(j) for j in reconfig_wrist_joints)
-               - ({5} if reconfig_exclude_last else set())),
-        dtype=np.int32,
-    )
-    if (base_idx.size and (base_idx.min() < 0 or base_idx.max() > 5)) or \
-       (wrist_idx.size and (wrist_idx.min() < 0 or wrist_idx.max() > 5)):
-        raise ValueError("reconfig joint indices must be in [0, 5]")
-    if reconfig_weight_base < 1.0 or reconfig_weight_wrist < 1.0:
-        raise ValueError("reconfig weights must be >= 1 (one reconfig must dominate L2)")
+    base_idx = np.arange(3, dtype=np.int32)
+    any_idx = np.arange(6, dtype=np.int32)
 
     member_set = set(int(x) for x in members)
     allowed_view_edges = {
@@ -247,6 +320,7 @@ def build_gtsp_problem(
     vertex_viewpoint: list[int] = []
     vertex_candidate: list[int] = []
     ranges: dict[int, np.ndarray] = {}
+    tilt_by_vertex: list[int] = []
     for viewpoint in members:
         vp = int(viewpoint)
         reps = np.asarray(representatives[vp], dtype=np.float64)
@@ -257,6 +331,13 @@ def build_gtsp_problem(
         sets.append(ids)
         vertex_viewpoint.extend([vp] * len(reps))
         vertex_candidate.extend(range(len(reps)))
+        if candidate_tilt_costs is None:
+            tilt_by_vertex.extend([0] * len(reps))
+        else:
+            tc = np.asarray(candidate_tilt_costs[vp], dtype=np.int64)
+            if tc.shape != (len(reps),) or np.any(tc < 0):
+                raise ValueError(f"viewpoint {vp} tilt costs must have shape ({len(reps)},)")
+            tilt_by_vertex.extend(int(x) for x in tc)
 
     dummy_vertex = len(vertex_viewpoint)
     vertex_viewpoint.append(-1)
@@ -266,7 +347,7 @@ def build_gtsp_problem(
 
     # Compute every allowed IK-pair secondary cost + per-tier L-inf jumps before
     # selecting the exact lexicographic penalties.
-    blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     max_joint_cost = 0
     for a, b in sorted(allowed_view_edges):
         qa = np.asarray(representatives[a], dtype=np.float64)
@@ -278,38 +359,47 @@ def build_gtsp_problem(
         if joint_cost.size:
             max_joint_cost = max(max_joint_cost, int(joint_cost.max()))
         absd = np.abs(diff)
-        # reconfig 판정은 base(pan/lift/elbow) 와 wrist 그룹 L∞ 를 따로 본다.
-        linf_base = (np.max(absd[..., base_idx], axis=2) if base_idx.size
-                     else np.zeros(diff.shape[:2], dtype=np.float64))
-        linf_wrist = (np.max(absd[..., wrist_idx], axis=2) if wrist_idx.size
-                      else np.zeros(diff.shape[:2], dtype=np.float64))
-        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, linf_wrist))
+        # Strict tiers use base q0:q3 and all joints q0:q6.
+        linf_base = np.max(absd[..., base_idx], axis=2)
+        linf_any = np.max(absd[..., any_idx], axis=2)
+        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, linf_any))
 
-    # Soft two-tier penalty over one lexicographic step. ``reconfig_unit`` already
-    # exceeds the worst-case L2 tour sum, so any reconfig dominates L2; base vs
-    # wrist is then a bounded cost ratio (W_base : W_wrist), not an n-fold tiering.
+    # Exact tier bounds. Each unit is one larger than the maximum total cost of
+    # all lower tiers, therefore no amount of lower-tier improvement can trade
+    # against one unit in a higher tier.
     n_real_edges = len(members) - 1
     max_l2_sum = n_real_edges * max_joint_cost
-    reconfig_unit = max_l2_sum + 1
-    reconfig_unit_base = int(round(reconfig_weight_base * reconfig_unit))
-    reconfig_unit_wrist = int(round(reconfig_weight_wrist * reconfig_unit))
-    max_reconfig_sum = n_real_edges * max(reconfig_unit_base, reconfig_unit_wrist)
-    max_allowed_tour = max_reconfig_sum + max_l2_sum
+    max_tilt_vertex = max(tilt_by_vertex, default=0)
+    tilt_unit = max_l2_sum + 1
+    max_tilt_sum = 2 * len(members) * max_tilt_vertex * tilt_unit
+    reconfig_unit_any = max_tilt_sum + max_l2_sum + 1
+    max_any_sum = n_real_edges * reconfig_unit_any
+    reconfig_unit_base = max_any_sum + max_tilt_sum + max_l2_sum + 1
+    max_allowed_tour = (
+        n_real_edges * reconfig_unit_base + max_any_sum
+        + max_tilt_sum + max_l2_sum
+    )
     forbidden_cost = max_allowed_tour + 1
+    if forbidden_cost > np.iinfo(np.int64).max:
+        raise OverflowError("strict lexicographic GTSP costs exceed Int64")
     costs = np.full((n_vertices, n_vertices), forbidden_cost, dtype=np.int64)
+    tilt_arr = np.asarray(tilt_by_vertex, dtype=np.int64)
 
-    for ids_a, ids_b, joint_cost, linf_base, linf_wrist in blocks:
+    for ids_a, ids_b, joint_cost, linf_base, linf_any in blocks:
+        edge_tilt = tilt_arr[ids_a, None] + tilt_arr[ids_b][None, :]
         block = (
             joint_cost
             + (linf_base > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_base
-            + (linf_wrist > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_wrist
+            + (linf_any > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_any
+            + edge_tilt * tilt_unit
         )
         costs[np.ix_(ids_a, ids_b)] = block
         costs[np.ix_(ids_b, ids_a)] = block.T
 
-    # Dummy breaks the cycle at no cost, leaving start and end viewpoints free.
-    costs[dummy_vertex, :dummy_vertex] = 0
-    costs[:dummy_vertex, dummy_vertex] = 0
+    # Dummy opens the cycle. Endpoint tilt is included so endpoints, like every
+    # internal selected vertex, contribute their tilt cost exactly twice.
+    costs[dummy_vertex, :dummy_vertex] = tilt_arr * tilt_unit
+    costs[:dummy_vertex, dummy_vertex] = tilt_arr * tilt_unit
     costs[dummy_vertex, dummy_vertex] = forbidden_cost
 
     return {
@@ -318,14 +408,20 @@ def build_gtsp_problem(
         "vertex_viewpoint": np.asarray(vertex_viewpoint, dtype=np.int32),
         "vertex_candidate": np.asarray(vertex_candidate, dtype=np.int32),
         "dummy_vertex": int(dummy_vertex),
-        "reconfig_unit": int(reconfig_unit_base),          # back-compat: dominant tier
+        "reconfig_unit": int(reconfig_unit_base),
         "reconfig_unit_base": int(reconfig_unit_base),
-        "reconfig_unit_wrist": int(reconfig_unit_wrist),
+        "reconfig_unit_any": int(reconfig_unit_any),
+        "reconfig_unit_wrist": int(reconfig_unit_any),  # v1 consumer compatibility
+        "tilt_unit": int(tilt_unit),
+        "max_l2_sum": int(max_l2_sum),
+        "max_tilt_sum": int(max_tilt_sum),
+        "max_any_sum": int(max_any_sum),
+        "max_allowed_tour": int(max_allowed_tour),
         "forbidden_cost": int(forbidden_cost),
         "joint_cost_scale": int(joint_cost_scale),
         "joint_weights": weights,
         "reconfig_base_joints": base_idx,
-        "reconfig_wrist_joints": wrist_idx,
+        "reconfig_any_joints": any_idx,
         "allowed_view_edges": allowed_view_edges,
     }
 
@@ -405,6 +501,7 @@ def write_result_hdf5(
     induced_edges: np.ndarray,
     component_id: np.ndarray,
     components: list[dict],
+    candidate_counts_raw: np.ndarray | None = None,
 ) -> Path:
     """Write the standalone GLNS experiment result (not a viewpoint file)."""
     output_path = Path(output_path)
@@ -423,6 +520,10 @@ def write_result_hdf5(
         input_group = f.create_group("input")
         input_group.create_dataset("reachable_mask", data=np.asarray(reachable_mask, dtype=bool))
         input_group.create_dataset("candidate_counts", data=np.asarray(candidate_counts, dtype=np.int32))
+        if candidate_counts_raw is not None:
+            input_group.create_dataset(
+                "candidate_counts_raw", data=np.asarray(candidate_counts_raw, dtype=np.int32),
+            )
         input_group.create_dataset("induced_delaunay_edges", data=np.asarray(induced_edges, dtype=np.int32))
         input_group.create_dataset("component_id", data=np.asarray(component_id, dtype=np.int32))
 
@@ -432,14 +533,19 @@ def write_result_hdf5(
             group.attrs["status"] = str(component["status"])
             group.attrs["reason"] = str(component.get("reason", ""))
             for key in (
-                "solver_cost", "reconfig_unit", "reconfig_unit_base", "reconfig_unit_wrist",
-                "forbidden_cost", "joint_cost_scale",
+                "solver_cost", "reconfig_unit", "reconfig_unit_base", "reconfig_unit_any",
+                "reconfig_unit_wrist", "tilt_unit", "forbidden_cost", "joint_cost_scale",
+                "objective_base_cost", "objective_any_cost", "objective_tilt_cost",
+                "objective_joint_cost", "num_reconfigurations_any",
                 "num_reconfigurations", "num_reconfigurations_base",
                 "num_reconfigurations_wrist", "solver_seconds", "matrix_mib",
             ):
                 if key in component and component[key] is not None:
                     group.attrs[key] = component[key]
             group.create_dataset("members", data=np.asarray(component["members"], dtype=np.int32))
+            for key in ("candidate_counts", "candidate_counts_raw"):
+                if component.get(key) is not None:
+                    group.create_dataset(key, data=np.asarray(component[key], dtype=np.int32))
             if component.get("feasibility_witness") is not None:
                 group.create_dataset(
                     "feasibility_witness",
@@ -457,6 +563,12 @@ def write_result_hdf5(
                     ("is_reconfiguration", bool),
                     ("is_reconfiguration_base", bool),
                     ("is_reconfiguration_wrist", bool),
+                    ("selected_pose_variant", "S16"),
+                    ("selected_roll_deg", np.float64),
+                    ("selected_tilt_deg", np.float64),
+                    ("selected_tilt_azimuth_deg", np.float64),
+                    ("selected_target_position", np.float64),
+                    ("selected_target_quaternion", np.float64),
                 ):
                     value = component.get(key)
                     if value is None:
@@ -478,6 +590,10 @@ def read_result_hdf5(path: Path) -> dict:
             "metadata": metadata,
             "reachable_mask": np.asarray(input_group["reachable_mask"], dtype=bool),
             "candidate_counts": np.asarray(input_group["candidate_counts"], dtype=np.int32),
+            "candidate_counts_raw": np.asarray(
+                input_group.get("candidate_counts_raw", input_group["candidate_counts"]),
+                dtype=np.int32,
+            ),
             "induced_edges": np.asarray(input_group["induced_delaunay_edges"], dtype=np.int32),
             "component_id": np.asarray(input_group["component_id"], dtype=np.int32),
             "components": [],
@@ -496,6 +612,10 @@ def read_result_hdf5(path: Path) -> dict:
                 "selected_joints", "edge_linf_rad", "edge_linf_base_rad",
                 "edge_linf_wrist_rad", "edge_l2_rad", "is_reconfiguration",
                 "is_reconfiguration_base", "is_reconfiguration_wrist",
+                "selected_pose_variant", "selected_roll_deg", "selected_tilt_deg",
+                "selected_tilt_azimuth_deg", "selected_target_position",
+                "selected_target_quaternion",
+                "candidate_counts", "candidate_counts_raw",
             ):
                 component[key] = np.asarray(group[key]) if key in group else None
             result["components"].append(component)

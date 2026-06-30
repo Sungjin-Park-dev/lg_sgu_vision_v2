@@ -770,7 +770,12 @@ class PipelineWindow:
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
                         self._fields["output_suffix"] = self._row("--output-suffix", "dp")
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops (GLNS)", 2)
-                        self._fields["glns_tilt_repair"] = self._row("--tilt-repair (GLNS, 1/0)", 1)
+                        self._fields["glns_roll_augment"] = self._row("--roll-augment (GLNS, 1/0)", 1)
+                        self._fields["glns_tilt_augment"] = self._row("--tilt-augment (GLNS, 1/0)", 1)
+                        self._fields["glns_tilt_angles"] = self._row("--tilt-angles-deg (GLNS)", "5 10")
+                        self._fields["glns_tilt_azimuths"] = self._row("--tilt-azimuths (GLNS)", 8)
+                        self._fields["glns_max_candidates"] = self._row(
+                            "--max-candidates-per-viewpoint (GLNS)", 16)
                 with ui.HStack(height=28, spacing=6):
                     self._btn_generate = ui.Button("Generate Trajectory", clicked_fn=self._on_generate)
                     self._btn_cancel_gen = ui.Button("Cancel", clicked_fn=self._on_cancel_generate)
@@ -1535,7 +1540,17 @@ class PipelineWindow:
             # the joined "CSV saved to ..." LAST, so CSV_PATH_RE captures the joined
             # trajectory (same 14-col schema as DP → preview/publish need no change).
             hops = max(1, int(self._get_field("glns_hops", int)))
-            repair = " --tilt-repair" if int(self._get_field("glns_tilt_repair", int)) != 0 else ""
+            augment = ""
+            if int(self._get_field("glns_roll_augment", int)) != 0:
+                augment += " --roll-augment"
+            if int(self._get_field("glns_tilt_augment", int)) != 0:
+                angles = " ".join(
+                    str(float(x)) for x in self._get_field("glns_tilt_angles", str).split())
+                azimuths = max(1, int(self._get_field("glns_tilt_azimuths", int)))
+                augment += (f" --tilt-augment --tilt-angles-deg {angles}"
+                            f" --tilt-azimuths {azimuths}")
+            max_candidates = max(1, int(self._get_field("glns_max_candidates", int)))
+            augment += f" --max-candidates-per-viewpoint {max_candidates}"
             det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
             pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
             quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
@@ -1543,9 +1558,9 @@ class PipelineWindow:
                 f"{self._uv} run scripts/core/solve_glns_path.py "
                 f"--object {obj!r} --viewpoints {h5!r} "
                 f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops}{repair} --output {det_h5!r} "
+                f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
                 f"&& {self._uv} run scripts/core/verify_glns_trajectory.py "
-                f"--result {det_h5!r} --join --spacing {spacing}"
+                f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing}"
             )
             cmd = ["bash", "-c", shell]
         else:

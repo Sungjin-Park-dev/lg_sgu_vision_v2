@@ -7,9 +7,10 @@ collision-free IK branch를 GLNS로 함께 선택한다.
 ## 모델
 
 - GTSP set: viewpoint
-- GTSP vertex: 해당 viewpoint의 collision-free IK 대표해
+- GTSP vertex: 해당 viewpoint의 collision-free nominal/roll/tilt pose + IK branch
 - 허용 전이: `viewpoints/adjacency/edges`에 포함된 viewpoint 쌍만
-- 목적함수: reconfiguration 개수 최소화 → joint L2 거리 최소화
+- 목적함수(strict lexicographic): base(q0:q3) reconfiguration → 전체 6축
+  reconfiguration → tilt 비용 → weighted joint L2
 - dummy singleton set: GLNS cycle을 open path로 변환
 - 연결 성분은 서로 잇지 않고 별도 run으로 출력
 
@@ -39,10 +40,14 @@ julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
 ```bash
 uv run --no-sync scripts/core/solve_glns_path.py \
   --object sample \
-  --viewpoints data/sample/viewpoint/74/viewpoints_coacd+agglomerative.h5
+  --viewpoints data/sample/viewpoint/74/viewpoints_coacd+agglomerative.h5 \
+  --roll-augment --tilt-augment
 ```
 
 기본값은 IK 100 seeds, reconfiguration threshold 29°, GLNS `fast`, 성분당 30초다.
+augmentation을 켜면 viewpoint당 nominal 1 + roll 11 + tilt 16 pose를 풀고, IK 후보를
+연결성 기준으로 기본 16개까지 pruning한다. 256 MiB dense-matrix 목표에 맞춰
+큰 component는 상한을 자동으로 낮추며 512 MiB는 hard limit이다.
 결과는 기존 viewpoint 파일과 별개로 다음 위치에 저장된다.
 
 ```text
@@ -99,7 +104,8 @@ GLNS가 고른 joint 순서를 `plan_trajectory.py`의 Phase 4-6
 
 ```bash
 uv run --no-sync scripts/core/verify_glns_trajectory.py \
-  --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5
+  --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5 \
+  --require-full-coverage
 ```
 
 성분별 trajectory CSV는 결과 h5와 같은 디렉토리에 `glns_trajectory_comp{cid}.csv`로 저장된다
@@ -113,3 +119,6 @@ uv run --no-sync scripts/core/verify_glns_trajectory.py \
 - **드롭된 viewpoint** = 연속 scan edge가 densify 충돌하거나 reconfig transit 계획이 실패해
   해당 viewpoint를 건너뛰었다는 뜻 → GLNS 경로가 충돌-aware 이동에서 완전히 보존되지 못함.
 - **충돌-free + 0 드롭** = GLNS 경로가 이동까지 그대로 실행 가능 → 이 방식 채택 가능.
+
+`--require-full-coverage`는 하나라도 드롭되면 해당 component와 joined 궤적을 실패로
+처리한다. 두 GUI의 GLNS 기본 실행은 roll+tilt와 이 검증 옵션을 함께 사용한다.

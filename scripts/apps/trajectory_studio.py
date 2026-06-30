@@ -251,12 +251,25 @@ class TrajectoryStudio:
                 options=["GLNS (solve + verify --join)", "DP (plan_trajectory)"],
                 initial_value="GLNS (solve + verify --join)",
             )
-            self.expand_hops = gui.add_number(
-                "Delaunay expand hops (GLNS)", initial_value=2, min=1, max=4, step=1,
-            )
-            self.tilt_repair = gui.add_checkbox(
-                "Tilt-repair outliers (GLNS)", initial_value=True,
-            )
+            with gui.add_folder("GLNS Advanced"):
+                self.expand_hops = gui.add_number(
+                    "Delaunay expand hops", initial_value=2, min=1, max=4, step=1,
+                )
+                self.roll_augment = gui.add_checkbox("Roll augment", initial_value=True)
+                self.tilt_augment = gui.add_checkbox("Tilt augment", initial_value=True)
+                self.tilt_angles = gui.add_text("Tilt angles deg", initial_value="5 10")
+                self.tilt_azimuths = gui.add_number(
+                    "Tilt azimuths", initial_value=8, min=1, max=32, step=1,
+                )
+                self.max_candidates = gui.add_number(
+                    "Max candidates/viewpoint", initial_value=16, min=1, max=64, step=1,
+                )
+                self.ik_num_seeds = gui.add_number(
+                    "IK seeds/pose", initial_value=32, min=1, max=200, step=1,
+                )
+                self.ik_batch_size = gui.add_number(
+                    "IK pose batch size", initial_value=16, min=1, max=128, step=1,
+                )
             self.spacing = gui.add_number(
                 "Spacing (m)", initial_value=0.01, min=0.002, max=0.05, step=0.001,
             )
@@ -632,21 +645,32 @@ class TrajectoryStudio:
 
         if self.backend_dd.value.startswith("GLNS"):
             hops = max(1, int(round(self.expand_hops.value)))
-            repair = " --tilt-repair" if self.tilt_repair.value else ""
+            augment = ""
+            if self.roll_augment.value:
+                augment += " --roll-augment"
+            if self.tilt_augment.value:
+                angles = " ".join(str(float(x)) for x in self.tilt_angles.value.split())
+                augment += (f" --tilt-augment --tilt-angles-deg {angles}"
+                            f" --tilt-azimuths {int(round(self.tilt_azimuths.value))}")
+            augment += f" --max-candidates-per-viewpoint {int(round(self.max_candidates.value))}"
+            ik_num_seeds = max(1, int(round(self.ik_num_seeds.value)))
+            ik_batch_size = max(1, int(round(self.ik_batch_size.value)))
+            ik_options = f" --num-seeds {ik_num_seeds} --ik-batch-size {ik_batch_size}"
             det_h5 = PROJECT_ROOT / f"data/{obj}/ik/{n}/glns_result_studio.h5"
             det_h5.parent.mkdir(parents=True, exist_ok=True)
             shell = (
                 f"uv run --no-sync scripts/core/solve_glns_path.py "
                 f"--object {obj} --viewpoints '{vp}' "
                 f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops}{repair} --output '{det_h5}' "
+                f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}' "
                 f"&& uv run --no-sync scripts/core/verify_glns_trajectory.py "
-                f"--result '{det_h5}' --join --spacing {spacing}"
+                f"--result '{det_h5}' --join --require-full-coverage --spacing {spacing}"
             )
             cmd = ["bash", "-c", shell]
             self._pending_out = det_h5
             self._pending_kind = "glns"
-            self._log(f"▶ GLNS @ pos={np.round(pos, 3).tolist()}, hops={hops}, sp={spacing} …")
+            self._log(f"▶ GLNS @ pos={np.round(pos, 3).tolist()}, hops={hops}, "
+                      f"seeds={ik_num_seeds}, batch={ik_batch_size}, sp={spacing} …")
         else:
             suffix = self.suffix.value or "dp"
             cmd = [
