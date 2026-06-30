@@ -115,8 +115,8 @@ uv run --no-sync scripts/apps/trajectory_studio.py \
 ```bash
 # (1회성) URDF → USD 변환
 uv run --no-sync python -m urdf_usd_converter \
-    --package "ur_description=$(realpath ur20_description)" \
-    ur20_description/ur20_with_camera.urdf ur20_description/
+    --package "ur_description=$(realpath workcell/robot)" \
+    workcell/robot/ur20_with_camera.urdf workcell/robot/
 
 # 시뮬레이션 + ROS2 bridge
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \

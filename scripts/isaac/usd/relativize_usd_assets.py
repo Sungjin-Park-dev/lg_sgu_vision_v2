@@ -2,7 +2,7 @@
 """Rewrite absolute container asset paths baked into USDs into layer-relative paths.
 
 USDs built inside a container bake absolute asset paths like
-``/workspace/ur20_description/ur20/configuration/materials/textures/UR20_DIFF_8bit_2K.png``.
+``/workspace/workcell/robot/ur20/configuration/materials/textures/UR20_DIFF_8bit_2K.png``.
 On the host the project lives elsewhere, so the referenced asset can't be found:
 
     [Error] [omni.rtx.materials] [UsdToMdl] ... parameter 'diffuse_texture':
@@ -15,13 +15,13 @@ checked out. Idempotent: paths already relative are left untouched.
 
 Mapping assumption: the container mounted the project at ``--container-prefix``
 with the same internal layout as the host ``--host-root`` (the project root), i.e.
-``/workspace/ur20_description/...`` ↔ ``<project>/ur20_description/...``.
+``/workspace/workcell/robot/...`` ↔ ``<project>/workcell/robot/...``.
 
 The USD crate (binary) file-format plugin is only registered inside a Kit app,
 so this runs in a headless SimulationApp like build_object_usd.py / build_ghost_usd.py.
 
 Usage:
-    uv run scripts/isaac/usd/relativize_usd_assets.py                  # scan ur20_description/
+    uv run scripts/isaac/usd/relativize_usd_assets.py                  # scan workcell/
     uv run scripts/isaac/usd/relativize_usd_assets.py --dry-run        # report only, no writes
     uv run scripts/isaac/usd/relativize_usd_assets.py --usd a.usd b.usd
     uv run scripts/isaac/usd/relativize_usd_assets.py --container-prefix /root
@@ -146,8 +146,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--usd", nargs="+", type=Path, default=None,
-                    help="USD file(s) to fix. Default: scan ur20_description/")
-    ap.add_argument("--scan-dir", type=Path, default=PROJECT_ROOT / "ur20_description",
+                    help="USD file(s) to fix. Default: scan workcell/")
+    ap.add_argument("--scan-dir", type=Path, default=PROJECT_ROOT / "workcell",
                     help="Directory to scan for *.usd when --usd is not given")
     ap.add_argument("--container-prefix", default="/workspace",
                     help="Absolute container prefix to strip (default: /workspace)")

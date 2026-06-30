@@ -19,7 +19,7 @@ UR ROS2 Joint Control standalone script for Isaac Sim.
 Loads our local UR20 (camera-attached) and creates an Action Graph that
 subscribes to /joint_states and drives the robot via ArticulationController.
 
-Prerequisite — USD prepared at ur20_description/ur20/ur20.usd
+Prerequisite — USD prepared at workcell/robot/ur20/ur20.usd
 (generated via Isaac Sim's URDF Importer GUI with proper articulation root).
 
 Usage:
@@ -49,12 +49,13 @@ from pathlib import Path
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-UR20_DIR = PROJECT_ROOT / "ur20_description"
-# DEFAULT_USD = UR20_DIR / "ur20" / "ur20.usd"
-DEFAULT_USD = UR20_DIR / "ur20_with_camera.usd"  # usd의 원점이 달라서 공중에 떠있음
-ENV_USD     = UR20_DIR / "environment.usd"
-MOUNT_USD   = UR20_DIR / "ur10_mount.usd"
-TABLE_USD   = UR20_DIR / "thor_table.usd"
+ROBOT_DIR = PROJECT_ROOT / "workcell" / "robot"
+ENV_DIR   = PROJECT_ROOT / "workcell" / "environment"
+# DEFAULT_USD = ROBOT_DIR / "ur20" / "ur20.usd"
+DEFAULT_USD = ROBOT_DIR / "ur20_with_camera.usd"  # usd의 원점이 달라서 공중에 떠있음
+ENV_USD     = ENV_DIR / "environment.usd"
+MOUNT_USD   = ROBOT_DIR / "ur10_mount.usd"
+TABLE_USD   = ENV_DIR / "thor_table.usd"
 
 STAGE_PATH = "/World/UR20"
 MOUNT_PATH = "/World/Mount"
@@ -464,7 +465,7 @@ def main():
         sys.exit(
             f"Robot USD not found: {args.usd_path}\n"
             f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD\n"
-            f"to ur20_description/ur20/ur20.usd"
+            f"to workcell/robot/ur20/ur20.usd"
         )
 
     simulation_app = start_sim(headless=False)

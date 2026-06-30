@@ -6,8 +6,8 @@ unloaded payloads, classes, etc.).
 
 Usage:
     uv run scripts/isaac/usd/inspect_usd.py
-        # defaults to ur20_description/ur20_with_camera.usd
-    uv run scripts/isaac/usd/inspect_usd.py --path ur20_description/ur20/ur20.usd
+        # defaults to workcell/robot/ur20_with_camera.usd
+    uv run scripts/isaac/usd/inspect_usd.py --path workcell/robot/ur20/ur20.usd
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from pxr import Usd, UsdGeom
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_PATH = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.usd"
+DEFAULT_PATH = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
 
 
 def count_types(prims):

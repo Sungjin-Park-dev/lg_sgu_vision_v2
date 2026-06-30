@@ -11,8 +11,8 @@ This is a one-shot file builder — re-run it if the source USD changes.
 
 Usage:
     uv run scripts/isaac/usd/build_ghost_usd.py
-        # uses defaults: ur20_description/ur20_with_camera.usd
-        #             -> ur20_description/ur20_with_camera_ghost.usd
+        # uses defaults: workcell/robot/ur20_with_camera.usd
+        #             -> workcell/robot/ur20_with_camera_ghost.usd
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from pathlib import Path
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SOURCE = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.usd"
-DEFAULT_OUTPUT = PROJECT_ROOT / "ur20_description" / "ur20_with_camera_ghost.usd"
+DEFAULT_SOURCE = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
+DEFAULT_OUTPUT = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_ghost.usd"
 
 PHYSICS_NAME_PARTS = ("Physics", "Physx")
 GHOST_TINT = (0.2, 0.8, 0.9)

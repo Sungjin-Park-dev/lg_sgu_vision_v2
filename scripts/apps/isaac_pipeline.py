@@ -1278,7 +1278,8 @@ class PipelineWindow:
 
         robot_cfg_path = (
             _config.PROJECT_ROOT
-            / "ur20_description"
+            / "workcell"
+            / "robot"
             / _config.DEFAULT_ROBOT_CONFIG
         )
         with open(robot_cfg_path) as f:
@@ -1286,7 +1287,8 @@ class PipelineWindow:
         kin = cfg["robot_cfg"]["kinematics"]
         urdf_path = (
             _config.PROJECT_ROOT
-            / "ur20_description"
+            / "workcell"
+            / "robot"
             / Path(kin["urdf_path"]).name
         )
         sphere_buffer = kin.get("collision_sphere_buffer", 0.0)

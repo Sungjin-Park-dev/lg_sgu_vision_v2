@@ -194,13 +194,13 @@ CORNER_MAX_SLOWDOWN = 2.5
 def _resolve_robot_config(robot_filename: str):
     """Robot YAML 을 dict 로 로드하고 urdf_path/asset_root_path 를 절대경로로 패치.
 
-    탐색 순서: 프로젝트 ur20_description/ → cuRobo content/configs/robot/.
+    탐색 순서: 프로젝트 workcell/robot/ → cuRobo content/configs/robot/.
     """
     import yaml
     from curobo.content import get_robot_configs_path
 
     candidates = [
-        config.PROJECT_ROOT / "ur20_description" / robot_filename,
+        config.PROJECT_ROOT / "workcell" / "robot" / robot_filename,
         Path(get_robot_configs_path()) / robot_filename,
     ]
     yaml_path = next((p for p in candidates if p.exists()), None)
@@ -221,7 +221,7 @@ def _resolve_robot_config(robot_filename: str):
     rel_urdf = kin.get("urdf_path", "")
 
     asset_search = [
-        config.PROJECT_ROOT / "ur20_description",
+        config.PROJECT_ROOT / "workcell" / "robot",
         yaml_path.parent,
     ]
     asset_root = next(

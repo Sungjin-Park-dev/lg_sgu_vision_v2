@@ -109,7 +109,7 @@ d_self  = checker.self_collision_cost.forward(state.robot_spheres)
 - `ee_link` → `tool_frames` (리스트) 로 이름 변경
 - `cspace.retract_config` → `cspace.default_joint_position` 로 이름 변경
 
-**우회**: `_resolve_robot_config()` 헬퍼가 (1) YAML 을 `ur20_description/` 또는
+**우회**: `_resolve_robot_config()` 헬퍼가 (1) YAML 을 `workcell/robot/` 또는
 cuRobo content 경로에서 자동 탐색, (2) `urdf_path` / `asset_root_path` 를 절대경로로
 패치, (3) legacy 키 변환·필터링, (4) 결과 dict 를 모든 `*Cfg.create(robot=...)` 에 전달.
 이로써 cuRobo content 폴더에 robot config 를 별도로 옮길 필요가 사라졌다.

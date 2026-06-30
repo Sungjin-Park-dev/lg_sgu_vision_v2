@@ -91,12 +91,12 @@ def _find_ur_description_parent() -> Path:
 def _make_package_handler():
     """yourdfpy filename_handler: package://ur_description/... → 실제 파일 경로.
 
-    카메라 메쉬(camera_body.obj)는 robot_descriptions 캐시에 없고 ur20_description/camera/
+    카메라 메쉬(camera_body.obj)는 robot_descriptions 캐시에 없고 workcell/robot/camera/
     에만 있으므로 로컬로 매핑한다. (yourdfpy 는 핸들러를 handler(fname=...) 로 호출하므로
     인자 이름이 반드시 `fname` 이어야 한다.)
     """
     parent = _find_ur_description_parent()
-    local_camera = PROJECT_ROOT / "ur20_description" / "camera"
+    local_camera = PROJECT_ROOT / "workcell" / "robot" / "camera"
 
     def handler(fname):
         if fname.startswith("package://"):

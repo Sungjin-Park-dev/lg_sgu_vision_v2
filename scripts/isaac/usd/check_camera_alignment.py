@@ -24,8 +24,8 @@ from pxr import Usd, UsdGeom
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_USD = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.usd"
-DEFAULT_URDF = PROJECT_ROOT / "ur20_description" / "ur20_with_camera.urdf"
+DEFAULT_USD = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
+DEFAULT_URDF = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.urdf"
 DEFAULT_USD_PARENT = "/Root/UR20/wrist_3_link/flange"
 DEFAULT_USD_CAMERA = "/Root/UR20/wrist_3_link/flange/camera_mount/camera_optical_frame"
 

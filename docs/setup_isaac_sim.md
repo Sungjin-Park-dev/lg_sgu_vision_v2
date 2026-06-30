@@ -57,8 +57,8 @@ uv run scripts/isaac/launch_sim.py
 
 ### 3) URDF 파일 선택 + 옵션 설정
 
-- **Input File**: `ur20_description/ur20_with_camera.urdf` 선택
-- **Output Directory**: `ur20_description/ur20/` 같은 새 폴더
+- **Input File**: `workcell/robot/ur20_with_camera.urdf` 선택
+- **Output Directory**: `workcell/robot/ur20/` 같은 새 폴더
 - **Joint Drive Type**: `Position`
 - **Articulation Root**: `base_link` 또는 자동
 - **Self Collision**: 보통 disabled
@@ -70,7 +70,7 @@ uv run scripts/isaac/launch_sim.py
 
 `File → Save As`로 USD 저장:
 ```
-ur20_description/ur20/ur20.usd
+workcell/robot/ur20/ur20.usd
 ```
 
 CLAUDE.md 또는 스크립트가 이 경로를 참조하므로 위치 중요.

@@ -161,7 +161,7 @@ uv run scripts/isaac/scene.py --object sample
 
 - `--no-sync` — `uv sync`가 cuRobo path-install을 건드리지 않도록
 - `--object sample` — 워크셀(테이블/벽/타겟) 함께 로드
-- `--usd-path PATH` — 다른 USD 사용 (기본: `ur20_description/ur20/ur20.usd`)
+- `--usd-path PATH` — 다른 USD 사용 (기본: `workcell/robot/ur20/ur20.usd`)
 
 GUI에 UR20 + 워크셀 표시. ROS2 `/joint_states` 구독 → 시뮬 로봇이 driver 상태 미러링.
 

@@ -16,15 +16,16 @@ import numpy as np
 from isaacsim import SimulationApp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-UR20_DIR = PROJECT_ROOT / "ur20_description"
+ROBOT_DIR = PROJECT_ROOT / "workcell" / "robot"
+ENV_DIR   = PROJECT_ROOT / "workcell" / "environment"
 
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from common import config  # noqa: E402
 
-ENV_USD    = UR20_DIR / "environment.usd"
-ROBOT_USD  = UR20_DIR / "ur20/ur20.usd"
-MOUNT_USD  = UR20_DIR / "ur10_mount.usd"
-TABLE_USD  = UR20_DIR / "thor_table.usd"
+ENV_USD    = ENV_DIR / "environment.usd"
+ROBOT_USD  = ROBOT_DIR / "ur20/ur20.usd"
+MOUNT_USD  = ROBOT_DIR / "ur10_mount.usd"
+TABLE_USD  = ENV_DIR / "thor_table.usd"
 OBJECT_USD = PROJECT_ROOT / "data" / "sample" / "mesh" / "source.usd"
 
 ROBOT_PATH  = "/World/UR20"
