@@ -60,6 +60,12 @@ CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 GHOST_ROOT_PATH = "/World/UR20_preview"
 GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 
+# Trajectory controllers, gated by pipeline mode (only one active at a time):
+#   MoveIt (RViz move_group) → MOVEIT_CONTROLLER
+#   Inspection (publish_trajectory) → INSPECTION_CONTROLLER
+MOVEIT_CONTROLLER = "scaled_joint_trajectory_controller"
+INSPECTION_CONTROLLER = "joint_trajectory_controller"
+
 # Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
 VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
@@ -547,6 +553,26 @@ class ActionGraphSwitch:
 # Omni UI window
 # =============================================================================
 
+def clear_artic_commands(*graph_paths: str) -> None:
+    """Empty the ArticulationController command inputs of the given graphs.
+
+    Used whenever a graph (re)starts driving the robot — on pipeline-mode switch
+    and on Stop/Play — so a stale retained /isaac_joint_commands (or /joint_states)
+    value is not re-applied, which would snap the robot instead of leaving it at
+    its current/reset pose. Mirrors start_isaac_sim_ur20.py's clear behavior.
+    """
+    import omni.graph.core as og
+    for gp in graph_paths:
+        for attr in ("jointNames", "positionCommand"):
+            try:
+                og.Controller.set(
+                    og.Controller.attribute(f"{gp}/ArticulationController.inputs:{attr}"),
+                    [],
+                )
+            except Exception:  # noqa: BLE001 — best effort
+                pass
+
+
 class PipelineWindow:
     """Four-panel Omni UI window: Load / Generate / Preview / Publish + Log."""
 
@@ -554,11 +580,16 @@ class PipelineWindow:
 
     def __init__(self, ghost_root_prim: str, base_link_path: str,
                  chain: "list[GhostJoint]", graph_path: str,
-                 default_object: str, initial_mode: str = "sim"):
+                 default_object: str, initial_mode: str = "sim",
+                 moveit_graph_path: str = "/MoveItGraph",
+                 initial_pipeline_mode: str = "inspection",
+                 articulation_root: str = ""):
         import omni.ui as ui
 
         self._ui = ui
         self._mode = initial_mode  # "sim" (no live ROS) | "real" (ROS robot)
+        # Top-level mode: "inspection" (this whole UI) | "moveit" (MoveIt drives robot).
+        self._pipeline_mode = initial_pipeline_mode
         self._log_lines: list[str] = []
         self._log_model = ui.SimpleStringModel("")
         self._csv_path_model = ui.SimpleStringModel("")
@@ -567,11 +598,20 @@ class PipelineWindow:
         self._gen_runner = SubprocessRunner()
         self._ik_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
+        self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
+        self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
         # Keep ActionGraphSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
         # stable original idle behavior is preserved.
         self._graph = ActionGraphSwitch(graph_path, self._append_log)
+        # Separate switch for the MoveIt bridge graph (/isaac_joint_commands).
+        # Only one of (_graph, _moveit_graph) ticks at a time — see apply_pipeline_mode.
+        self._moveit_graph = ActionGraphSwitch(moveit_graph_path, self._append_log)
+        self._graph_path = graph_path
+        self._moveit_graph_path = moveit_graph_path
+        self._articulation_root = articulation_root
+        self._mode_applied: Optional[str] = None  # last run mode actually applied
         self._preview = PreviewPlayer(
             ghost_root_prim, base_link_path, chain, self._append_log,
         )
@@ -595,6 +635,11 @@ class PipelineWindow:
         self._mode_combo = None
         self._mode_label: Optional["ui.Label"] = None
         self._publish_hint_label: Optional["ui.Label"] = None
+        self._pipeline_combo = None
+        self._pipeline_label: Optional["ui.Label"] = None
+        # Inspection widgets/frames locked (greyed) when pipeline mode = moveit.
+        self._inspection_widgets: list = []
+        self._inspection_frames: list = []
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
@@ -633,12 +678,18 @@ class PipelineWindow:
                 vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
             ):
                 with ui.VStack(height=0, spacing=6):
+                    self._build_panel_pipeline_mode()
                     self._build_panel_mode()
                     self._build_panel_object()
                     self._build_panel_generate()
                     self._build_panel_preview()
                     self._build_panel_publish()
                     self._build_log()
+
+    def _lock(self, widget):
+        """Register an interactive widget so it greys out in MoveIt mode. Returns it."""
+        self._inspection_widgets.append(widget)
+        return widget
 
     def _row(self, label: str, model, width: int = 180):
         ui = self._ui
@@ -660,16 +711,145 @@ class PipelineWindow:
                 raise TypeError(type(model))
 
     # ------------------------------------------------------------------
+    # Pipeline mode panel (Inspection / MoveIt) — top-level selector
+    # ------------------------------------------------------------------
+    def _build_panel_pipeline_mode(self):
+        ui = self._ui
+        with ui.CollapsableFrame("Pipeline Mode", height=0, collapsed=False):
+            with ui.VStack(spacing=4):
+                with ui.HStack(height=26, spacing=8):
+                    ui.Label("Pipeline", width=80)
+                    idx = 1 if self._pipeline_mode == "moveit" else 0
+                    self._pipeline_combo = ui.ComboBox(
+                        idx, "Inspection", "MoveIt")
+                    self._pipeline_combo.model.add_item_changed_fn(
+                        self._on_pipeline_mode_changed)
+                    self._pipeline_label = ui.Label(self._pipeline_text(), width=160)
+
+    def _pipeline_text(self) -> str:
+        if self._pipeline_mode == "moveit":
+            return "● MoveIt (Inspection locked)"
+        return "● Inspection"
+
+    def _on_pipeline_mode_changed(self, *_):
+        if self._pipeline_combo is None:
+            return
+        idx = self._pipeline_combo.model.get_item_value_model().get_value_as_int()
+        self.apply_pipeline_mode("moveit" if idx == 1 else "inspection")
+
+    def apply_pipeline_mode(self, mode: str):
+        """Pipeline mode = command source + UI lock. It does NOT toggle any graph —
+        the Run mode (sim/real) owns graph selection (see apply_mode). Both MoveIt
+        (RViz move_group) and Inspection (Publish panel) ultimately command the same
+        controller; pipeline mode only changes which tool the user drives with and
+        locks the other.
+
+        moveit     → Inspection panels greyed/locked (use RViz to drive the robot).
+        inspection → Inspection panels active (Publish drives the current robot:
+                     Isaac in sim, real robot in real).
+        """
+        self._pipeline_mode = mode
+        self._set_inspection_ui_enabled(mode != "moveit")
+        if mode == "inspection":
+            self._sync_mode_ui()  # restore Publish-button state after unlock
+        self._sync_pipeline_ui()
+        # Activate exactly the controller for this mode so the OTHER source is
+        # blocked at the controller level: MoveIt → scaled_joint_trajectory_controller,
+        # Inspection → joint_trajectory_controller. In Inspection mode scaled is
+        # deactivated, so MoveIt Execute is rejected ("controller not active").
+        # (No-op in real mode if its stack uses the same controller names; best-effort
+        # if the ROS stack isn't up yet.)
+        if mode == "moveit":
+            self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
+        else:
+            self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
+        self._append_log(
+            f"[pipeline] → {mode.upper()} :: "
+            + ("MoveIt active, Inspection locked" if mode == "moveit"
+               else "Inspection active, MoveIt blocked"))
+
+    def _switch_controllers(self, activate: str, deactivate: str):
+        """Activate one trajectory controller and deactivate the other, cancelling any
+        lingering goal on BOTH around the switch (best-effort subprocess; the ROS
+        stack lives in the other shell).
+
+        Why cancel both: if a controller is deactivated mid-goal its action status
+        freezes at EXECUTING, and the relay (which forwards /isaac_joint_commands
+        only while a goal is active) then keeps forwarding the OTHER controller's
+        idle hold command — a state→command→robot→state feedback loop that makes the
+        robot shake. Cancelling the outgoing goal before the switch (its CANCELED
+        status reaches the relay while still active) and the incoming controller's
+        stale goal after the switch clears that, with no timers/deadlines."""
+        if self._ctrl_runner.running:
+            self._ctrl_runner.terminate()
+
+        def cancel(ctrl: str) -> str:
+            return (f"timeout 2 ros2 service call /{ctrl}/follow_joint_trajectory"
+                    "/_action/cancel_goal action_msgs/srv/CancelGoal '{}' "
+                    "2>/dev/null || true")
+
+        shell_cmd = (
+            "source /opt/ros/jazzy/setup.bash && "
+            f"{cancel(deactivate)} ; "
+            f"ros2 control switch_controllers --activate {activate} --deactivate {deactivate} ; "
+            f"{cancel(activate)}"
+        )
+        self._append_log(f"[ctrl] switch: +{activate} -{deactivate} (cancel both)")
+        self._ctrl_runner.start(
+            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
+            on_line=self._append_log,
+            on_exit=lambda rc: self._append_log(f"[ctrl] switch exit={rc}"))
+
+    # Style overrides toggled with the lock so panels also *look* disabled
+    # (this Isaac theme doesn't auto-grey on .enabled=False).
+    _DIM_WIDGET_STYLE = {"color": 0xFF666666}            # dim text/foreground
+    _DIM_FRAME_STYLE = {"CollapsableFrame": {"color": 0xFF666666},
+                        "Label": {"color": 0xFF666666}}
+
+    def _set_inspection_ui_enabled(self, on: bool):
+        """Grey out / re-enable every Inspection widget and panel frame.
+
+        Sets .enabled (blocks input) AND a dimmed style (visual cue); clearing
+        the style with {} reverts to the theme default when re-enabled.
+        """
+        w_style = {} if on else self._DIM_WIDGET_STYLE
+        f_style = {} if on else self._DIM_FRAME_STYLE
+        for w in self._inspection_widgets:
+            try:
+                w.enabled = on
+                w.style = w_style
+            except Exception:  # noqa: BLE001 — best-effort, never fatal
+                pass
+        for f in self._inspection_frames:
+            try:
+                f.enabled = on
+                f.style = f_style
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _sync_pipeline_ui(self):
+        if self._pipeline_label is not None:
+            self._pipeline_label.text = self._pipeline_text()
+            self._pipeline_label.style = {
+                "color": 0xFF3399FF if self._pipeline_mode == "moveit" else 0xFFCCCCCC
+            }
+
+    # ------------------------------------------------------------------
     # Mode panel (sim / real) + helpers
     # ------------------------------------------------------------------
     def _build_panel_mode(self):
         ui = self._ui
-        with ui.CollapsableFrame("Mode", height=0, collapsed=False):
+        # Run mode (sim/real) is a TOP-LEVEL axis like Pipeline mode — it must stay
+        # selectable in BOTH MoveIt and Inspection. So it is NOT added to the
+        # Inspection lock lists (_inspection_frames/_lock).
+        frame = ui.CollapsableFrame("Run Mode (sim / real)", height=0, collapsed=False)
+        with frame:
             with ui.VStack(spacing=4):
                 with ui.HStack(height=26, spacing=8):
                     ui.Label("Run mode", width=80)
                     idx = 0 if self._mode == "sim" else 1
-                    self._mode_combo = ui.ComboBox(idx, "sim (Isaac only)", "real (ROS robot)")
+                    self._mode_combo = ui.ComboBox(
+                        idx, "sim (Isaac only)", "real (ROS robot)")
                     self._mode_combo.model.add_item_changed_fn(self._on_mode_changed)
                     self._mode_label = ui.Label(self._mode_text(), width=120)
                 # ui.Label("sim = Isaac only, no ROS — A Load, B Generate, C Preview.  "
@@ -687,27 +867,73 @@ class PipelineWindow:
         self.apply_mode("sim" if idx == 0 else "real")
 
     def apply_mode(self, mode: str):
-        """Single source of truth for both boot init and live toggles.
+        """Run mode = which robot drives the Isaac articulation:
 
-        real → action graph ticks (Isaac mirrors /joint_states + camera publish),
-        Publish enabled. sim → graph stops (no ROS traffic, robot idle; preview
-        uses the ghost), Publish blocked. No graph nodes are created/destroyed —
-        we only flip the existing graph's tick, so toggling is instant and safe.
+          sim  → Isaac IS the robot: /MoveItGraph drives from /isaac_joint_commands
+                 and publishes /isaac_joint_states + /clock; /ActionGraph mirror OFF.
+          real → Isaac MIRRORS the real robot: /ActionGraph ON (drive from real
+                 /joint_states + cameras); /MoveItGraph's driving + publishing nodes
+                 OFF (so it neither moves Isaac nor feeds the twin loop).
+
+        Cross-mode replay is stopped at the SOURCE: the relay (셸2) is the only thing
+        that feeds /isaac_joint_commands, so the app sets its `forward_enabled`
+        parameter — true in sim, false in real. In real mode the relay discards
+        commands, so a MoveIt Execute done in real mode never reaches Isaac and there
+        is nothing to replay when sim is re-entered (works even if the goal is still
+        active). No rebuild / cancel / timing needed.
+
+        sim↔real also requires relaunching the matching ROS stack (셸2).
         """
         self._mode = mode
-        active = (mode == "real")
-        self._graph.set_active(active)
-        # ActionGraphSwitch falls back to "noop" if it can't find a tick handle;
-        # surface that instead of silently leaving the graph running in sim.
-        if not active and getattr(self._graph, "_mode", None) == "noop":
-            self._append_log(
-                "[mode] WARNING: action graph could not be gated — sim mode may "
-                "still mirror /joint_states.")
+        if mode == "sim":
+            self._set_relay_forwarding(True)   # relay feeds Isaac
+            self._set_moveit_driving(True)     # MoveIt drives Isaac + publishes state/clock
+            clear_artic_commands(self._moveit_graph_path)
+            self._graph.set_active(False)      # /ActionGraph mirror off
+            which = "/MoveItGraph drives (live /isaac_joint_commands)"
+        else:  # real
+            self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
+            self._set_moveit_driving(False)    # MoveIt graph: no drive, no state/clock
+            clear_artic_commands(self._graph_path)
+            self._graph.set_active(True)       # /ActionGraph mirror on
+            which = "/ActionGraph mirrors real /joint_states (twin)"
+        self._mode_applied = mode
         self._sync_mode_ui()
-        self._append_log(
-            f"[mode] → {mode.upper()} :: action graph "
-            f"{'ENABLED' if active else 'DISABLED'}"
-            + ("" if active else " (no /joint_states, no camera publish, Publish blocked)"))
+        self._append_log(f"[run-mode] → {mode.upper()} :: {which}")
+
+    def _set_relay_forwarding(self, on: bool):
+        """Tell the relay (셸2) whether to feed /isaac_joint_commands. This is the
+        mode gate: in real mode the relay discards commands so they never reach
+        Isaac (no buffering, no replay on sim re-entry). Best-effort subprocess."""
+        if self._relay_runner.running:
+            self._relay_runner.terminate()
+        val = "true" if on else "false"
+        cmd = ("source /opt/ros/jazzy/setup.bash && "
+               f"timeout 3 ros2 param set /isaac_joint_command_relay forward_enabled {val} "
+               "2>/dev/null || true")
+        self._append_log(f"[relay] forward_enabled → {val}")
+        self._relay_runner.start(
+            ["bash", "-c", cmd], cwd=PROJECT_ROOT, on_line=self._append_log,
+            on_exit=lambda rc: self._append_log(f"[relay] param set exit={rc}"))
+
+    # /MoveItGraph nodes that are "Isaac IS the robot" duties — enabled in sim,
+    # disabled in real. SubscribeJointCommand is NOT here (harmless when idle). In
+    # real mode, leaving PublishJointState on would feed /isaac_joint_states →
+    # (셸2) /joint_states → /ActionGraph mirror → Isaac → /isaac_joint_states, a
+    # self-driving loop that makes the robot shake; /clock belongs to sim time only.
+    _MOVEIT_SIM_ONLY_NODES = ("ArticulationController", "PublishJointState", "PublishClock")
+
+    def _set_moveit_driving(self, on: bool):
+        """Enable (sim) / disable (real) /MoveItGraph's robot-driving + state/clock
+        publishing nodes, without disabling the whole graph."""
+        import omni.graph.core as og
+        for name in self._MOVEIT_SIM_ONLY_NODES:
+            try:
+                node = og.Controller.node(f"{self._moveit_graph_path}/{name}")
+                if node is not None and hasattr(node, "set_disabled"):
+                    node.set_disabled(not on)
+            except Exception as e:  # noqa: BLE001 — best effort
+                self._append_log(f"[run-mode] toggle {name} failed: {e}")
 
     def _sync_mode_ui(self):
         if self._mode_label is not None:
@@ -721,26 +947,33 @@ class PipelineWindow:
                 "color": 0xFF33CC33 if self._mode == "real" else 0xFF2277EE
             }
         if self._btn_publish is not None:
-            self._btn_publish.enabled = (self._mode == "real") and not self._pub_runner.running
+            # Publish now works in both sim (→ Isaac) and real (→ real robot); it is
+            # available in Inspection pipeline mode (locked in MoveIt mode).
+            self._btn_publish.enabled = (
+                self._pipeline_mode == "inspection") and not self._pub_runner.running
 
     def _build_panel_object(self):
         ui = self._ui
-        with ui.CollapsableFrame("A. Load Object", height=0):
+        frame = ui.CollapsableFrame("A. Load Object", height=0)
+        self._inspection_frames.append(frame)
+        with frame:
             with ui.VStack(spacing=4):
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Object", width=80)
                     default_idx = self._objects.index(self._default_object) \
                         if self._default_object in self._objects else 0
-                    self._object_combo = ui.ComboBox(default_idx, *self._objects)
-                    ui.Button("Load Object", width=110, clicked_fn=self._on_load_object)
-                    ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose)
+                    self._object_combo = self._lock(ui.ComboBox(default_idx, *self._objects))
+                    self._lock(ui.Button("Load Object", width=110, clicked_fn=self._on_load_object))
+                    self._lock(ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose))
                 # ui.Label("Pick an object and Load it, then move/rotate it with the viewport "
                 #          "gizmo (W = move, E = rotate). Its live pose is read at Generate time.",
                 #          height=28, word_wrap=True)
 
     def _build_panel_generate(self):
         ui = self._ui
-        with ui.CollapsableFrame("B. Generate Trajectory (plan_trajectory.py)", height=0):
+        frame = ui.CollapsableFrame("B. Generate Trajectory (plan_trajectory.py)", height=0)
+        self._inspection_frames.append(frame)
+        with frame:
             with ui.VStack(spacing=4):
                 # ui.Label("Pick the object's viewpoints .h5 and Generate. Object name + viewpoint "
                 #          "count are read from the h5 path; the object's live pose comes from the "
@@ -748,67 +981,71 @@ class PipelineWindow:
                 #          height=40, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
-                    ui.StringField(model=self._h5_path_model)
-                    ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5)
+                    self._lock(ui.StringField(model=self._h5_path_model))
+                    self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5))
                 with ui.HStack(height=28, spacing=6):
-                    ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints)
-                    ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints)
+                    self._lock(ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints))
+                    self._lock(ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints))
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_check_ik = ui.Button(
+                    self._btn_check_ik = self._lock(ui.Button(
                         "Check IK Reachability",
                         clicked_fn=self._on_check_ik_reachability,
-                    )
-                    self._btn_cancel_ik = ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik)
+                    ))
+                    self._btn_cancel_ik = self._lock(ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik))
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
                         self._fields["output_suffix"] = self._row("--output-suffix", "dp")
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_generate = ui.Button("Generate Trajectory", clicked_fn=self._on_generate)
-                    self._btn_cancel_gen = ui.Button("Cancel", clicked_fn=self._on_cancel_generate)
+                    self._btn_generate = self._lock(ui.Button("Generate Trajectory", clicked_fn=self._on_generate))
+                    self._btn_cancel_gen = self._lock(ui.Button("Cancel", clicked_fn=self._on_cancel_generate))
 
     def _build_panel_preview(self):
         ui = self._ui
-        with ui.CollapsableFrame("C. Preview in Simulation", height=0):
+        frame = ui.CollapsableFrame("C. Preview in Simulation", height=0)
+        self._inspection_frames.append(frame)
+        with frame:
             with ui.VStack(spacing=4):
                 # ui.Label("Ghost playback inside Isaac — visual only, never touches the real "
                 #          "robot or ROS. Available in both sim and real mode.",
                 #          height=28, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("CSV path", width=80)
-                    ui.StringField(model=self._csv_path_model)
-                    ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv)
+                    self._lock(ui.StringField(model=self._csv_path_model))
+                    self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
                 with ui.HStack(height=28, spacing=6):
-                    ui.Button("Load & Preview", clicked_fn=self._on_load_preview)
-                    ui.Button("Play", clicked_fn=self._on_play)
-                    ui.Button("Pause", clicked_fn=self._on_pause)
-                    ui.Button("Stop", clicked_fn=self._on_stop)
+                    self._lock(ui.Button("Load & Preview", clicked_fn=self._on_load_preview))
+                    self._lock(ui.Button("Play", clicked_fn=self._on_play))
+                    self._lock(ui.Button("Pause", clicked_fn=self._on_pause))
+                    self._lock(ui.Button("Stop", clicked_fn=self._on_stop))
                 with ui.HStack(height=28, spacing=6):
-                    ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres)
-                    ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres)
+                    self._lock(ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres))
+                    self._lock(ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres))
                 with ui.HStack(height=28, spacing=6):
-                    ui.Button("Show FOV Plane", clicked_fn=self._on_show_fov_plane)
-                    ui.Button("Clear FOV Plane", clicked_fn=self._on_clear_fov_plane)
+                    self._lock(ui.Button("Show FOV Plane", clicked_fn=self._on_show_fov_plane))
+                    self._lock(ui.Button("Clear FOV Plane", clicked_fn=self._on_clear_fov_plane))
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("t", width=20)
                     self._slider_model = ui.SimpleFloatModel(0.0)
-                    self._slider = ui.FloatSlider(self._slider_model, min=0.0, max=1.0)
+                    self._slider = self._lock(ui.FloatSlider(self._slider_model, min=0.0, max=1.0))
                     self._slider.model.add_value_changed_fn(self._on_slider)
                 self._status_label = ui.Label("t=0.00s / 0.00s  (no CSV)")
 
     def _build_panel_publish(self):
         ui = self._ui
-        with ui.CollapsableFrame("D. Publish to Real Robot (publish_trajectory.py)", height=0):
+        frame = ui.CollapsableFrame("D. Publish to Real Robot (publish_trajectory.py)", height=0)
+        self._inspection_frames.append(frame)
+        with frame:
             with ui.VStack(spacing=4):
                 # self._publish_hint_label = ui.Label(self._publish_hint_text(),
                 #                                      height=28, word_wrap=True)
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("CSV path", width=80)
-                    ui.StringField(model=self._csv_path_model)
-                    ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv)
+                    self._lock(ui.StringField(model=self._csv_path_model))
+                    self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_publish = ui.Button("Publish to Robot", clicked_fn=self._on_publish)
-                    self._btn_cancel_pub = ui.Button("Cancel Publish", clicked_fn=self._on_cancel_publish)
+                    self._btn_publish = self._lock(ui.Button("Publish to Robot", clicked_fn=self._on_publish))
+                    self._btn_cancel_pub = self._lock(ui.Button("Cancel Publish", clicked_fn=self._on_cancel_publish))
 
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
@@ -1662,11 +1899,10 @@ class PipelineWindow:
     # Publish panel callbacks
     # ------------------------------------------------------------------
     def _on_publish(self):
-        if self._mode != "real":
-            self._append_log(
-                "[publish] BLOCKED — Publish requires REAL mode (live ROS robot). "
-                "Switch the Run mode dropdown to 'real' first.")
-            return
+        # Publish drives the CURRENT robot via the trajectory controller — in sim it
+        # routes to Isaac (sim stack), in real to the real robot. Works in both Run
+        # modes. The Run mode already selected the correct Isaac graph, so we do NOT
+        # toggle graphs here. (The button is UI-locked in MoveIt pipeline mode.)
         if self._pub_runner.running:
             self._append_log("[publish] already running")
             return
@@ -1675,27 +1911,19 @@ class PipelineWindow:
             self._append_log(f"[publish] CSV not found: {csv!r}")
             return
 
-        # Re-enable the Action Graph so Isaac Sim mirrors /joint_states from the
-        # real controller while the trajectory executes. If preview was left
-        # running (or Stop wasn't pressed), the OnPlaybackTick is still disabled
-        # and the UR20 in the viewport would appear frozen.
+        # Ghost preview and Publish both move things in the viewport; stop the ghost
+        # so the two don't fight.
         if self._preview.state.playing:
             self._preview.stop()
-        self._graph.set_active(True)
-        self._append_log("[publish] Action Graph re-enabled for /joint_states mirroring")
 
-        rd = os.environ.get("ROS_DISTRO")
-        domain = os.environ.get("ROS_DOMAIN_ID", "(unset)")
-        if rd:
-            self._append_log(
-                f"[publish] ROS_DISTRO={rd} ROS_DOMAIN_ID={domain} — "
-                "Isaac was launched with ROS sourced; potential FastDDS conflict. Proceeding."
-            )
-
+        # Route by Run mode so Inspection is independent of which 셸2 stack is up:
+        #   sim  → stream straight to Isaac (/isaac_joint_commands); no 셸2 needed.
+        #   real → send to the real robot's trajectory controller (needs real 셸2).
+        target = "isaac" if self._mode == "sim" else "controller"
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
-            f"exec {self._uv} run scripts/core/publish_trajectory.py "
-            f"--csv {csv!r}"
+            f"exec {self._uv} run --no-sync scripts/core/publish_trajectory.py "
+            f"--csv {csv!r} --target {target}"
         )
         cmd = ["bash", "-c", shell_cmd]
 
@@ -1713,8 +1941,26 @@ class PipelineWindow:
 
     def _on_cancel_publish(self):
         if self._pub_runner.running:
-            self._append_log("[publish] terminating...")
+            self._append_log("[publish] terminating publisher...")
             self._pub_runner.terminate()
+        if self._mode == "sim":
+            # sim streams directly to /isaac_joint_commands — killing the publisher
+            # stops the stream immediately and Isaac holds the last commanded pose.
+            # There is no controller goal to cancel.
+            self._append_log("[publish] sim stream stopped (Isaac holds current pose)")
+            return
+        # real: the controller already holds the whole trajectory goal and keeps
+        # executing it, so terminating the publisher is not enough — cancel the goal.
+        shell_cmd = (
+            "source /opt/ros/jazzy/setup.bash && "
+            f"timeout 3 ros2 service call /{INSPECTION_CONTROLLER}/follow_joint_trajectory"
+            "/_action/cancel_goal action_msgs/srv/CancelGoal '{}'"
+        )
+        self._append_log(f"[publish] cancelling goals on {INSPECTION_CONTROLLER}")
+        self._ctrl_runner.start(
+            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
+            on_line=self._append_log,
+            on_exit=lambda rc: self._append_log(f"[publish] cancel exit={rc}"))
 
     # ------------------------------------------------------------------
     # Per-frame pump
@@ -1723,6 +1969,16 @@ class PipelineWindow:
         self._gen_runner.pump()
         self._ik_runner.pump()
         self._pub_runner.pump()
+        self._ctrl_runner.pump()
+        self._relay_runner.pump()
+        # While a Publish trajectory is executing, lock BOTH mode combos so the user
+        # can't switch pipeline mode (would deactivate the inspection controller and
+        # abort the trajectory) OR run mode (sim/real) mid-execution.
+        executing = self._pub_runner.running
+        if self._pipeline_combo is not None:
+            self._pipeline_combo.enabled = not executing
+        if self._mode_combo is not None:
+            self._mode_combo.enabled = not executing
         self.step_preview(dt)
 
 
@@ -1754,6 +2010,11 @@ def main():
     graph_path = urctl.build_action_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
+    # Separate MoveIt bridge graph (/isaac_joint_commands → robot, robot → /isaac_joint_states).
+    # Gated independently from the inspection graph by the top-level pipeline mode.
+    moveit_graph_path = urctl.build_moveit_graph(articulation_root)
+    simulation_app.update()
+
     # Physics-free ghost overlay for trajectory preview. Built once offline
     # by scripts/isaac/usd/build_ghost_usd.py — referencing it here
     # should add zero physics state and leave the real /World/UR20
@@ -1780,6 +2041,9 @@ def main():
         graph_path=graph_path,
         default_object=(args.object or "sample"),
         initial_mode=args.mode,
+        moveit_graph_path=moveit_graph_path,
+        initial_pipeline_mode=args.pipeline_mode,
+        articulation_root=articulation_root,
     )
 
     simulation_context.initialize_physics()
@@ -1788,6 +2052,10 @@ def main():
     # Apply the initial mode now that the graph exists and playback has started:
     # default sim → graph tick OFF from frame 0 (no /joint_states, no publish).
     window.apply_mode(args.mode)
+    # Then apply the top-level pipeline mode: inspection (default) leaves the
+    # above in place + blocks MoveIt; moveit flips to the MoveIt graph and locks
+    # the Inspection UI.
+    window.apply_pipeline_mode(args.pipeline_mode)
 
     # Stand the robot at the configured start pose instead of the all-zero USD
     # default. Sim mode only — in real mode the action graph mirrors the live
@@ -1805,14 +2073,49 @@ def main():
             window._append_log(
                 f"[start-pose] failed ({e}); robot stays at USD default")
 
+    # Stop/Play handling: on each transition clear both graphs' ArticulationController
+    # commands (so a stale retained command isn't re-applied → no snap), and on Play
+    # restore the configured start pose (Isaac resets the articulation to its USD
+    # default = zeros on Stop; we want it back at ROBOT_START_STATE, like boot).
+    # With the relay no longer holding an idle setpoint, set_start_pose sticks.
+    from common import config as _cfg
+
     last_t = None
     import time as _time
+    was_playing = simulation_context.is_playing()
+    restore_pending = False  # restore start pose after Play (once a step has run)
     while simulation_app.is_running():
         now = _time.time()
         dt = 0.0 if last_t is None else (now - last_t)
         last_t = now
+        is_playing = simulation_context.is_playing()
+        if is_playing != was_playing:
+            # Clear stale commands before the next step so they aren't re-applied.
+            clear_artic_commands(graph_path, moveit_graph_path)
+            if is_playing:
+                # Restore start pose only in sim (Isaac is the robot). In real mode
+                # the /ActionGraph mirror re-drives Isaac from the live /joint_states,
+                # so forcing a start pose would just fight the twin.
+                restore_pending = (window._mode == "sim")
+                window._append_log(
+                    "[playback] resumed; cleared commands"
+                    + ("; restoring start pose." if restore_pending else " (real: twin mirrors robot)."))
+            else:
+                window._append_log("[playback] paused/stopped; cleared command inputs.")
+        was_playing = is_playing
         window.pump(dt)
         simulation_context.step(render=True)
+        # After a step has bound the physics view, restore the configured start pose
+        # (Isaac reset the robot to USD default on Stop). Retry until it succeeds.
+        if restore_pending and is_playing:
+            try:
+                urctl.set_start_pose(articulation_root, JOINT_NAMES, _cfg.ROBOT_START_STATE)
+                restore_pending = False
+                window._append_log(
+                    "[playback] start pose restored "
+                    f"{np.rad2deg(_cfg.ROBOT_START_STATE).round(1).tolist()} deg.")
+            except Exception:  # noqa: BLE001 — not ready yet; retry next frame
+                pass
 
     simulation_context.stop()
     simulation_app.close()
