@@ -62,6 +62,7 @@ MOUNT_PATH = "/World/Mount"
 TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
 ACTION_GRAPH_PATH = "/ActionGraph"
+MOVEIT_GRAPH_PATH = "/MoveItGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
 CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 
@@ -87,6 +88,12 @@ def parse_args(argv=None):
     parser.add_argument("--mode", choices=["sim", "real"], default="sim",
                         help="sim = Isaac-only, no live ROS traffic (default); "
                              "real = mirror /joint_states + publish to the robot")
+    parser.add_argument("--pipeline-mode", choices=["inspection", "moveit"],
+                        default="inspection",
+                        help="Top-level mode (isaac_pipeline.py only). "
+                             "inspection = viewpoint/trajectory workflow (sim/real); "
+                             "moveit = drive robot from MoveIt via /isaac_joint_commands. "
+                             "Ignored by scene.py.")
     args, _ = parser.parse_known_args(argv)
     return args
 
@@ -456,6 +463,84 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
         print(e)
 
     return ACTION_GRAPH_PATH
+
+
+def build_moveit_graph(articulation_root: str) -> str:
+    """Create the MoveIt(cuMotion) bridge graph. Returns graph path.
+
+    Mirrors build_action_graph but wired for the isaac_ros_cumotion / MoveIt
+    TopicBasedSystem convention (ur.ros2_control.xacro):
+      - subscribe MOVEIT_JOINT_COMMANDS_TOPIC (/isaac_joint_commands) → drive robot
+      - publish   MOVEIT_JOINT_STATES_TOPIC   (/isaac_joint_states)   ← robot state
+
+    Built as a SEPARATE graph from /ActionGraph so the two can be gated
+    independently (the pipeline UI keeps only one ticking at a time).
+    """
+    import omni.graph.core as og
+    import omni.usd
+    from isaacsim.core.utils import prims
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
+    import config as _config
+
+    # Idempotency guard (see build_action_graph).
+    stage = omni.usd.get_context().get_stage()
+    if stage is not None and stage.GetPrimAtPath(MOVEIT_GRAPH_PATH).IsValid():
+        prims.delete_prim(MOVEIT_GRAPH_PATH)
+
+    create_nodes = [
+        ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+        ("ROS2Context", "isaacsim.ros2.bridge.ROS2Context"),
+        ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+        # ROS → Isaac: MoveIt-executed trajectory commands drive the articulation.
+        ("SubscribeJointCommand", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
+        ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
+        # Isaac → ROS: publish current joint state for ros2_control feedback.
+        ("PublishJointState", "isaacsim.ros2.bridge.ROS2PublishJointState"),
+        # Isaac → ROS: publish /clock so use_sim_time consumers (MoveIt,
+        # controller_manager) advance. Without this, ros2_control stalls waiting
+        # for sim time and controllers never activate.
+        ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+    ]
+    connect = [
+        ("OnPlaybackTick.outputs:tick", "SubscribeJointCommand.inputs:execIn"),
+        ("SubscribeJointCommand.outputs:execOut", "ArticulationController.inputs:execIn"),
+        ("ROS2Context.outputs:context", "SubscribeJointCommand.inputs:context"),
+        ("SubscribeJointCommand.outputs:jointNames", "ArticulationController.inputs:jointNames"),
+        ("SubscribeJointCommand.outputs:positionCommand", "ArticulationController.inputs:positionCommand"),
+        ("OnPlaybackTick.outputs:tick", "PublishJointState.inputs:execIn"),
+        ("ROS2Context.outputs:context", "PublishJointState.inputs:context"),
+        ("ReadSimTime.outputs:simulationTime", "PublishJointState.inputs:timeStamp"),
+        ("OnPlaybackTick.outputs:tick", "PublishClock.inputs:execIn"),
+        ("ROS2Context.outputs:context", "PublishClock.inputs:context"),
+        ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+    ]
+    set_values = [
+        ("ArticulationController.inputs:robotPath", articulation_root),
+        ("SubscribeJointCommand.inputs:topicName", _config.MOVEIT_JOINT_COMMANDS_TOPIC),
+        ("PublishJointState.inputs:targetPrim", [articulation_root]),
+        ("PublishJointState.inputs:topicName", _config.MOVEIT_JOINT_STATES_TOPIC),
+        ("PublishClock.inputs:topicName", "/clock"),
+        # Keep sim time monotonic across Stop/Play (default True resets it to 0).
+        # A backward /clock jump confuses MoveIt/controller_manager (use_sim_time)
+        # and makes them take a long time to re-sync after Play; monotonic time
+        # lets them reconnect immediately.
+        ("ReadSimTime.inputs:resetOnStop", False),
+    ]
+
+    try:
+        og.Controller.edit(
+            {"graph_path": MOVEIT_GRAPH_PATH, "evaluator_name": "execution"},
+            {
+                og.Controller.Keys.CREATE_NODES: create_nodes,
+                og.Controller.Keys.CONNECT: connect,
+                og.Controller.Keys.SET_VALUES: set_values,
+            },
+        )
+    except Exception as e:
+        print(e)
+
+    return MOVEIT_GRAPH_PATH
 
 
 def main():

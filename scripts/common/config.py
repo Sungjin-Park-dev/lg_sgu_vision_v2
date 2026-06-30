@@ -38,6 +38,12 @@ INSPECTION_CAMERA_RGB_TOPIC = "/inspection_camera/image_raw"
 INSPECTION_CAMERA_DEPTH_TOPIC = "/inspection_camera/depth"
 INSPECTION_CAMERA_INFO_TOPIC = "/inspection_camera/camera_info"
 
+# MoveIt(cuMotion) 연동 — isaac_ros-dev 의 ur.ros2_control.xacro 와 토픽명이 일치해야 함.
+# (TopicBasedSystem: joint_commands_topic=/isaac_joint_commands,
+#  joint_states_topic=/isaac_joint_states)
+MOVEIT_JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"   # ROS→Isaac (MoveIt 위치 명령)
+MOVEIT_JOINT_STATES_TOPIC = "/isaac_joint_states"       # Isaac→ROS (로봇 상태 피드백)
+
 # 로봇 제약 여부
 ROBOT_HAS_CONSTRAINT = True
 

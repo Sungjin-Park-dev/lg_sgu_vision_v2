@@ -19,6 +19,9 @@ MotionComparator/
 arm_coverage/
 curobo/
 
+# Locally-built ROS overlay (topic_based_ros2_control from source) — build artifact
+ros2_overlay/
+
 # Local tool state
 .claude/
 CLAUDE.md
