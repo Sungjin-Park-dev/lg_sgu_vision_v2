@@ -92,6 +92,17 @@ def _parse_args() -> argparse.Namespace:
                              "(wrist flip 대신 rolled 자세로 pointing 연속 해 선택)")
     parser.add_argument("--roll-step-deg", type=float, default=30.0,
                         help="[--roll-augment] roll sweep 간격 deg (default: 30 → 12 각도)")
+    parser.add_argument("--tilt-repair", action="store_true",
+                        help="GLNS 후 강제 big-base reconfig outlier viewpoint 를 ±tilt 재-IK 로 "
+                             "복구(이웃과 호환되는 해로 교체, 없으면 drop)")
+    parser.add_argument("--tilt-repair-max-deg", type=float, default=10.0,
+                        help="[--tilt-repair] 스캔 허용 off-normal tilt 최대각 deg (default: 10)")
+    parser.add_argument("--tilt-repair-azimuths", type=int, default=8,
+                        help="[--tilt-repair] tilt 방위 수 (default: 8)")
+    parser.add_argument("--big-base-deg", type=float, default=120.0,
+                        help="[--tilt-repair] catastrophic base reconfig 판정 L∞ deg (default: 120)")
+    parser.add_argument("--outlier-max-len", type=int, default=2,
+                        help="[--tilt-repair] outlier 로 볼 branch-run 최대 길이 (default: 2)")
     parser.add_argument("--glns-mode", choices=("fast", "default", "slow"), default="fast")
     parser.add_argument("--glns-timeout", type=int, default=30,
                         help="GLNS max time per component in seconds (default: 30)")
@@ -118,6 +129,11 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--reconfig-threshold-deg must be > 0")
     if not 0.0 < args.roll_step_deg <= 180.0:
         parser.error("--roll-step-deg must be in (0, 180]")
+    if args.tilt_repair:
+        if not 0.0 < args.tilt_repair_max_deg <= 45.0:
+            parser.error("--tilt-repair-max-deg must be in (0, 45]")
+        if args.tilt_repair_azimuths < 1 or args.outlier_max_len < 1 or args.big_base_deg <= 0.0:
+            parser.error("--tilt-repair-azimuths/--outlier-max-len/--big-base-deg must be positive")
     if args.glns_timeout <= 0 or args.feasibility_timeout <= 0.0:
         parser.error("solver timeouts must be > 0")
     if args.max_matrix_mib <= 0.0:
@@ -248,6 +264,153 @@ def _roll_augmented_representatives(world_poses, world, robot_cfg,
     return PT.cluster_ik_solutions(sols, succ)
 
 
+# ============================================================================
+# Post-GLNS branch repair (tilt outliers that force a catastrophic base reconfig)
+# ============================================================================
+
+_BASE_IDX = np.array([0, 1, 2])
+
+
+def _tilt_magnitudes(max_deg: float) -> list[float]:
+    """작은 tilt 부터 시도하도록 오름차순 각도 목록(시야 손실 최소화)."""
+    if max_deg <= 5.0:
+        return [round(float(max_deg), 1)]
+    return [round(float(max_deg) * 0.5, 1), round(float(max_deg), 1)]
+
+
+def _tilt_cone_poses(world_pose, wd_m, tilt_deg, n_azimuth):
+    """표면점 중심 orbit tilt 포즈들(광축 ±tilt_deg, n_azimuth 방위) → (positions, quats wxyz).
+
+    plan_trajectory via-tilt 와 동일한 orbit: WD·표면점 유지, 광축만 기울여 새 팔 분기를 연다.
+    (roll 은 wrist_3-decoupled 라 분기 불변 — tilt 만 분기를 바꾼다.)
+    """
+    R = np.asarray(world_pose[:3, :3], dtype=np.float64)
+    p = np.asarray(world_pose[:3, 3], dtype=np.float64)
+    surf = p + R[:, 2] * wd_m
+    Rs, ps = [], []
+    for az in np.linspace(0.0, 360.0, int(n_azimuth), endpoint=False):
+        u = R @ np.array([np.cos(np.deg2rad(az)), np.sin(np.deg2rad(az)), 0.0])
+        u = u / np.linalg.norm(u)
+        Rp = Rotation.from_rotvec(u * np.deg2rad(tilt_deg)).as_matrix() @ R
+        Rs.append(Rp)
+        ps.append(surf - Rp[:, 2] * wd_m)
+    return np.stack(ps), PT.rot_to_quat_batch(np.stack(Rs))
+
+
+def _tilt_compatible_solution(viewpoint, neighbor_configs, *, world_poses, world, robot_cfg,
+                              wd_m, wrist3_fixed, num_seeds, batch_size,
+                              big_base_rad, tilt_magnitudes_deg, n_azimuth):
+    """outlier viewpoint 를 ±tilt 로 재-IK 해 이웃과 big-base reconfig 없는 collision-free 해 탐색.
+
+    작은 tilt 부터 시도하고, base(어깨/팔꿈치) L∞ 가 모든 이웃에 대해 big_base_rad 미만인 해 중
+    base 변화가 가장 작은 것을 고른다. 찾으면 (config (6,), used_tilt_deg), 없으면 (None, None).
+    """
+    for tilt_deg in tilt_magnitudes_deg:
+        ps, quats = _tilt_cone_poses(world_poses[viewpoint], wd_m, tilt_deg, n_azimuth)
+        sols, succ = PT.solve_ik_multi_seed(
+            robot_cfg, world, ps, quats, num_seeds=num_seeds, batch_size=batch_size)
+        dof = sols.shape[2]
+        reps = PT.cluster_ik_solutions(sols.reshape(1, -1, dof), succ.reshape(1, -1))[0]
+        if not len(reps):
+            continue
+        reps = np.asarray(reps, dtype=np.float64)
+        reps[:, -1] = wrist3_fixed                         # wrist_3 lock(스캔 컨벤션 동일)
+        colliding, _ = PT.batch_collision_check(reps, robot_cfg, world)
+        reps = reps[~np.asarray(colliding, dtype=bool)]
+        best, best_worst = None, np.inf
+        for r in reps:
+            worst = max((float(np.max(np.abs(r[_BASE_IDX] - np.asarray(nb)[_BASE_IDX])))
+                         for nb in neighbor_configs), default=0.0)
+            if worst < big_base_rad and worst < best_worst:
+                best, best_worst = r, worst
+        if best is not None:
+            return best, float(tilt_deg)
+    return None, None
+
+
+def _repair_branch_outliers(order, selected, candidates, *, world_poses, world, robot_cfg,
+                            wd_m, wrist3_fixed, num_seeds, batch_size,
+                            big_base_rad, outlier_max_len, tilt_magnitudes_deg, n_azimuth):
+    """GLNS 경로의 short branch-run(강제 big-base reconfig outlier)을 tilt-repair 또는 drop.
+
+    big-base reconfig edge 가 경로를 branch-run 으로 가른다. 양쪽 run 이 모두 길면 '진짜 전환'
+    으로 보고 손대지 않는다(verify 에서 via-home). 짧은 run(≤outlier_max_len, endpoint 포함)은
+    minority outlier 로 보고, run 바깥 이웃 branch 와 호환되는 tilt 해를 찾으면 교체(작은 모션),
+    못 찾으면 그 viewpoint 를 drop 한다. 반환 (order, selected, candidates, repaired, dropped).
+    """
+    order = [int(v) for v in order]
+    selected = [np.asarray(q, dtype=np.float64).copy() for q in selected]
+    candidates = [int(c) for c in candidates]
+    M = len(order)
+    repaired, dropped, drop_pos = [], [], set()
+    if M < 2:
+        return order, selected, candidates, repaired, dropped
+
+    base_linf = np.array([float(np.max(np.abs(selected[i][:3] - selected[i + 1][:3])))
+                          for i in range(M - 1)])
+    big = base_linf > big_base_rad
+    runs, s = [], 0
+    for i in range(M - 1):
+        if big[i]:
+            runs.append((s, i))
+            s = i + 1
+    runs.append((s, M - 1))
+
+    for a, b in runs:
+        if (b - a + 1) > outlier_max_len:
+            continue
+        if a == 0 and b == M - 1:                  # big edge 없는 전체 경로 → skip
+            continue
+        outside = []                                # run 바깥(확정) 이웃 = 타깃 branch
+        if a - 1 >= 0:
+            outside.append(selected[a - 1])
+        if b + 1 <= M - 1:
+            outside.append(selected[b + 1])
+        for p in range(a, b + 1):
+            v = order[p]
+            sol, tilt_deg = _tilt_compatible_solution(
+                v, outside, world_poses=world_poses, world=world, robot_cfg=robot_cfg,
+                wd_m=wd_m, wrist3_fixed=wrist3_fixed, num_seeds=num_seeds,
+                batch_size=batch_size, big_base_rad=big_base_rad,
+                tilt_magnitudes_deg=tilt_magnitudes_deg, n_azimuth=n_azimuth)
+            if sol is not None:
+                selected[p] = sol
+                candidates[p] = -1                  # tilt-repaired(비-nominal 후보)
+                repaired.append((v, tilt_deg))
+            else:
+                drop_pos.add(p)
+                dropped.append(v)
+
+    keep = [p for p in range(M) if p not in drop_pos]
+    return ([order[p] for p in keep], [selected[p] for p in keep],
+            [candidates[p] for p in keep], repaired, dropped)
+
+
+def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) -> dict:
+    """selected (M,6) → edge L∞/L2 + base/wrist reconfig 필드(solve 직후 계산과 동일 규칙)."""
+    selected = np.asarray(selected, dtype=np.float64)
+    diff = np.diff(selected, axis=0)
+    absd = np.abs(diff)
+    n = len(diff)
+    linf_base = (np.max(absd[:, base_idx_arr], axis=1) if (n and base_idx_arr.size)
+                 else np.zeros(n))
+    linf_wrist = (np.max(absd[:, wrist_idx_arr], axis=1) if (n and wrist_idx_arr.size)
+                  else np.zeros(n))
+    linf = np.max(absd, axis=1) if n else np.empty((0,))
+    l2 = np.linalg.norm(diff, axis=1) if n else np.empty((0,))
+    is_rb = linf_base > threshold_rad
+    is_rw = linf_wrist > threshold_rad
+    is_r = is_rb | is_rw
+    return dict(
+        edge_linf_rad=linf, edge_linf_base_rad=linf_base, edge_linf_wrist_rad=linf_wrist,
+        edge_l2_rad=l2, is_reconfiguration=is_r,
+        is_reconfiguration_base=is_rb, is_reconfiguration_wrist=is_rw,
+        num_reconfigurations=int(is_r.sum()),
+        num_reconfigurations_base=int(is_rb.sum()),
+        num_reconfigurations_wrist=int(is_rw.sum()),
+    )
+
+
 def main() -> int:
     args = _parse_args()
     if config.apply_object_placement(args.object):
@@ -338,6 +501,8 @@ def main() -> int:
     print("[5/6] Solving one open GTSP per component...")
     threshold_rad = np.deg2rad(args.reconfig_threshold_deg)
     component_results: list[dict] = []
+    repaired_all: list[int] = []        # tilt-repair: 교체된 outlier viewpoints
+    dropped_all: list[int] = []         # tilt-repair: tilt 실패로 drop 된 outlier viewpoints
     debug_root = None
     output_path = (args.output.resolve() if args.output is not None
                    else _default_output(args.object, n_viewpoints).resolve())
@@ -463,6 +628,33 @@ def main() -> int:
                       f"(base={int(is_reconfig_base.sum())}, "
                       f"wrist={int(is_reconfig_wrist.sum())}), "
                       f"cost={decoded['cost']}, {elapsed:.2f}s")
+                if args.tilt_repair and len(order) >= 2:
+                    try:
+                        rep_order, rep_sel, rep_cand, repaired, dropped = _repair_branch_outliers(
+                            order, selected, candidates,
+                            world_poses=world_poses, world=world, robot_cfg=robot_cfg,
+                            wd_m=source["wd_m"], wrist3_fixed=wrist3_fixed,
+                            num_seeds=args.num_seeds, batch_size=args.ik_batch_size,
+                            big_base_rad=np.deg2rad(args.big_base_deg),
+                            outlier_max_len=args.outlier_max_len,
+                            tilt_magnitudes_deg=_tilt_magnitudes(args.tilt_repair_max_deg),
+                            n_azimuth=args.tilt_repair_azimuths)
+                    except Exception as rexc:  # noqa: BLE001 — keep the valid un-repaired solve
+                        print(f"    [tilt-repair warning] {rexc} — keeping un-repaired path")
+                        repaired, dropped = [], []
+                    if (repaired or dropped) and len(rep_sel) >= 1:
+                        rep_sel = np.stack(rep_sel)
+                        fields = _path_reconfig_fields(
+                            rep_sel, threshold_rad, base_idx_arr, wrist_idx_arr)
+                        base.update(
+                            viewpoint_order=np.asarray(rep_order, dtype=np.int32),
+                            selected_candidate_index=np.asarray(rep_cand, dtype=np.int32),
+                            selected_joints=rep_sel, **fields)
+                        repaired_all.extend(int(v) for v, _ in repaired)
+                        dropped_all.extend(int(v) for v in dropped)
+                        print(f"    Tilt-repair: repaired {[(v, round(d, 1)) for v, d in repaired]}, "
+                              f"dropped {dropped} → base reconfigs "
+                              f"{int(is_reconfig_base.sum())}→{fields['num_reconfigurations_base']}")
             except Exception as exc:  # preserve other components and diagnostics
                 base.update(status="solver_failed", reason=str(exc), matrix_mib=matrix_mib)
                 print(f"    FAILED: {exc}")
@@ -500,6 +692,12 @@ def main() -> int:
         "uniform_reconfig": bool(args.uniform_reconfig),
         "delaunay_expand_hops": int(args.delaunay_expand_hops),
         "graph_edge_count": int(len(graph_edges)),
+        "tilt_repair": bool(args.tilt_repair),
+        "tilt_repair_max_deg": float(args.tilt_repair_max_deg),
+        "big_base_deg": float(args.big_base_deg),
+        "outlier_max_len": int(args.outlier_max_len),
+        "tilt_repaired_viewpoints": [int(v) for v in repaired_all],
+        "tilt_dropped_viewpoints": [int(v) for v in dropped_all],
         "glns_mode": args.glns_mode,
         "glns_timeout_s": args.glns_timeout,
         "glns_seed": args.glns_seed,
@@ -521,6 +719,9 @@ def main() -> int:
     print(f"  solved={len(solved)}/{len(components)}, reconfigs={total_reconfigs} "
           f"(base={total_reconfigs_base}, wrist={total_reconfigs_wrist}), "
           f"unreachable={int((~reachable).sum())}")
+    if args.tilt_repair and (repaired_all or dropped_all):
+        print(f"  tilt-repair: repaired={len(repaired_all)} {repaired_all}, "
+              f"dropped={len(dropped_all)} {dropped_all}")
     return 2 if failed else 0
 
 

@@ -124,7 +124,6 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
 
 def load_workcell(usd_path: Path) -> None:
     """Place environment + mount + table + robot + support cuboid on stage."""
-    from isaacsim.core.api.objects import VisualCuboid
     from isaacsim.core.utils import prims
 
     # common/config import deferred until SimulationApp is up.
@@ -159,13 +158,25 @@ def load_workcell(usd_path: Path) -> None:
         usd_path=str(usd_path),
     )
 
-    _sup = next(w for w in _config.WALLS if w["name"] == "support")
+    _create_support(_config)
+
+
+def _create_support(config_module) -> None:
+    """Create or replace the visual support using the current collision config."""
+    from isaacsim.core.api.objects import VisualCuboid
+    from isaacsim.core.utils import prims
+
+    prim_path = "/World/Support"
+    if prims.is_prim_path_valid(prim_path):
+        prims.delete_prim(prim_path)
+
+    support = next(w for w in config_module.WALLS if w["name"] == "support")
     VisualCuboid(
-        prim_path="/World/Support",
+        prim_path=prim_path,
         name="support",
-        position=_sup["position"] + np.array([0.0, 0.0, MOUNT_HEIGHT]),
+        position=support["position"] + np.array([0.0, 0.0, MOUNT_HEIGHT]),
         size=1.0,
-        scale=_sup["dimensions"],
+        scale=support["dimensions"],
         color=np.array([0.5, 0.5, 0.5]),
     )
 
@@ -196,6 +207,9 @@ def load_target_object(object_name: str | None) -> None:
             f"Build it once: uv run scripts/isaac/usd/build_object_usd.py --object {object_name}"
         )
         return
+
+    # Runtime object swap에서도 support visual을 새 물체 위치에 맞춘다.
+    _create_support(_config)
 
     prim_path = f"/World/{_config.TARGET_OBJECT['name']}"
     if prims.is_prim_path_valid(prim_path):

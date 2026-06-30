@@ -770,6 +770,7 @@ class PipelineWindow:
                         self._fields["spacing"]       = self._row("--spacing",       0.01)
                         self._fields["output_suffix"] = self._row("--output-suffix", "dp")
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops (GLNS)", 2)
+                        self._fields["glns_tilt_repair"] = self._row("--tilt-repair (GLNS, 1/0)", 1)
                 with ui.HStack(height=28, spacing=6):
                     self._btn_generate = ui.Button("Generate Trajectory", clicked_fn=self._on_generate)
                     self._btn_cancel_gen = ui.Button("Cancel", clicked_fn=self._on_cancel_generate)
@@ -1532,6 +1533,7 @@ class PipelineWindow:
             # the joined "CSV saved to ..." LAST, so CSV_PATH_RE captures the joined
             # trajectory (same 14-col schema as DP → preview/publish need no change).
             hops = max(1, int(self._get_field("glns_hops", int)))
+            repair = " --tilt-repair" if int(self._get_field("glns_tilt_repair", int)) != 0 else ""
             det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
             pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
             quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
@@ -1539,7 +1541,7 @@ class PipelineWindow:
                 f"{self._uv} run scripts/core/solve_glns_path.py "
                 f"--object {obj!r} --viewpoints {h5!r} "
                 f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops} --output {det_h5!r} "
+                f"--delaunay-expand-hops {hops}{repair} --output {det_h5!r} "
                 f"&& {self._uv} run scripts/core/verify_glns_trajectory.py "
                 f"--result {det_h5!r} --join --spacing {spacing}"
             )

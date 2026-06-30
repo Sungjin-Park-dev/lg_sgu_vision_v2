@@ -102,7 +102,7 @@ OBJECT_PLACEMENTS = {
 
 
 def apply_object_placement(object_name):
-    """object_name 의 배치(OBJECT_PLACEMENTS)를 TARGET_OBJECT 에 in-place 반영(robot frame).
+    """object_name 의 배치를 TARGET_OBJECT/support 에 in-place 반영(robot frame).
 
     각 진입점에서 CLI override 전에 호출 → 다운스트림(build_camera_poses / build_collision_world /
     isaac scene)이 read 시점에 per-object 배치를 본다. 표에 없으면 기본값 유지하고 False 반환.
@@ -114,6 +114,7 @@ def apply_object_placement(object_name):
         TARGET_OBJECT["position"] = np.asarray(p["position"], dtype=np.float64).copy()
     TARGET_OBJECT["rotation"] = np.asarray(
         p.get("rotation", [1.0, 0.0, 0.0, 0.0]), dtype=np.float64).copy()
+    sync_support_to_target()
     return True
 
 
@@ -153,13 +154,37 @@ WALLS = [
         "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
     },
     {
-        # Target object 받침대 — table top(world z=0.630)에서 object bottom(world z=0.795)까지
-        # robot frame z = world 0.7125 - 0.805 = -0.0925, height 0.165m, 2×2cm 단면
+        # Target object 받침대. 위치와 높이는 apply_object_placement()에서 물체별로 갱신.
         "name": "support",
         "position": np.array([-0.1, 1.1, -0.0925], dtype=np.float64),
-        "dimensions": np.array([0.2, 0.3, 0.165], dtype=np.float64),
+        "dimensions": np.array([0.05, 0.05, 0.165], dtype=np.float64),
     },
 ]
+
+
+def sync_support_to_target():
+    """Support가 테이블 상면과 물체 바닥 사이를 채우도록 배치한다."""
+    support = next(w for w in WALLS if w["name"] == "support")
+    table_top_z = float(TABLE["position"][2] + TABLE["dimensions"][2] / 2.0)
+    object_bottom_z = float(TARGET_OBJECT["position"][2])
+    height = object_bottom_z - table_top_z
+    if height <= 0.0:
+        raise ValueError(
+            f"Target object bottom z ({object_bottom_z:.4f}) must be above "
+            f"table top z ({table_top_z:.4f})"
+        )
+
+    support["position"] = np.array([
+        TARGET_OBJECT["position"][0],
+        TARGET_OBJECT["position"][1],
+        table_top_z + height / 2.0,
+    ], dtype=np.float64)
+    support["dimensions"] = np.array([
+        support["dimensions"][0],
+        support["dimensions"][1],
+        height,
+    ], dtype=np.float64)
+    return support
 
 # 로봇 마운트(베이스) 설정 — ur10_mount.usd visual 매칭
 # visual: world center (0, 0, 0.4025), size 0.54×0.54×0.805 (XY 2배 스케일 적용 후)

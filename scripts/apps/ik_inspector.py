@@ -388,6 +388,7 @@ class Inspector:
         for h in self._obstacle_handles:
             h.remove()
         self._obstacle_handles = []
+        config.sync_support_to_target()
         obstacles = [config.TABLE, config.ROBOT_MOUNT] + list(config.WALLS)
         for obj in obstacles:
             try:

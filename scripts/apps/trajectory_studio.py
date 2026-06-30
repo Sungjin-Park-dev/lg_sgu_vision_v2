@@ -254,6 +254,9 @@ class TrajectoryStudio:
             self.expand_hops = gui.add_number(
                 "Delaunay expand hops (GLNS)", initial_value=2, min=1, max=4, step=1,
             )
+            self.tilt_repair = gui.add_checkbox(
+                "Tilt-repair outliers (GLNS)", initial_value=True,
+            )
             self.spacing = gui.add_number(
                 "Spacing (m)", initial_value=0.01, min=0.002, max=0.05, step=0.001,
             )
@@ -368,6 +371,7 @@ class TrajectoryStudio:
         for handle in self.layers["obstacles"]:
             handle.remove()
         self.layers["obstacles"].clear()
+        config.sync_support_to_target()
         for obstacle in [config.TABLE, config.ROBOT_MOUNT] + list(config.WALLS):
             box = trimesh.creation.box(extents=np.asarray(obstacle["dimensions"], dtype=float))
             self.layers["obstacles"].append(self.server.scene.add_mesh_simple(
@@ -628,13 +632,14 @@ class TrajectoryStudio:
 
         if self.backend_dd.value.startswith("GLNS"):
             hops = max(1, int(round(self.expand_hops.value)))
+            repair = " --tilt-repair" if self.tilt_repair.value else ""
             det_h5 = PROJECT_ROOT / f"data/{obj}/ik/{n}/glns_result_studio.h5"
             det_h5.parent.mkdir(parents=True, exist_ok=True)
             shell = (
                 f"uv run --no-sync scripts/core/solve_glns_path.py "
                 f"--object {obj} --viewpoints '{vp}' "
                 f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops} --output '{det_h5}' "
+                f"--delaunay-expand-hops {hops}{repair} --output '{det_h5}' "
                 f"&& uv run --no-sync scripts/core/verify_glns_trajectory.py "
                 f"--result '{det_h5}' --join --spacing {spacing}"
             )

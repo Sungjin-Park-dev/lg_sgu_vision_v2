@@ -1548,6 +1548,61 @@ def build_clustered_path_order(
 # HDF5 I/O
 # ============================================================================
 
+def _write_adjacency_group(viewpoints_grp, adjacency: dict, n_positions: int) -> None:
+    """Write the canonical ``viewpoints/adjacency`` group (edges + component_id + attrs).
+
+    Single source of truth for the adjacency schema — shared by ``save_viewpoints_hdf5``
+    (full write) and ``write_adjacency_into_h5`` (in-place backfill into an existing file).
+    The caller decides whether ``adjacency`` is present; this assumes it is.
+    """
+    edges = np.asarray(adjacency['edges'], dtype=np.int32)
+    component_id = np.asarray(adjacency['component_id'], dtype=np.int32)
+    if edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError(f"adjacency edges must have shape (E, 2), got {edges.shape}")
+    if component_id.shape != (n_positions,):
+        raise ValueError(
+            f"adjacency component_id must have shape ({n_positions},), "
+            f"got {component_id.shape}"
+        )
+    if len(edges):
+        if np.any(edges < 0) or np.any(edges >= n_positions):
+            raise ValueError("adjacency edges contain out-of-range viewpoint indices")
+        if np.any(edges[:, 0] >= edges[:, 1]):
+            raise ValueError("adjacency edges must be canonical undirected pairs (a < b)")
+        if len(np.unique(edges, axis=0)) != len(edges):
+            raise ValueError("adjacency edges contain duplicates")
+    adjacency_grp = viewpoints_grp.create_group('adjacency')
+    adjacency_grp.create_dataset('edges', data=edges)
+    adjacency_grp.create_dataset('component_id', data=component_id)
+    adjacency_grp.attrs['method'] = adjacency.get('method', 'local_tangent_delaunay')
+    adjacency_grp.attrs['k_neighbors'] = int(adjacency['k_neighbors'])
+    adjacency_grp.attrs['distance_factor'] = float(adjacency['distance_factor'])
+    adjacency_grp.attrs['max_normal_angle_deg'] = float(adjacency['max_normal_angle_deg'])
+    adjacency_grp.attrs['coordinate_space'] = 'camera_positions_object_local'
+    adjacency_grp.attrs['edge_semantics'] = 'undirected_canonical'
+    for key, value in adjacency.get('stats', {}).items():
+        adjacency_grp.attrs[key] = value
+
+
+def write_adjacency_into_h5(h5_path, adjacency: dict) -> Path:
+    """Backfill/refresh ``viewpoints/adjacency`` in an EXISTING viewpoints h5, in place.
+
+    Preserves all other datasets (positions/normals/cluster_id/path_order/...). Replaces any
+    existing adjacency group so it is idempotent. Used by viewpoint_studio's "Build + Save
+    Delaunay" action to add the GLNS graph to older coacd-only files.
+    """
+    h5_path = Path(h5_path)
+    with h5py.File(h5_path, "a") as f:
+        if "viewpoints" not in f:
+            raise ValueError(f"{h5_path} has no 'viewpoints' group")
+        viewpoints_grp = f["viewpoints"]
+        n_positions = int(viewpoints_grp["positions"].shape[0])
+        if "adjacency" in viewpoints_grp:
+            del viewpoints_grp["adjacency"]
+        _write_adjacency_group(viewpoints_grp, adjacency, n_positions)
+    return h5_path
+
+
 def save_viewpoints_hdf5(
     positions: np.ndarray,
     normals: np.ndarray,
@@ -1612,33 +1667,7 @@ def save_viewpoints_hdf5(
             viewpoints_grp.create_dataset('cluster_direction', data=cluster_direction.astype(np.int32))
 
         if adjacency is not None:
-            edges = np.asarray(adjacency['edges'], dtype=np.int32)
-            component_id = np.asarray(adjacency['component_id'], dtype=np.int32)
-            if edges.ndim != 2 or edges.shape[1] != 2:
-                raise ValueError(f"adjacency edges must have shape (E, 2), got {edges.shape}")
-            if component_id.shape != (len(positions),):
-                raise ValueError(
-                    f"adjacency component_id must have shape ({len(positions)},), "
-                    f"got {component_id.shape}"
-                )
-            if len(edges):
-                if np.any(edges < 0) or np.any(edges >= len(positions)):
-                    raise ValueError("adjacency edges contain out-of-range viewpoint indices")
-                if np.any(edges[:, 0] >= edges[:, 1]):
-                    raise ValueError("adjacency edges must be canonical undirected pairs (a < b)")
-                if len(np.unique(edges, axis=0)) != len(edges):
-                    raise ValueError("adjacency edges contain duplicates")
-            adjacency_grp = viewpoints_grp.create_group('adjacency')
-            adjacency_grp.create_dataset('edges', data=edges)
-            adjacency_grp.create_dataset('component_id', data=component_id)
-            adjacency_grp.attrs['method'] = adjacency.get('method', 'local_tangent_delaunay')
-            adjacency_grp.attrs['k_neighbors'] = int(adjacency['k_neighbors'])
-            adjacency_grp.attrs['distance_factor'] = float(adjacency['distance_factor'])
-            adjacency_grp.attrs['max_normal_angle_deg'] = float(adjacency['max_normal_angle_deg'])
-            adjacency_grp.attrs['coordinate_space'] = 'camera_positions_object_local'
-            adjacency_grp.attrs['edge_semantics'] = 'undirected_canonical'
-            for key, value in adjacency.get('stats', {}).items():
-                adjacency_grp.attrs[key] = value
+            _write_adjacency_group(viewpoints_grp, adjacency, len(positions))
 
         metadata_grp = f.create_group('metadata')
         metadata_grp.attrs['num_viewpoints'] = len(positions)

@@ -50,7 +50,8 @@ from common import config
 from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
 from core.generate_viewpoints import (
     load_meshes, prepare_grid as prepare_viewpoints, cluster_coacd, cluster_and_order,
-    save_viewpoints_hdf5, build_local_delaunay_adjacency, ViewpointGenParams,
+    save_viewpoints_hdf5, build_local_delaunay_adjacency, write_adjacency_into_h5,
+    ViewpointGenParams,
 )
 
 HIGHLIGHT_RGB = (255, 235, 59)   # moving playback marker
@@ -282,6 +283,7 @@ class Studio:
         self.surface_cache: dict[tuple, dict] = {}  # (obj, spacing) -> prepare_viewpoints result
         self.coacd_cache: dict[tuple, tuple] = {}  # (obj, spacing, threshold) -> (ids, parts)
         self.last: dict | None = None            # last generated result, for Save
+        self.current_h5_path: Path | None = None  # on-disk h5 behind the current scene
         self.generating = False
         self._existing: dict[str, ViewpointEntry] = {}
 
@@ -324,6 +326,13 @@ class Studio:
             self.btn_save = g.add_button("Save h5")
             self.gen_status = g.add_markdown("Idle.")
 
+        with g.add_folder("Delaunay (GLNS graph)"):
+            # coacd 클러스터링과 별개로, 로드된 기존 h5 에 delaunay adjacency 만 추가/갱신한다
+            # (GLNS 백엔드가 viewpoints/adjacency/edges 를 요구; DP 는 무관). 옛 coacd-only h5 backfill 용.
+            self.btn_delaunay = g.add_button("Build + Save Delaunay → loaded h5")
+            self.delaunay_status = g.add_markdown(
+                "기존 h5 를 로드한 뒤 누르면 그 파일에 delaunay 그래프를 써넣는다.")
+
         self.playback_folder = g.add_folder("Playback")
         with self.playback_folder:
             self.play_cb = g.add_checkbox("Play", initial_value=False)
@@ -340,6 +349,7 @@ class Studio:
             cb.on_update(lambda _: self._apply_visibility())
         self.btn_generate.on_click(lambda _: self._on_generate())
         self.btn_save.on_click(lambda _: self._on_save())
+        self.btn_delaunay.on_click(lambda _: self._on_build_delaunay())
         self.submethod_dd.on_update(lambda _: self._apply_subcluster_visibility())
         self.sl_overlap.on_update(lambda _: self._on_overlap_change())
         self._apply_subcluster_visibility()
@@ -407,6 +417,7 @@ class Studio:
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] mesh load failed {mp}: {exc}")
         self.last = None  # loaded (not generated) → nothing to Save
+        self.current_h5_path = entry.path  # delaunay backfill 대상
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {label}")
 
     def _on_generate(self) -> None:
@@ -507,6 +518,7 @@ class Studio:
                 knob = f"span={p['max_span_mm']:.0f}mm"
             else:
                 knob = f"eps={p['eps_mm']:.0f}mm"
+            self.current_h5_path = None  # 갓 생성(미저장) → Save 전엔 delaunay backfill 대상 없음
             self._set_scene(
                 full_mesh, data, coacd_parts=result.get("coacd_parts"),
                 source=f"gen · {smlabel} · {method} · t={p['threshold']} {knob}",
@@ -582,6 +594,7 @@ class Studio:
                 cluster_direction=result["cluster_direction"], cluster_metadata=cluster_meta,
                 adjacency=L["adjacency"],
             )
+            self.current_h5_path = Path(out)  # 이후 Build Delaunay 가 이 파일을 갱신
             self.gen_status.content = f"**Saved** → `{out}`"
             self._refresh_existing_options()
             print(f"[save] wrote {out}")
@@ -590,6 +603,43 @@ class Studio:
                 f"**Save failed** ({exc.__class__.__name__}) → `{out}`\n\n"
                 f"디렉토리 권한 확인 (root 소유일 수 있음).")
             print(f"[save] {exc}")
+
+    def _on_build_delaunay(self) -> None:
+        """로드된 기존 h5 에 delaunay adjacency(GLNS 그래프)를 빌드해 써넣는다 (coacd 보존).
+
+        coacd 클러스터링과 독립적인 저장 동작. 옛 coacd-only h5(adjacency 없음)를 backfill 해
+        GLNS 백엔드가 동작하게 한다. DP 는 adjacency 를 안 읽으므로 영향 없음.
+        """
+        if self.data is None:
+            self.delaunay_status.content = "기존 h5 를 로드(또는 Generate + Save)한 뒤 누르세요."
+            return
+        if self.current_h5_path is None:
+            self.delaunay_status.content = (
+                "갓 생성한 viewpoints 는 **Save h5** 를 먼저 누르세요 (Save 가 이미 delaunay 를 "
+                "함께 저장). 이 버튼은 **로드된 기존 h5** 에 delaunay 를 추가합니다.")
+            return
+        try:
+            adjacency = build_local_delaunay_adjacency(
+                self.data["camera_positions"], self.data["normals"])
+            write_adjacency_into_h5(self.current_h5_path, adjacency)
+        except OSError as exc:
+            self.delaunay_status.content = (
+                f"**Write failed** ({exc.__class__.__name__}) → `{self.current_h5_path}`\n\n"
+                f"파일 권한 확인 (root 소유일 수 있음).")
+            print(f"[delaunay] {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.delaunay_status.content = f"**Error:** {exc}"
+            print(f"[delaunay] error: {exc}")
+            return
+        st = adjacency.get("stats", {})
+        self.delaunay_status.content = (
+            f"**Saved Delaunay** → `{self.current_h5_path.name}` · "
+            f"{st.get('num_edges', 0)} edges · {st.get('num_components', 0)} comps · "
+            f"{st.get('num_isolated', 0)} isolated")
+        print(f"[delaunay] wrote adjacency into {self.current_h5_path}")
+        self.cb_delaunay.value = True               # 새 그래프를 바로 표시
+        self.load_h5_path(self.current_h5_path)     # 씬 + info 패널을 adjacency 반영해 갱신
 
     def _on_step(self) -> None:
         self.pb_pos = float(self.step_slider.value)
@@ -753,6 +803,7 @@ class Studio:
         mp = resolve_mesh_path(data, object_name)
         full = load_as_trimesh(mp) if mp is not None else None
         self.last = None
+        self.current_h5_path = path
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {path.name}")
 
 
