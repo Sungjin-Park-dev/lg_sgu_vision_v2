@@ -50,8 +50,7 @@ from common import config
 from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
 from core.generate_viewpoints import (
     load_meshes, prepare_grid as prepare_viewpoints, cluster_coacd, cluster_and_order,
-    save_viewpoints_hdf5, build_local_delaunay_adjacency, write_adjacency_into_h5,
-    ViewpointGenParams,
+    save_viewpoints_hdf5, build_local_delaunay_adjacency, ViewpointGenParams,
 )
 
 HIGHLIGHT_RGB = (255, 235, 59)   # moving playback marker
@@ -68,6 +67,9 @@ OVERLAP_MIN_PCT = 20
 OVERLAP_MAX_PCT = 90
 SUBCLUSTER_METHODS = ["agglomerative", "dbscan"]
 DEFAULT_SUBCLUSTER_METHOD = "agglomerative"
+GROUPING_COACD = "CoACD clusters"
+GROUPING_DELAUNAY = "Delaunay components"
+GROUPING_OPTIONS = [GROUPING_COACD, GROUPING_DELAUNAY]
 
 # 오브젝트별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
 # (CLI의 --material-rgb 와 동일 경로. 미지정 오브젝트는 전체 메시.)
@@ -275,6 +277,8 @@ class Studio:
         }
         self.play: dict[str, object] = {"highlight": None, "visited": None}
         self.data: dict | None = None
+        self.scene_full_mesh = None
+        self.scene_coacd_parts = None
         self.pb_pos = 0.0
         self.step_slider = None
 
@@ -283,7 +287,6 @@ class Studio:
         self.surface_cache: dict[tuple, dict] = {}  # (obj, spacing) -> prepare_viewpoints result
         self.coacd_cache: dict[tuple, tuple] = {}  # (obj, spacing, threshold) -> (ids, parts)
         self.last: dict | None = None            # last generated result, for Save
-        self.current_h5_path: Path | None = None  # on-disk h5 behind the current scene
         self.generating = False
         self._existing: dict[str, ViewpointEntry] = {}
 
@@ -297,6 +300,8 @@ class Studio:
         self.existing_dd = g.add_dropdown("Existing h5", options=["(none)"], initial_value="(none)")
 
         with g.add_folder("Layers"):
+            self.grouping_dd = g.add_dropdown(
+                "Grouping", options=GROUPING_OPTIONS, initial_value=GROUPING_COACD)
             self.cb_mesh = g.add_checkbox("Mesh", initial_value=True)
             self.cb_surface = g.add_checkbox("Surface points", initial_value=True)
             self.cb_markers = g.add_checkbox("Markers", initial_value=True)
@@ -305,13 +310,20 @@ class Studio:
             self.cb_delaunay = g.add_checkbox("Delaunay adjacency", initial_value=False)
             self.cb_coacd = g.add_checkbox("CoACD parts", initial_value=False)
 
-        with g.add_folder("Generate (surface + coacd + sub-cluster)"):
-            initial_overlap = default_overlap_pct()
-            _, _, initial_spacing = fov_spacing_mm(initial_overlap)
+        initial_overlap = default_overlap_pct()
+        _, _, initial_spacing = fov_spacing_mm(initial_overlap)
+        with g.add_folder("FOV"):
             self.sl_overlap = g.add_slider(
                 "FOV overlap (%)", min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT,
                 step=1, initial_value=initial_overlap)
             self.fov_status = g.add_markdown("")
+            self.btn_generate = g.add_button("Generate")
+            self.btn_save = g.add_button("Save h5")
+            self.gen_status = g.add_markdown("Idle.")
+
+        self.coacd_generate_folder = g.add_folder(
+            "Generate (surface + coacd + sub-cluster)")
+        with self.coacd_generate_folder:
             self.sl_threshold = g.add_slider("coacd_threshold", min=0.05, max=0.5, step=0.05, initial_value=0.25)
             self.submethod_dd = g.add_dropdown(
                 "Sub-cluster", options=SUBCLUSTER_METHODS, initial_value=DEFAULT_SUBCLUSTER_METHOD)
@@ -322,16 +334,6 @@ class Studio:
             self.sl_eps = g.add_slider(
                 "eps (mm)", min=5, max=80, step=1,
                 initial_value=eps_default_mm(initial_spacing))
-            self.btn_generate = g.add_button("Generate")
-            self.btn_save = g.add_button("Save h5")
-            self.gen_status = g.add_markdown("Idle.")
-
-        with g.add_folder("Delaunay (GLNS graph)"):
-            # coacd 클러스터링과 별개로, 로드된 기존 h5 에 delaunay adjacency 만 추가/갱신한다
-            # (GLNS 백엔드가 viewpoints/adjacency/edges 를 요구; DP 는 무관). 옛 coacd-only h5 backfill 용.
-            self.btn_delaunay = g.add_button("Build + Save Delaunay → loaded h5")
-            self.delaunay_status = g.add_markdown(
-                "기존 h5 를 로드한 뒤 누르면 그 파일에 delaunay 그래프를 써넣는다.")
 
         self.playback_folder = g.add_folder("Playback")
         with self.playback_folder:
@@ -344,15 +346,16 @@ class Studio:
         # callbacks
         self.object_dd.on_update(lambda _: self._on_object_change())
         self.existing_dd.on_update(lambda _: self._on_existing_change())
+        self.grouping_dd.on_update(lambda _: self._on_grouping_change())
         for cb in (self.cb_mesh, self.cb_surface, self.cb_markers,
                    self.cb_paths, self.cb_transitions, self.cb_delaunay, self.cb_coacd):
             cb.on_update(lambda _: self._apply_visibility())
         self.btn_generate.on_click(lambda _: self._on_generate())
         self.btn_save.on_click(lambda _: self._on_save())
-        self.btn_delaunay.on_click(lambda _: self._on_build_delaunay())
         self.submethod_dd.on_update(lambda _: self._apply_subcluster_visibility())
         self.sl_overlap.on_update(lambda _: self._on_overlap_change())
         self._apply_subcluster_visibility()
+        self._apply_grouping_visibility()
         self._refresh_fov_status()
 
     def _current_overlap_pct(self) -> float:
@@ -384,6 +387,10 @@ class Studio:
 
         self.sl_maxspan.visible = is_agglomerative
         self.sl_eps.visible = is_dbscan
+
+    def _apply_grouping_visibility(self) -> None:
+        """Show CoACD generation controls only in CoACD grouping mode."""
+        self.coacd_generate_folder.visible = self.grouping_dd.value == GROUPING_COACD
 
     def _make_step_slider(self, n: int) -> None:
         if self.step_slider is not None:
@@ -417,7 +424,6 @@ class Studio:
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] mesh load failed {mp}: {exc}")
         self.last = None  # loaded (not generated) → nothing to Save
-        self.current_h5_path = entry.path  # delaunay backfill 대상
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {label}")
 
     def _on_generate(self) -> None:
@@ -463,6 +469,7 @@ class Studio:
             sp = p["surface_spacing_mm"]
             gkey = (obj, round(sp, 4))
             if gkey not in self.surface_cache:
+                fi = config.OBJECT_FILTER_INTERIOR.get(obj)  # hollow 물체만 opt-in
                 self.surface_cache[gkey] = prepare_viewpoints(
                     target_mesh,
                     ViewpointGenParams(
@@ -471,6 +478,8 @@ class Studio:
                         surface_spacing_mm=sp,
                         row_spacing_mm=p["row_spacing_mm"],
                         col_spacing_mm=p["col_spacing_mm"],
+                        filter_interior=fi is not None,
+                        interior_hull_align_min=(fi or {}).get("hull_align_min", 0.3),
                     ),
                 )
             surface = self.surface_cache[gkey]
@@ -518,7 +527,6 @@ class Studio:
                 knob = f"span={p['max_span_mm']:.0f}mm"
             else:
                 knob = f"eps={p['eps_mm']:.0f}mm"
-            self.current_h5_path = None  # 갓 생성(미저장) → Save 전엔 delaunay backfill 대상 없음
             self._set_scene(
                 full_mesh, data, coacd_parts=result.get("coacd_parts"),
                 source=f"gen · {smlabel} · {method} · t={p['threshold']} {knob}",
@@ -594,7 +602,6 @@ class Studio:
                 cluster_direction=result["cluster_direction"], cluster_metadata=cluster_meta,
                 adjacency=L["adjacency"],
             )
-            self.current_h5_path = Path(out)  # 이후 Build Delaunay 가 이 파일을 갱신
             self.gen_status.content = f"**Saved** → `{out}`"
             self._refresh_existing_options()
             print(f"[save] wrote {out}")
@@ -604,46 +611,18 @@ class Studio:
                 f"디렉토리 권한 확인 (root 소유일 수 있음).")
             print(f"[save] {exc}")
 
-    def _on_build_delaunay(self) -> None:
-        """로드된 기존 h5 에 delaunay adjacency(GLNS 그래프)를 빌드해 써넣는다 (coacd 보존).
-
-        coacd 클러스터링과 독립적인 저장 동작. 옛 coacd-only h5(adjacency 없음)를 backfill 해
-        GLNS 백엔드가 동작하게 한다. DP 는 adjacency 를 안 읽으므로 영향 없음.
-        """
-        if self.data is None:
-            self.delaunay_status.content = "기존 h5 를 로드(또는 Generate + Save)한 뒤 누르세요."
-            return
-        if self.current_h5_path is None:
-            self.delaunay_status.content = (
-                "갓 생성한 viewpoints 는 **Save h5** 를 먼저 누르세요 (Save 가 이미 delaunay 를 "
-                "함께 저장). 이 버튼은 **로드된 기존 h5** 에 delaunay 를 추가합니다.")
-            return
-        try:
-            adjacency = build_local_delaunay_adjacency(
-                self.data["camera_positions"], self.data["normals"])
-            write_adjacency_into_h5(self.current_h5_path, adjacency)
-        except OSError as exc:
-            self.delaunay_status.content = (
-                f"**Write failed** ({exc.__class__.__name__}) → `{self.current_h5_path}`\n\n"
-                f"파일 권한 확인 (root 소유일 수 있음).")
-            print(f"[delaunay] {exc}")
-            return
-        except Exception as exc:  # noqa: BLE001
-            self.delaunay_status.content = f"**Error:** {exc}"
-            print(f"[delaunay] error: {exc}")
-            return
-        st = adjacency.get("stats", {})
-        self.delaunay_status.content = (
-            f"**Saved Delaunay** → `{self.current_h5_path.name}` · "
-            f"{st.get('num_edges', 0)} edges · {st.get('num_components', 0)} comps · "
-            f"{st.get('num_isolated', 0)} isolated")
-        print(f"[delaunay] wrote adjacency into {self.current_h5_path}")
-        self.cb_delaunay.value = True               # 새 그래프를 바로 표시
-        self.load_h5_path(self.current_h5_path)     # 씬 + info 패널을 adjacency 반영해 갱신
-
     def _on_step(self) -> None:
         self.pb_pos = float(self.step_slider.value)
         self._update_highlight(self.step_slider.value)
+
+    def _on_grouping_change(self) -> None:
+        """Rebuild colors and graph layers for the selected grouping."""
+        self._apply_grouping_visibility()
+        self.cb_delaunay.value = self.grouping_dd.value == GROUPING_DELAUNAY
+        if self.data is not None:
+            self._build_scene(self.scene_full_mesh, self.data, self.scene_coacd_parts)
+            self._refresh_info()
+            self._update_highlight(int(self.step_slider.value))
 
     # ---------- scene ----------
     def _clear_layers(self) -> None:
@@ -680,6 +659,8 @@ class Studio:
         cid = data["cluster_id"]
         corder = data["cluster_order"]
         porder = data["path_order"]
+        adjacency = data.get("adjacency")
+        use_delaunay = self.grouping_dd.value == GROUPING_DELAUNAY and adjacency is not None
 
         if full_mesh is not None:
             self.layers["mesh"].append(srv.scene.add_mesh_simple(
@@ -689,47 +670,62 @@ class Studio:
         else:
             print("  [warn] no mesh to display; skipping mesh layer")
 
-        palette = distinct_colors(len(corder))  # K개 고유 색 (재사용 없음)
-        for rank, c in enumerate(corder):
-            idx = np.where(cid == c)[0]
+        if use_delaunay:
+            group_id = np.asarray(adjacency["component_id"], dtype=np.int32)
+            if group_id.shape != (data["n"],):
+                raise ValueError(
+                    f"Delaunay component_id must have shape ({data['n']},), got {group_id.shape}")
+            group_order = np.unique(group_id)
+        else:
+            group_id = cid
+            group_order = corder
+
+        palette = distinct_colors(len(group_order))  # grouping별 고유 색 (재사용 없음)
+        group_colors = {int(group): palette[rank] for rank, group in enumerate(group_order)}
+        for group in group_order:
+            idx = np.where(group_id == group)[0]
             if idx.size == 0:
                 continue
-            rgb = palette[rank]
+            rgb = group_colors[int(group)]
             self.layers["surface"].append(srv.scene.add_point_cloud(
-                f"/scene/surface/c{c}", points=surf[idx],
+                f"/scene/surface/g{group}", points=surf[idx],
                 colors=np.tile(np.array(rgb, dtype=np.uint8), (len(idx), 1)),
                 point_size=0.0025, point_shape="circle"))
             self.layers["markers"].append(srv.scene.add_point_cloud(
-                f"/scene/markers/c{c}", points=cam[idx],
+                f"/scene/markers/g{group}", points=cam[idx],
                 colors=np.tile(np.array(rgb, dtype=np.uint8), (len(idx), 1)),
                 point_size=0.004, point_shape="circle"))
-            ordered = idx[np.argsort(porder[idx], kind="stable")]
-            if ordered.size > 1:
-                self.layers["paths"].append(srv.scene.add_spline_catmull_rom(
-                    f"/scene/paths/c{c}", positions=cam[ordered],
-                    color=rgb, line_width=3.0, curve_type="catmullrom"))
+            if not use_delaunay:
+                ordered = idx[np.argsort(porder[idx], kind="stable")]
+                if ordered.size > 1:
+                    self.layers["paths"].append(srv.scene.add_spline_catmull_rom(
+                        f"/scene/paths/g{group}", positions=cam[ordered],
+                        color=rgb, line_width=3.0, curve_type="catmullrom"))
 
-        for i in range(len(corder) - 1):
-            fi = np.where(cid == corder[i])[0]
-            ti = np.where(cid == corder[i + 1])[0]
-            if fi.size == 0 or ti.size == 0:
-                continue
-            p1 = cam[fi[np.argmax(porder[fi])]]
-            p2 = cam[ti[np.argmin(porder[ti])]]
-            self.layers["transitions"].append(srv.scene.add_spline_catmull_rom(
-                f"/scene/transitions/t{i}", positions=np.stack([p1, p2]),
-                color=TRANSITION_RGB, line_width=2.0))
+        if not use_delaunay:
+            for i in range(len(corder) - 1):
+                fi = np.where(cid == corder[i])[0]
+                ti = np.where(cid == corder[i + 1])[0]
+                if fi.size == 0 or ti.size == 0:
+                    continue
+                p1 = cam[fi[np.argmax(porder[fi])]]
+                p2 = cam[ti[np.argmin(porder[ti])]]
+                self.layers["transitions"].append(srv.scene.add_spline_catmull_rom(
+                    f"/scene/transitions/t{i}", positions=np.stack([p1, p2]),
+                    color=TRANSITION_RGB, line_width=2.0))
 
-        adjacency = data.get("adjacency")
         if adjacency is not None:
             edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
             # viser 0.2.11에는 batched line-segment primitive가 없어 edge별 2-point spline을 쓴다.
             for edge_idx, (a, b) in enumerate(edges):
+                edge_color = (group_colors[int(group_id[a])]
+                              if use_delaunay and group_id[a] == group_id[b]
+                              else DELAUNAY_RGB)
                 self.layers["delaunay"].append(srv.scene.add_spline_catmull_rom(
                     f"/scene/delaunay/e{edge_idx}", positions=np.stack([cam[a], cam[b]]),
-                    color=DELAUNAY_RGB, line_width=1.0))
+                    color=edge_color, line_width=1.0))
 
-        if coacd_parts:
+        if coacd_parts and not use_delaunay:
             for j, part in enumerate(coacd_parts):
                 self.layers["coacd"].append(srv.scene.add_mesh_simple(
                     f"/scene/coacd/p{j}",
@@ -740,10 +736,20 @@ class Studio:
 
     def _set_scene(self, full_mesh, data: dict, coacd_parts, source: str) -> None:
         self.data = data
+        self.scene_full_mesh = full_mesh
+        self.scene_coacd_parts = coacd_parts
+        self.scene_source = source
         self._build_scene(full_mesh, data, coacd_parts)
         self._make_step_slider(data["n"])
         self.pb_pos = 0.0
         self._update_highlight(0)
+        self._refresh_info()
+        print(f"Scene: {source} ({data['n']} vp, {len(data['cluster_order'])} clusters)")
+
+    def _refresh_info(self) -> None:
+        data = self.data
+        if data is None:
+            return
         adjacency = data.get("adjacency")
         adjacency_info = ""
         if adjacency is not None:
@@ -754,15 +760,17 @@ class Studio:
                 f"`{int(astats.get('num_isolated', 0))} isolated`"
             )
         lines = [
-            f"**Source:** `{source}`",
+            f"**Source:** `{self.scene_source}`",
+            f"**Grouping:** `{self.grouping_dd.value}`",
             f"**Viewpoints:** `{data['n']}`",
             f"**Clusters:** `{len(data['cluster_order'])}`",
             f"**Working dist:** `{data['wd_m'] * 1000:.0f} mm`",
         ]
         if adjacency_info:
             lines.append(adjacency_info)
+        elif self.grouping_dd.value == GROUPING_DELAUNAY:
+            lines.append("**Delaunay:** adjacency data not found; showing CoACD grouping")
         self.info.content = "\n".join(lines)
-        print(f"Scene: {source} ({data['n']} vp, {len(data['cluster_order'])} clusters)")
 
     def _update_highlight(self, step: int) -> None:
         data = self.data
@@ -803,7 +811,6 @@ class Studio:
         mp = resolve_mesh_path(data, object_name)
         full = load_as_trimesh(mp) if mp is not None else None
         self.last = None
-        self.current_h5_path = path
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {path.name}")
 
 

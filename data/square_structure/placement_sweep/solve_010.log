@@ -1,0 +1,23 @@
+  Reconfig cost: base joints=(0, 1, 2), wrist joints=(3, 4, 5), L2 weights=[1.0, 1.0, 0.5, 0.2, 0.2, 0.05], penalty base:wrist = 12.0:1.0
+[1/6] Validating Julia/GLNS environment...
+[2/6] Loading raw-index viewpoints and Delaunay graph...
+  71 viewpoints, 167 Delaunay edges
+  Graph relaxed to 2-hop: 167 → 434 edges (GLNS 순서 자유도↑)
+[3/6] Computing fresh collision-aware IK candidates...
+  Collision world: 7 cuboids + target mesh (13524 faces)
+  Periodic joint lifting enabled: ['shoulder_pan_joint', 'shoulder_lift_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+  Pose variants: 1988 total (28/viewpoint)
+Warp DeprecationWarning: The symbol `warp.torch.device_from_torch` will soon be removed from the public API. Use `warp.device_from_torch` instead.
+    IK batch 16/16 (1.5s)
+  Phase 1 done: 14980/63616 IK solutions (23.5% success)
+  Reachable: 70/71; collision candidates removed: 0
+[4/6] Recomputing induced Delaunay components...
+  1 components after dropping unreachable viewpoints
+  Candidate caps: component 0=K32
+  Candidate pruning: 5137 raw → 2211 retained, 0.29s (434 undirected edges, no reverse recomputation)
+[5/6] Solving one open GTSP per component...
+  component 0: 70 viewpoints, K_eff=32
+    SOLVED: reconfigs=3 (base=1, any=3), lifted_joints=6, cost=12334662163, 3.51s
+[6/6] Writing standalone GLNS result...
+  GLNS_RESULT_H5 /home/sungjin/Documents/lg_sgu_vision_v2/data/square_structure/placement_sweep/glns_result_010.h5
+  solved=1/1, reconfigs=3 (base=1, any=3), unreachable=1

@@ -68,14 +68,13 @@ CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 
 # 워크셀 치수 (load_workcell.py 검증 완료)
 MOUNT_HEIGHT = 0.805
-TABLE_HEIGHT = 0.630
 MOUNT_USD_INTRINSIC_Z = 0.515
+TABLE_USD_INTRINSIC_X = 0.910
+TABLE_USD_INTRINSIC_Y = 0.768
 TABLE_USD_INTRINSIC_Z = 0.795
 MOUNT_XY_SCALE = 2.0
 TABLE_USD_BBOX_CENTER_X = 0.270
 TABLE_USD_BBOX_CENTER_Y = -0.002
-TABLE_TARGET_X = -0.2
-TABLE_TARGET_Y = 1.1
 ENV_OFFSET = np.array([2.0, 0.0, 0.0])
 
 
@@ -150,14 +149,11 @@ def load_workcell(usd_path: Path) -> None:
                         MOUNT_HEIGHT / MOUNT_USD_INTRINSIC_Z]),
         usd_path=str(MOUNT_USD),
     )
+    table_position, table_scale = _table_prim_transform(_config)
     prims.create_prim(
         TABLE_PATH, "Xform",
-        position=np.array([
-            TABLE_TARGET_X - TABLE_USD_BBOX_CENTER_X,
-            TABLE_TARGET_Y - TABLE_USD_BBOX_CENTER_Y,
-            TABLE_HEIGHT,
-        ]),
-        scale=np.array([1.0, 1.0, TABLE_HEIGHT / TABLE_USD_INTRINSIC_Z]),
+        position=table_position,
+        scale=table_scale,
         usd_path=str(TABLE_USD),
     )
     prims.create_prim(
@@ -167,6 +163,33 @@ def load_workcell(usd_path: Path) -> None:
     )
 
     _create_support(_config)
+
+
+def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
+    """Convert config.TABLE (robot frame center/size) to the table USD Xform.
+
+    ``thor_table.usd`` has an off-center XY origin and its Z origin on the top
+    surface.  ``config.TABLE`` is a center pose in the robot-base frame, whose
+    world origin is elevated by ``MOUNT_HEIGHT``.
+    """
+    table = config_module.TABLE
+    center_robot = np.asarray(table["position"], dtype=np.float64)
+    dimensions = np.asarray(table["dimensions"], dtype=np.float64)
+    if center_robot.shape != (3,) or dimensions.shape != (3,):
+        raise ValueError("config.TABLE position/dimensions must each have shape (3,)")
+    if np.any(dimensions <= 0.0):
+        raise ValueError("config.TABLE dimensions must be positive")
+
+    scale = dimensions / np.array([
+        TABLE_USD_INTRINSIC_X, TABLE_USD_INTRINSIC_Y, TABLE_USD_INTRINSIC_Z,
+    ], dtype=np.float64)
+    center_world = center_robot + np.array([0.0, 0.0, MOUNT_HEIGHT])
+    position = np.array([
+        center_world[0] - TABLE_USD_BBOX_CENTER_X * scale[0],
+        center_world[1] - TABLE_USD_BBOX_CENTER_Y * scale[1],
+        center_world[2] + dimensions[2] / 2.0,
+    ], dtype=np.float64)
+    return position, scale
 
 
 def _create_support(config_module) -> None:

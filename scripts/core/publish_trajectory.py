@@ -284,22 +284,44 @@ class IsaacStreamPublisher(Node):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="저장된 trajectory CSV를 로봇/Isaac에 전송")
-    parser.add_argument("--csv", type=str, required=True, help="CSV 파일 경로")
+    parser = argparse.ArgumentParser(
+        description="저장된 trajectory CSV(또는 단일 joint 목표)를 로봇/Isaac에 전송")
+    parser.add_argument("--csv", type=str, default=None, help="CSV 파일 경로")
+    parser.add_argument("--joint-target", type=str, default=None,
+                        help="CSV 대신 단일 joint 목표(rad 6개, 쉼표/공백 구분)로 바로 이동. "
+                             "현재자세→목표를 속도제한 보간 (planning 없음).")
     parser.add_argument("--target", choices=["controller", "isaac"], default="controller",
                         help="controller=실로봇 ros2_control, isaac=Isaac에 직접 스트리밍(sim)")
     args = parser.parse_args()
-    csv_path = args.csv
 
-    if not Path(csv_path).exists():
-        print(f"Error: CSV not found: {csv_path}")
-        print("  plan_trajectory.py를 먼저 실행하세요.")
-        return
+    if (args.csv is None) == (args.joint_target is None):
+        parser.error("정확히 하나만 지정: --csv 또는 --joint-target")
 
-    print(f"Loading trajectory from {csv_path}...")
-    solutions, times = load_trajectory_csv(csv_path)
-    print(f"  {len(solutions)} waypoints loaded (CSV duration: {times[-1] - times[0]:.1f}s)")
-    print(f"  target: {args.target}")
+    if args.joint_target is not None:
+        parts = args.joint_target.replace(",", " ").split()
+        if len(parts) != len(JOINT_NAMES):
+            parser.error(
+                f"--joint-target 는 joint {len(JOINT_NAMES)}개 값이어야 함 "
+                f"(got {len(parts)}): {args.joint_target!r}")
+        try:
+            q = [float(p) for p in parts]
+        except ValueError:
+            parser.error(f"--joint-target 파싱 실패: {args.joint_target!r}")
+        solutions = np.array([q], dtype=np.float64)
+        times = np.array([0.0], dtype=np.float64)
+        print(f"Direct joint target: {q}")
+        print(f"  target: {args.target}")
+    else:
+        csv_path = args.csv
+        if not Path(csv_path).exists():
+            print(f"Error: CSV not found: {csv_path}")
+            print("  plan_trajectory.py를 먼저 실행하세요.")
+            return
+
+        print(f"Loading trajectory from {csv_path}...")
+        solutions, times = load_trajectory_csv(csv_path)
+        print(f"  {len(solutions)} waypoints loaded (CSV duration: {times[-1] - times[0]:.1f}s)")
+        print(f"  target: {args.target}")
 
     rclpy.init()
     if args.target == "isaac":

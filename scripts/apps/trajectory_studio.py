@@ -63,6 +63,7 @@ from ik_inspector import (  # noqa: E402
 
 DATA_ROOT = PROJECT_ROOT / "data"
 OBJ_NODE = "/studio/object"          # 물체 이동 gizmo (mesh 는 자식 → 드래그하면 따라온다)
+LOG_MAX_LINES = 300                  # generate 로그 유지 줄 수 (패널 스크롤로 히스토리 열람)
 
 COLOR_OBJECT = (90, 200, 255)
 COLOR_OBSTACLE = (120, 120, 130)
@@ -185,7 +186,7 @@ class TrajectoryStudio:
         self.result = None              # GLNS 결과 dict (rich h5) 또는 None
         self.result_kind = None         # "glns" | "dp" | None
         self.result_h5_path = None
-        self.dense_dir = None           # glns_trajectory_*.npz 디렉토리
+        self.dense_dir = None           # data/{object}/trajectory/{N} (legacy: ik/{N})
         self.world_poses = None         # (N,4,4) base_link 프레임 카메라 포즈
         self._vp_raw = None             # (positions, normals, wd_m) — 물체 이동 시 재계산
         self._vp_path = None            # 로드된 viewpoints h5 경로 (생성 입력)
@@ -262,21 +263,21 @@ class TrajectoryStudio:
                     "Tilt azimuths", initial_value=8, min=1, max=32, step=1,
                 )
                 self.max_candidates = gui.add_number(
-                    "Max candidates/viewpoint", initial_value=16, min=1, max=64, step=1,
+                    "Max candidates/viewpoint", initial_value=32, min=1, max=64, step=1,
                 )
                 self.ik_num_seeds = gui.add_number(
                     "IK seeds/pose", initial_value=32, min=1, max=200, step=1,
                 )
                 self.ik_batch_size = gui.add_number(
-                    "IK pose batch size", initial_value=16, min=1, max=128, step=1,
+                    "IK pose batch size", initial_value=128, min=1, max=128, step=1,
                 )
-            self.spacing = gui.add_number(
-                "Spacing (m)", initial_value=0.01, min=0.002, max=0.05, step=0.001,
-            )
-            self.suffix = gui.add_text("Output suffix (DP)", initial_value="dp")
-            self.btn_gen = gui.add_button("Generate trajectory")
+            self.btn_gen = gui.add_button("1. Solve GLNS / Generate DP")
+            self.btn_motion = gui.add_button("2. Plan scan motion (no HOME)")
+            self.btn_motion.disabled = True
             self.metrics_md = gui.add_markdown("metrics: (GLNS result)")
-            self.gen_log = gui.add_markdown("")
+            # 자체 폴더로 분리 → 길어진 로그를 접을 수 있고, 펼치면 패널 스크롤로 위-아래 열람.
+            with gui.add_folder("Generation log"):
+                self.gen_log = gui.add_markdown("")
         with gui.add_folder("GLNS result (load existing)"):
             opts = list(self.result_paths) or ["(none)"]
             init_r = initial_result if initial_result in self.result_paths else opts[0]
@@ -312,6 +313,8 @@ class TrajectoryStudio:
         self.sl_sol.on_update(lambda _: self._show_solution())
         self.move_object.on_update(lambda _: self._toggle_gizmo())
         self.btn_gen.on_click(lambda _: self._on_generate())
+        self.btn_motion.on_click(lambda _: self._on_plan_motion())
+        self.backend_dd.on_update(lambda _: self._update_motion_button())
         self.load_button.on_click(lambda _: self._load_selected_result_dropdown())
         self.component_dropdown.on_update(lambda _: self._on_component_change())
         self.show_dense.on_update(lambda _: self._on_component_change())
@@ -353,7 +356,7 @@ class TrajectoryStudio:
 
     def _log(self, line: str):
         self._log_lines.append(line)
-        self._log_lines = self._log_lines[-18:]
+        self._log_lines = self._log_lines[-LOG_MAX_LINES:]
         self.gen_log.content = "```\n" + "\n".join(self._log_lines) + "\n```"
 
     # ── 정적 씬 (물체 + 장애물) ───────────────────────────────────────────────
@@ -617,12 +620,43 @@ class TrajectoryStudio:
         self.btn_gen.disabled = not enabled
         self.btn_apply.disabled = not enabled
         self.btn_reset.disabled = not enabled
+        if enabled:
+            self._update_motion_button()
+        else:
+            self.btn_motion.disabled = True
+
+    def _update_motion_button(self):
+        has_result = (
+            self.result_kind == "glns" and self.result_h5_path is not None
+            and Path(self.result_h5_path).exists()
+        )
+        self.btn_motion.disabled = (
+            self.runner.running or not self.backend_dd.value.startswith("GLNS") or not has_result
+        )
 
     def _num_viewpoints(self) -> int:
         try:
             return int(Path(self._vp_path).parent.name)
         except (ValueError, AttributeError, TypeError):
             return len(self.world_poses) if self.world_poses is not None else 0
+
+    def _glns_trajectory_dir(self, *, legacy_dir=None) -> Path:
+        """Return the DP-compatible output directory for GLNS trajectory artifacts.
+
+        Older Studio versions wrote ``glns_trajectory_*`` beside the GLNS result
+        under ``ik/{N}``.  Prefer the canonical ``trajectory/{N}`` directory, but
+        keep loading legacy artifacts when no canonical artifacts exist yet.
+        """
+        preferred = config.get_trajectory_path(
+            self.object_name, self._num_viewpoints(), "dummy",
+        ).parent.resolve()
+        if any(preferred.glob("glns_trajectory_*")):
+            return preferred
+        if legacy_dir is not None:
+            legacy = Path(legacy_dir).resolve()
+            if any(legacy.glob("glns_trajectory_*")):
+                return legacy
+        return preferred
 
     def _on_generate(self):
         if self.runner.running:
@@ -634,7 +668,7 @@ class TrajectoryStudio:
         obj = self.object_name
         pos = np.asarray(self.obj_gizmo.position, dtype=float)
         wxyz = np.asarray(self.obj_gizmo.wxyz, dtype=float)
-        spacing = float(self.spacing.value)
+        spacing = PT.DEFAULT_SPACING_M
         n = self._num_viewpoints()
         vp = str(self._vp_path)
         pos_s = " ".join(f"{v:.6f}" for v in pos)
@@ -655,24 +689,24 @@ class TrajectoryStudio:
             augment += f" --max-candidates-per-viewpoint {int(round(self.max_candidates.value))}"
             ik_num_seeds = max(1, int(round(self.ik_num_seeds.value)))
             ik_batch_size = max(1, int(round(self.ik_batch_size.value)))
-            ik_options = f" --num-seeds {ik_num_seeds} --ik-batch-size {ik_batch_size}"
+            ik_options = (f" --num-seeds {ik_num_seeds} --ik-batch-size {ik_batch_size}"
+                          f" --ik-seed {PT.IK_RANDOM_SEED}")
             det_h5 = PROJECT_ROOT / f"data/{obj}/ik/{n}/glns_result_studio.h5"
             det_h5.parent.mkdir(parents=True, exist_ok=True)
             shell = (
                 f"uv run --no-sync scripts/core/solve_glns_path.py "
                 f"--object {obj} --viewpoints '{vp}' "
                 f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}' "
-                f"&& uv run --no-sync scripts/core/verify_glns_trajectory.py "
-                f"--result '{det_h5}' --join --require-full-coverage --spacing {spacing}"
+                f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
             )
             cmd = ["bash", "-c", shell]
             self._pending_out = det_h5
-            self._pending_kind = "glns"
-            self._log(f"▶ GLNS @ pos={np.round(pos, 3).tolist()}, hops={hops}, "
-                      f"seeds={ik_num_seeds}, batch={ik_batch_size}, sp={spacing} …")
+            self._pending_kind = "glns_solve"
+            self._log(f"▶ GLNS solve @ pos={np.round(pos, 3).tolist()}, hops={hops}, "
+                      f"seeds={ik_num_seeds}, ik_seed={PT.IK_RANDOM_SEED}, "
+                      f"batch={ik_batch_size} …")
         else:
-            suffix = self.suffix.value or "dp"
+            suffix = "dp"
             cmd = [
                 "uv", "run", "--no-sync", "scripts/core/plan_trajectory.py",
                 "--object", obj, "--num-viewpoints", str(n),
@@ -684,6 +718,41 @@ class TrajectoryStudio:
             self._pending_kind = "dp"
             self._log(f"▶ DP @ pos={np.round(pos, 3).tolist()}, sp={spacing}, suffix={suffix} …")
 
+        self._set_buttons_enabled(False)
+        self.runner.start(
+            cmd, cwd=PROJECT_ROOT,
+            on_line=self._on_proc_line,
+            on_exit=lambda rc: self._on_proc_exit(rc),
+        )
+
+    def _on_plan_motion(self):
+        if self.runner.running:
+            self._log("⏳ 이미 실행 중…")
+            return
+        if self.result_kind != "glns" or self.result_h5_path is None:
+            self._log("GLNS result를 먼저 solve 또는 load 하세요.")
+            return
+        result_path = Path(self.result_h5_path).resolve()
+        if not result_path.exists():
+            self._log(f"GLNS result 없음: {result_path}")
+            self._update_motion_button()
+            return
+        spacing = PT.DEFAULT_SPACING_M
+        output_dir = config.get_trajectory_path(
+            self.object_name, self._num_viewpoints(), "dummy",
+        ).parent.resolve()
+        torch.cuda.empty_cache()
+        self._pending_out = result_path
+        self._pending_npz = self._pending_csv = None
+        self._pending_kind = "glns_motion"
+        cmd = [
+            "uv", "run", "--no-sync", "scripts/core/verify_glns_trajectory.py",
+            "--result", str(result_path), "--join", "--require-full-coverage",
+            "--no-home-bracket", "--spacing", str(spacing),
+            "--output-dir", str(output_dir),
+        ]
+        self._log(f"▶ Scan motion planning (no HOME) @ {result_path.name}, sp={spacing}, "
+                  f"output={output_dir} …")
         self._set_buttons_enabled(False)
         self.runner.start(
             cmd, cwd=PROJECT_ROOT,
@@ -709,7 +778,7 @@ class TrajectoryStudio:
         if rc != 0:
             self._log("✗ 실패 — 로그 확인")
             return
-        if self._pending_kind == "glns" and self._pending_out is not None:
+        if self._pending_kind == "glns_solve" and self._pending_out is not None:
             p = Path(self._pending_out).resolve()
             key = str(p)
             self.result_paths[key] = p
@@ -717,7 +786,18 @@ class TrajectoryStudio:
                 self.result_dropdown.options = list(self.result_dropdown.options) + [key]
             self.result_dropdown.value = key
             self._load_result_path(p)
-            self._log("✓ GLNS result 로드 — Component/Joined 재생")
+            self._log("✓ GLNS solve 완료 — component 경로를 확인한 뒤 Plan motion을 실행하세요.")
+        elif self._pending_kind == "glns_motion" and self._pending_out is not None:
+            p = Path(self._pending_out).resolve()
+            self._load_result_path(p)
+            joined = next(
+                (x for x in self.component_dropdown.options if str(x).startswith("⨝ Scan")),
+                None,
+            )
+            if joined is not None:
+                self.component_dropdown.value = joined
+                self._on_component_change()
+            self._log("✓ Scan motion planning 완료 — HOME 제외 joined scan 로드")
         elif self._pending_kind == "dp":
             npz = self._pending_npz
             if npz is None and self._pending_csv is not None:
@@ -773,10 +853,10 @@ class TrajectoryStudio:
         wd_m = float(_decode_attr(metadata["working_distance_m"]))
 
         self.result_h5_path = path
-        self.dense_dir = path.parent
         self.world_poses = PT.build_camera_poses(positions, normals, wd_m)
         self._vp_raw = (positions, normals, wd_m)
         self._vp_path = source_path
+        self.dense_dir = self._glns_trajectory_dir(legacy_dir=path.parent)
         self._reach = None
         self.result = result
         self.result_kind = "glns"
@@ -792,13 +872,20 @@ class TrajectoryStudio:
             label = f"C{name} · {component['status']} · {len(component['members'])} vp"
             options.append(label)
             self.component_by_label[label] = component
-        if (self.dense_dir / "glns_trajectory_joined.npz").exists():
-            options.append("⨝ Joined (all components)")
+        if self._trajectory_artifact_is_current(self.dense_dir / "glns_trajectory_joined.npz"):
+            options.append("⨝ Scan joined (no HOME)")
+        if self._trajectory_artifact_is_current(
+                self.dense_dir / "glns_trajectory_home_to_start.npz"):
+            options.append("↗ HOME → Scan start")
+        if self._trajectory_artifact_is_current(
+                self.dense_dir / "glns_trajectory_end_to_home.npz"):
+            options.append("↘ Scan end → HOME")
         self.component_dropdown.options = options or ["(none)"]
         self.component_dropdown.value = options[0] if options else "(none)"
         self._on_component_change()
         self._apply_visibility()
         self._update_metrics()
+        self._update_motion_button()
 
     def _compute_metrics(self, result) -> dict:
         reach = np.asarray(result["reachable_mask"], dtype=bool)
@@ -845,6 +932,15 @@ class TrajectoryStudio:
             "is_transit": np.asarray(data["is_transit"], dtype=bool),
         }
 
+    def _trajectory_artifact_is_current(self, path) -> bool:
+        """Reject dense artifacts older than the currently loaded GLNS solve."""
+        path = Path(path)
+        if not path.exists():
+            return False
+        if self.result_h5_path is None or not Path(self.result_h5_path).exists():
+            return True
+        return path.stat().st_mtime_ns >= Path(self.result_h5_path).stat().st_mtime_ns
+
     def _build_dense_path(self):
         """dense EE 경로를 transit(빨강)/scan(초록) run 단위 polyline 으로 그린다."""
         for handle in self.layers["path"]:
@@ -887,6 +983,7 @@ class TrajectoryStudio:
         self._make_step_slider(len(dense["joints"]))
         self._show_step()
         self._apply_visibility()
+        self._update_motion_button()
 
     def _on_component_change(self):
         if self.result_kind == "dp":         # DP dense 는 dropdown 을 거치지 않는다
@@ -902,8 +999,10 @@ class TrajectoryStudio:
             return
 
         label = self.component_dropdown.value
-        if label.startswith("⨝ Joined"):
-            self.dense = self._load_dense_npz(self.dense_dir / "glns_trajectory_joined.npz")
+        if label.startswith("⨝ Scan"):
+            joined_path = self.dense_dir / "glns_trajectory_joined.npz"
+            self.dense = (self._load_dense_npz(joined_path)
+                          if self._trajectory_artifact_is_current(joined_path) else None)
             self._dense_label = "Joined (all components)"
             if self.dense is not None:
                 self._build_dense_path()
@@ -914,6 +1013,27 @@ class TrajectoryStudio:
             self._apply_visibility()
             return
 
+        home_paths = {
+            "↗ HOME → Scan start": (
+                "glns_trajectory_home_to_start.npz", "HOME → Scan start"),
+            "↘ Scan end → HOME": (
+                "glns_trajectory_end_to_home.npz", "Scan end → HOME"),
+        }
+        if label in home_paths:
+            filename, dense_label = home_paths[label]
+            path = self.dense_dir / filename
+            self.dense = (self._load_dense_npz(path)
+                          if self._trajectory_artifact_is_current(path) else None)
+            self._dense_label = dense_label
+            if self.dense is not None:
+                self._build_dense_path()
+                self._make_step_slider(len(self.dense["joints"]))
+                self._show_step()
+            else:
+                self.status.content = f"{dense_label} npz 없음"
+            self._apply_visibility()
+            return
+
         component = self.component_by_label.get(label)
         self.current_component = component
         if component is None:
@@ -921,8 +1041,9 @@ class TrajectoryStudio:
             return
 
         if self.show_dense.value:
-            self.dense = self._load_dense_npz(
-                self.dense_dir / f"glns_trajectory_comp{component['name']}.npz")
+            dense_path = self.dense_dir / f"glns_trajectory_comp{component['name']}.npz"
+            if self._trajectory_artifact_is_current(dense_path):
+                self.dense = self._load_dense_npz(dense_path)
         if self.dense is not None:
             self._dense_label = f"Component {component['name']}"
             self._build_dense_path()

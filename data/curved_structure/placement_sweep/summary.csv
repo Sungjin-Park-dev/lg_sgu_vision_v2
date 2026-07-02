@@ -1,0 +1,11 @@
+gi,x,y,z,stage1_reachable,glns_reachable,visited,uncovered,gap_to_best,base,reconfigs,wrist,flips,solved_components,num_components,rc,seconds,glns_h5
+67,-0.02500000000000001,0.8,0.29000000000000004,96,100,100,0,0,0,6,6,5,1,1,0,15.2,data/curved_structure/placement_sweep/glns_result_067.h5
+62,-0.1,0.8,0.29000000000000004,99,100,100,0,0,0,7,7,7,1,1,0,16.2,data/curved_structure/placement_sweep/glns_result_062.h5
+6,-0.175,0.7250000000000001,0.19,96,99,99,1,1,0,2,2,2,1,1,0,15.3,data/curved_structure/placement_sweep/glns_result_006.h5
+12,-0.1,0.8,0.19,98,99,99,1,1,0,3,3,2,1,1,0,15.5,data/curved_structure/placement_sweep/glns_result_012.h5
+37,-0.1,0.8,0.24,99,99,99,1,1,0,4,4,3,1,1,0,15.6,data/curved_structure/placement_sweep/glns_result_037.h5
+57,-0.175,0.8,0.29000000000000004,99,99,99,1,1,0,5,5,3,1,1,0,16.2,data/curved_structure/placement_sweep/glns_result_057.h5
+7,-0.175,0.8,0.19,97,99,99,1,1,0,5,5,4,1,1,0,15.9,data/curved_structure/placement_sweep/glns_result_007.h5
+32,-0.175,0.8,0.24,97,99,99,1,1,0,5,5,4,1,1,0,16.3,data/curved_structure/placement_sweep/glns_result_032.h5
+31,-0.175,0.7250000000000001,0.24,96,99,99,1,1,0,5,5,5,1,1,0,14.9,data/curved_structure/placement_sweep/glns_result_031.h5
+56,-0.175,0.7250000000000001,0.29000000000000004,97,99,99,1,1,0,6,6,5,1,1,0,15.3,data/curved_structure/placement_sweep/glns_result_056.h5

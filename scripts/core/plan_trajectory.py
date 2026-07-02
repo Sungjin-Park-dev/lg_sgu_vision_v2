@@ -106,6 +106,7 @@ def _get_collision_checker(robot_cfg, world_scene):
 ROBOT_CONFIG = config.DEFAULT_ROBOT_CONFIG
 NUM_IK_SEEDS = 100
 IK_BATCH_SIZE = 4
+IK_RANDOM_SEED = 123
 RECONFIG_THRESHOLD_DEG = 29.0
 
 # DP 후보: 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모든 분기를 후보로 남겨
@@ -386,13 +387,27 @@ def build_collision_world(object_name: str):
             mesh = loaded
         pos = config.TARGET_OBJECT["position"]
         rot = config.TARGET_OBJECT["rotation"]
-        meshes.append(CuRoboMesh(
-            name="target_object",
-            pose=[pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]],
-            vertices=mesh.vertices.tolist(),
-            faces=mesh.faces.flatten().tolist(),
-        ))
-        print(f"  Collision world: {len(cuboids)} cuboids + target mesh ({len(mesh.faces)} faces)")
+        shape = config.OBJECT_COLLISION_SHAPE.get(object_name)
+        if shape == "box":
+            # 소형 mesh 는 cuRobo mesh 충돌이 전부 오판 → mesh bbox 를 analytic Cuboid(obb) 로 대체.
+            # object-local bbox 중심을 object pose 로 옮기고, cuboid 방향은 object rotation 을 그대로 쓴다.
+            R = quaternion_to_rotation_matrix(np.asarray(rot, dtype=np.float64))
+            world_center = np.asarray(pos, dtype=np.float64) + R @ mesh.bounds.mean(axis=0)
+            cuboids.append(Cuboid(
+                name="target_object",
+                pose=[*world_center.tolist(), rot[0], rot[1], rot[2], rot[3]],
+                dims=mesh.extents.tolist(),
+            ))
+            print(f"  Collision world: {len(cuboids)} cuboids "
+                  f"(target as box proxy {np.round(mesh.extents, 3).tolist()} m — 소형 mesh 충돌 오판 회피)")
+        else:
+            meshes.append(CuRoboMesh(
+                name="target_object",
+                pose=[pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]],
+                vertices=mesh.vertices.tolist(),
+                faces=mesh.faces.flatten().tolist(),
+            ))
+            print(f"  Collision world: {len(cuboids)} cuboids + target mesh ({len(mesh.faces)} faces)")
     else:
         print(f"  Warning: Target mesh not found at {mesh_path}, skipping mesh collision")
 
@@ -428,7 +443,8 @@ def normalize_joints(q):
 # =========================================================================
 
 def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
-                        num_seeds=100, batch_size=4):
+                        num_seeds=100, batch_size=4,
+                        random_seed=IK_RANDOM_SEED):
     """각 pose에 대해 num_seeds개 IK 해를 구한다.
 
     Args:
@@ -438,6 +454,8 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
         quats_np: (N, 4) EE quaternions (w, x, y, z)
         num_seeds: IK seed 수
         batch_size: GPU 배치 크기
+        random_seed: cuRobo IK seed bank 생성 seed. 같은 값이면 pose/batch와
+            무관하게 동일한 joint seed bank을 사용한다.
 
     Returns:
         all_solutions: (N, num_seeds, 6)
@@ -455,6 +473,7 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
         num_seeds=num_seeds,
         max_batch_size=batch_size,
         use_cuda_graph=False,
+        random_seed=int(random_seed),
         collision_cache=cache,
     )
     ik = InverseKinematics(cfg)
@@ -464,6 +483,13 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
 
     N = len(positions_np)
     n_dof = 6
+    # cuRobo에 seed_config을 주지 않으면 내부 sampler의 현재 상태와
+    # batch padding 순서에 따라 후보군이 달라질 수 있다. Solver가 가진 만큼의
+    # 고정 Halton bank를 한 번만 만들고 모든 pose에 명시적으로 재사용한다.
+    # 이렇게 하면 서로 다른 앱/프로세스도 동일한 IK 초기값에서 시작한다.
+    seed_bank = ik.prepare_action_seeds(
+        batch_size=1, num_seeds=num_seeds,
+    ).reshape(1, num_seeds, n_dof)
     all_solutions = np.zeros((N, num_seeds, n_dof), dtype=np.float64)
     all_success = np.zeros((N, num_seeds), dtype=bool)
 
@@ -477,9 +503,11 @@ def solve_ik_multi_seed(robot_cfg, world_scene, positions_np, quats_np,
         bp = torch.tensor(positions_np[s:e], device="cuda:0", dtype=torch.float32)
         bq = torch.tensor(quats_np[s:e], device="cuda:0", dtype=torch.float32)
         goal = Pose(position=bp, quaternion=bq)
+        batch_seed_config = seed_bank.repeat(e - s, 1, 1)
 
         result = ik.solve_pose(
             GoalToolPose.from_poses({tool: goal}, num_goalset=1),
+            seed_config=batch_seed_config,
             return_seeds=num_seeds,
         )
 
@@ -652,9 +680,32 @@ def dp_optimal_path(representatives, reconfig_threshold_rad=0.5):
 # Phase 4: MotionGen transit at reconfig points
 # =========================================================================
 
+def build_reconfig_motion_planner(robot_cfg, world_scene):
+    """Build and warm one BatchMotionPlanner reusable across transit calls."""
+    cache = {
+        "obb": max(1, len(world_scene.cuboid)),
+        "mesh": max(1, len(world_scene.mesh)),
+    }
+    _t_build = time.time()
+    cfg = MotionPlannerCfg.create(
+        robot=robot_cfg,
+        collision_cache=cache,
+        use_cuda_graph=False,
+        max_batch_size=TRANSIT_BATCH_SIZE,
+    )
+    planner = BatchMotionPlanner(cfg)
+    planner.update_world(world_scene)
+    graph_on = TRANSIT_ENABLE_GRAPH_ATTEMPT <= TRANSIT_MAX_ATTEMPTS
+    print(f"    Warming up BatchMotionPlanner (batch={TRANSIT_BATCH_SIZE}, "
+          f"graph={'on' if graph_on else 'off'})...")
+    planner.warmup(enable_graph=graph_on, num_warmup_iterations=2)
+    _tick("transit_build_warmup", _t_build)
+    return planner
+
+
 def plan_reconfig_transits(
     selected, reconfig_indices, robot_cfg, world_scene, label_idx=None, wd_m=None,
-    lock_wrist3=True, enable_via_ladder=True,
+    lock_wrist3=True, enable_via_ladder=True, motion_planner=None,
 ):
     """Reconfig 지점마다 BatchMotionPlanner joint-to-joint planning 수행.
 
@@ -670,6 +721,7 @@ def plan_reconfig_transits(
         world_scene: Scene (충돌 세계)
         label_idx: (선택) filtered→원본 viewpoint 인덱스 매핑. 로그 표기용.
         wd_m: (선택) working distance [m]. via-tilt(orbit) 에만 필요.
+        motion_planner: optional warmed BatchMotionPlanner to reuse across calls.
 
     Returns:
         transit_segments: dict {idx: (T, 6) transit trajectory} — 성공한 것만
@@ -677,25 +729,8 @@ def plan_reconfig_transits(
     """
     def _lbl(i):
         return int(label_idx[i]) if label_idx is not None else int(i)
-    cache = {
-        "obb": max(1, len(world_scene.cuboid)),
-        "mesh": max(1, len(world_scene.mesh)),
-    }
-    _t_build = time.time()
-    cfg = MotionPlannerCfg.create(
-        robot=robot_cfg,
-        collision_cache=cache,
-        use_cuda_graph=False,
-        max_batch_size=TRANSIT_BATCH_SIZE,
-    )
-    planner = BatchMotionPlanner(cfg)
-    planner.update_world(world_scene)
-    # [실험] graph(PRM) 재활성 — direct 가 표면을 우회하는 충돌-free 경로를 직접 찾게.
-    _graph_on = TRANSIT_ENABLE_GRAPH_ATTEMPT <= TRANSIT_MAX_ATTEMPTS
-    print(f"    Warming up BatchMotionPlanner (batch={TRANSIT_BATCH_SIZE}, "
-          f"graph={'on' if _graph_on else 'off'})...")
-    planner.warmup(enable_graph=_graph_on, num_warmup_iterations=2)
-    _tick("transit_build_warmup", _t_build)
+    planner = (motion_planner if motion_planner is not None
+               else build_reconfig_motion_planner(robot_cfg, world_scene))
 
     n_dof = selected.shape[-1]
     bs = planner.batch_size
@@ -1122,6 +1157,40 @@ def _precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
         free[(a, b)] = not bool(isc[off:off + n].any())
         off += n
     return lambda a, b: free.get((a, b), True)
+
+
+def find_colliding_interpolation_edges(selected, edge_indices, robot_cfg, world_scene):
+    """Return edges whose straight joint interpolation is in collision.
+
+    Every requested ``i`` denotes ``selected[i] -> selected[i + 1]``.  All
+    interpolations are densified and checked in one collision-check batch so
+    callers can add only the failing scan edges to the MotionGen transit batch.
+    """
+    selected = np.asarray(selected, dtype=np.float64)
+    edges = np.asarray(edge_indices, dtype=np.int64).reshape(-1)
+    if len(edges) == 0:
+        return np.zeros((0,), dtype=np.int64)
+    if np.any(edges < 0) or np.any(edges >= len(selected) - 1):
+        raise IndexError("interpolation edge index out of range")
+
+    dense, counts = [], []
+    for idx in edges:
+        segment = densify_for_collision_check(
+            np.stack([selected[int(idx)], selected[int(idx) + 1]])
+        )
+        dense.append(segment)
+        counts.append(len(segment))
+    is_collision, _ = batch_collision_check(
+        np.concatenate(dense, axis=0), robot_cfg, world_scene,
+    )
+
+    colliding = []
+    offset = 0
+    for idx, count in zip(edges, counts):
+        if bool(is_collision[offset:offset + count].any()):
+            colliding.append(int(idx))
+        offset += count
+    return np.asarray(colliding, dtype=np.int64)
 
 
 def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad):
@@ -1716,10 +1785,11 @@ def main():
     selected, _, stats = dp_optimal_path(representatives, reconfig_rad)
     _tick("dp", _t)
 
+    jumps = np.max(np.abs(np.diff(selected, axis=0)), axis=1)
+    is_reconfig = jumps > reconfig_rad
+
     # 클러스터 간/내 reconfig 분석
     if cluster_id is not None:
-        jumps = np.max(np.abs(np.diff(selected, axis=0)), axis=1)
-        is_reconfig = jumps > reconfig_rad
         is_inter_cluster = cluster_id[:-1] != cluster_id[1:]
 
         n_inter = int(is_inter_cluster.sum())
@@ -1762,14 +1832,29 @@ def main():
                 print(f"          pool-continuity: vp{o1}~sel[{o0}]={_verdict(d_next)}, "
                       f"vp{o0}~sel[{o1}]={_verdict(d_prev)}  (thr={thr_deg:.0f}°)")
 
-    # Phase 4: BatchMotionPlanner transit at reconfig points
+    # Phase 4: BatchMotionPlanner transit at reconfig points and at otherwise-small
+    # joint interpolation edges that collide.  The latter used to be discovered only
+    # in Phase 5 and could split the run/drop viewpoints without trying MotionGen.
     reconfig_indices = np.where(is_reconfig)[0] if cluster_id is not None else np.array([], dtype=int)
+    scan_edge_indices = np.where(~is_reconfig)[0]
+    collision_fallback_indices = find_colliding_interpolation_edges(
+        selected, scan_edge_indices, robot_cfg, world_config,
+    )
+    motion_indices = np.union1d(reconfig_indices, collision_fallback_indices).astype(np.int64)
     transit_segments = {}
     _t = time.time()
-    if len(reconfig_indices) > 0:
-        print(f"\n[Phase 4] BatchMotionPlanner transit for {len(reconfig_indices)} reconfig points...")
+    if len(collision_fallback_indices):
+        labels = [f"{int(orig_idx[i])}→{int(orig_idx[i + 1])}"
+                  for i in collision_fallback_indices]
+        print(f"\n[Phase 4] Scan interpolation collision: "
+              f"{len(collision_fallback_indices)} edge(s) → MotionGen fallback "
+              f"[{', '.join(labels)}]")
+    if len(motion_indices) > 0:
+        print(f"\n[Phase 4] BatchMotionPlanner transit for {len(motion_indices)} edges "
+              f"({len(reconfig_indices)} reconfig + "
+              f"{len(collision_fallback_indices)} scan-collision fallback)...")
         transit_segments, transit_stats = plan_reconfig_transits(
-            selected, reconfig_indices, robot_cfg, world_config, label_idx=orig_idx, wd_m=wd_m,
+            selected, motion_indices, robot_cfg, world_config, label_idx=orig_idx, wd_m=wd_m,
         )
         # 안전망: transit planner가 중간에 wrist_3를 흔들었을 수 있으므로 강제 고정.
         # 단 via-roll/via-tilt 는 의도적으로 rolled 중간자세(wrist_3 가변)를 쓰므로 덮어쓰면
@@ -1899,11 +1984,16 @@ def main():
     _tick("save", _t)
 
     n_transit_ok = len(transit_segments)
+    n_collision_fallback_ok = sum(
+        int(i) in transit_segments for i in collision_fallback_indices
+    )
     covered = runs_info["kept"][2]
     print(f"\nDone. coverage={covered}/{N} viewpoints "
           f"(unreachable dropped={n_dropped_empty}, transit-split dropped={len(skipped_vps)}), "
           f"reconfigs={stats['n_reconfigs']} (inter={rc_inter}, intra={rc_intra}), "
-          f"transit={n_transit_ok}/{len(reconfig_indices)} OK, "
+          f"transit={n_transit_ok}/{len(motion_indices)} OK "
+          f"(scan-collision fallback={n_collision_fallback_ok}/"
+          f"{len(collision_fallback_indices)}), "
           f"collisions={n_collisions}, final={len(final_traj)} waypoints")
 
     # === Timing breakdown (생성시간 분해 — 레버 선택용) ===

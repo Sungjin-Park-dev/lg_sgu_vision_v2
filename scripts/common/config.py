@@ -93,17 +93,59 @@ MOUNT_HEIGHT = 0.805
 # 주의: rotation 을 여기서 주면 mesh-bake 와 달리 viewer 마다 적용이 필요 — viewpoint_studio /
 # Isaac scene 은 config rotation 을 반영하도록 맞춰져 있다(둘 다 동일 외형). z-yaw 는 bottom-filter
 # 가 불변이라 기존 viewpoint h5 재생성 불필요(비-z 회전은 재생성 필요).
+# 아래 값은 optimize_placement.py(GLNS 배치 스윕)의 min-reconfig best.
+# 실제 joined motion reconfig = scan reconfig + seam(=solved component 수-1) 을 최소화(1~2개 미커버 허용).
+# 전부 base reconfig=0. 각 물체별 placement_sweep/summary 참조. (coverage-우선 best 는 커밋 이력/summary 참고)
 OBJECT_PLACEMENTS = {
-    # curved: dy-0.30 dz+0.20 → reachable 99/100, via-roll 로 visited 99/99
+    # curved: 99/100, base0, scan reconfig2, 1 component(seam0) → 실제 ~2. (coverage-best 는 100/100·reconfig6)
     "curved_structure": {
-        "position": np.array([-0.1, 0.8, 0.19], dtype=np.float64),
-        "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-    },
-    # sample: dy-0.30 + z-yaw90 → reachable 69/74, visited 69/69 (yaw 가 scan-collision 회피)
-    "sample": {
-        "position": np.array([-0.1, 0.8, -0.010], dtype=np.float64),
+        # "position": np.array([-0.175, 0.725, 0.19], dtype=np.float64),
+        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
+        
+        # "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
         "rotation": np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float64),  # z-yaw 90°
     },
+    # cylinder: 22/22, base0, reconfig2, 1 component. 근접 y 경계(0.95) → 더 가까이면 유리할 수 있음.
+    "cylinder_sample": {
+        # "position": np.array([-0.025, 0.95, -0.010], dtype=np.float64),
+        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
+        "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+    },
+    # sample: 72/74, base0, scan reconfig0, 3 component(seam2) → 실제 ~2 + z-yaw90(scan-collision 회피).
+    "sample": {
+        # "position": np.array([-0.1, 0.8, -0.010], dtype=np.float64),
+        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
+        "rotation": np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float64),  # z-yaw 90°
+    },
+    # square: 70/71, base0, reconfig3, 1 component. 격자 전역 평평(reconfig3 바닥) → 근접 y/높은 z 확장 시 개선.
+    "square_structure": {
+        # "position": np.array([-0.175, 1.1, -0.010], dtype=np.float64),
+        # "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        
+        "position": np.array([-0.121, 0.743, 0.359], dtype=np.float64),
+        "rotation": np.array([0.92387953, 0.0, 0.0, 0.38268343], dtype=np.float64),  # z-yaw 45°
+    },
+}
+
+# 충돌 검사용 물체 형상 override (build_collision_world 가 참조).
+# cuRobo mesh 충돌은 최소 bbox 치수 ≲5cm 인 작은 메시를 **모든** 로봇 자세에 대해 충돌로 오판한다
+# (0.5m 떨어진 home 자세조차 충돌 → IK 후보 전멸 → "No reachable viewpoints"). 해당 물체는
+# mesh 대신 analytic primitive 로 충돌을 표현한다. "box" = mesh bbox 를 Cuboid(obb)로 — 모든 충돌
+# consumer(IK/transit/verify)에서 확실히 반영. dims/center 는 mesh bbox 에서 자동 산출(메시 바뀌어도
+# 추적). 표에 없는 물체(curved_structure/sample 등 충분히 큰 물체)는 기존대로 mesh 를 그대로 쓴다.
+OBJECT_COLLISION_SHAPE = {
+    "cylinder_sample": "box",  # Ø46×81mm — mesh 충돌 오판 회피용 bbox proxy
+}
+
+# 속이 빈(hollow) 물체 viewpoint 필터 override.
+# 표면 샘플링은 안쪽 면까지 뽑아 viewpoint 가 공동 안에 생긴다(예: square_structure = 속 빈 상자).
+# 여기 등록된 물체는 생성 후 convex-hull 법선 정렬 필터로 안쪽 껍데기 viewpoint 를 제거하고
+# **바깥 껍데기만** 남긴다(위에서 안쪽 바닥을 내려다보는 것까지 제거). viewpoint_studio 와 CLI 가
+# 참조해 ViewpointGenParams.filter_interior 를 켠다.
+#   hull_align_min: 표면 법선 vs 최근접 convex-hull 바깥법선 정렬(cos) 임계. 미만이면 안쪽 면=제거.
+# 주의: 오목한 '바깥' 형상(홈/계단)이 있는 물체엔 부적합 — box 류에만 opt-in.
+OBJECT_FILTER_INTERIOR = {
+    "square_structure": {"hull_align_min": 0.3},
 }
 
 
@@ -133,7 +175,7 @@ def target_object_world_position():
 # robot frame z = 0.315 - 0.805 = -0.490
 TABLE = {
     "name": "table",
-    "position": np.array([-0.2, 1.1, -0.490], dtype=np.float64),
+    "position": np.array([-0.2, 0.7, -0.490], dtype=np.float64),
     "dimensions": np.array([0.910, 0.768, 0.630], dtype=np.float64),
 }
 

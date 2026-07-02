@@ -8,6 +8,7 @@ and the result-HDF5 schema so those pieces can be unit-tested without a GPU.
 from __future__ import annotations
 
 import json
+import itertools
 import re
 from pathlib import Path
 from typing import Iterable
@@ -21,6 +22,123 @@ from scipy.sparse.csgraph import connected_components
 
 RESULT_FORMAT_VERSION = 2
 JOINT_COST_SCALE = 1000
+
+
+def periodic_joint_delta(delta: np.ndarray, joint_periods: np.ndarray | None = None) -> np.ndarray:
+    """Return signed shortest deltas for periodic joints, preserving array shape."""
+    out = np.asarray(delta, dtype=np.float64).copy()
+    if joint_periods is None:
+        return out
+    periods = np.asarray(joint_periods, dtype=np.float64)
+    if out.shape[-1] != len(periods) or np.any(periods < 0.0):
+        raise ValueError("joint_periods must be non-negative and match the final dimension")
+    mask = periods > 0.0
+    out[..., mask] = (
+        (out[..., mask] + periods[mask] / 2.0) % periods[mask]
+        - periods[mask] / 2.0
+    )
+    return out
+
+
+def unwrap_joint_path(
+    path: np.ndarray,
+    joint_lower: np.ndarray,
+    joint_upper: np.ndarray,
+    joint_periods: np.ndarray,
+    threshold_rad: float,
+    joint_weights: np.ndarray | None = None,
+    reference_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """Choose limit-valid 2π-equivalent configurations for an entire open path.
+
+    Dynamic programming preserves strict base-reconfiguration → any-joint
+    reconfiguration → weighted-L2 ordering. Endpoint L2 distance to the optional
+    reference breaks globally shifted ties without changing reconfiguration tiers.
+    """
+    q_path = np.asarray(path, dtype=np.float64)
+    lower = np.asarray(joint_lower, dtype=np.float64)
+    upper = np.asarray(joint_upper, dtype=np.float64)
+    periods = np.asarray(joint_periods, dtype=np.float64)
+    weights = (np.ones(q_path.shape[1], dtype=np.float64) if joint_weights is None
+               else np.asarray(joint_weights, dtype=np.float64))
+    reference = (None if reference_joints is None
+                 else np.asarray(reference_joints, dtype=np.float64))
+    if q_path.ndim != 2 or q_path.shape[1] == 0:
+        raise ValueError("path must have shape (N, dof)")
+    dof = q_path.shape[1]
+    if any(x.shape != (dof,) for x in (lower, upper, periods, weights)):
+        raise ValueError("joint limit/period/weight arrays must match path dof")
+    if reference is not None and reference.shape != (dof,):
+        raise ValueError("reference_joints must match path dof")
+    if np.any(lower > upper) or threshold_rad <= 0.0:
+        raise ValueError("invalid joint limits or threshold")
+    if len(q_path) == 0:
+        return q_path.copy()
+
+    states: list[np.ndarray] = []
+    tol = 1e-9
+    for q in q_path:
+        choices = []
+        for j, value in enumerate(q):
+            if periods[j] > 0.0:
+                k_min = int(np.ceil((lower[j] - value - tol) / periods[j]))
+                k_max = int(np.floor((upper[j] - value + tol) / periods[j]))
+                vals = [value + k * periods[j] for k in range(k_min, k_max + 1)]
+            else:
+                vals = [float(value)] if lower[j] - tol <= value <= upper[j] + tol else []
+            if not vals:
+                raise ValueError(f"joint {j} has no equivalent value inside its limits")
+            choices.append(vals)
+        states.append(np.asarray(list(itertools.product(*choices)), dtype=np.float64))
+
+    # Each state cost is a strict tuple: (base count, any count, weighted L2).
+    prev_cost = [
+        (0, 0, 0.0 if reference is None
+         else float(np.linalg.norm((s - reference) * weights)))
+        for s in states[0]
+    ]
+    predecessors: list[np.ndarray] = []
+    for step in range(1, len(states)):
+        prev_states, cur_states = states[step - 1], states[step]
+        cur_cost = []
+        cur_pred = np.empty(len(cur_states), dtype=np.int32)
+        for ci, cur in enumerate(cur_states):
+            best_cost, best_pi = None, -1
+            for pi, prev in enumerate(prev_states):
+                delta = np.abs(cur - prev)
+                edge = (
+                    int(np.max(delta[:3]) > threshold_rad),
+                    int(np.max(delta) > threshold_rad),
+                    float(np.linalg.norm(delta * weights)),
+                )
+                candidate = (
+                    prev_cost[pi][0] + edge[0],
+                    prev_cost[pi][1] + edge[1],
+                    prev_cost[pi][2] + edge[2],
+                )
+                if best_cost is None or candidate < best_cost:
+                    best_cost, best_pi = candidate, pi
+            cur_cost.append(best_cost)
+            cur_pred[ci] = best_pi
+        predecessors.append(cur_pred)
+        prev_cost = cur_cost
+
+    if reference is None:
+        final = min(range(len(prev_cost)), key=lambda i: (prev_cost[i], i))
+    else:
+        final = min(
+            range(len(prev_cost)),
+            key=lambda i: (
+                prev_cost[i][0], prev_cost[i][1],
+                prev_cost[i][2] + float(np.linalg.norm((states[-1][i] - reference) * weights)),
+                i,
+            ),
+        )
+    indices = [final]
+    for pred in reversed(predecessors):
+        indices.append(int(pred[indices[-1]]))
+    indices.reverse()
+    return np.stack([states[i][indices[i]] for i in range(len(states))])
 
 
 def effective_candidate_cap(
@@ -44,6 +162,7 @@ def prune_candidate_sets(
     threshold_rad: float,
     joint_weights: np.ndarray,
     reference_joints: np.ndarray | None = None,
+    joint_periods: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], list[dict[str, np.ndarray]]]:
     """Deterministically retain connected, diverse IK candidates per viewpoint.
 
@@ -60,10 +179,37 @@ def prune_candidate_sets(
     if weights.shape != (6,) or ref.shape != (6,):
         raise ValueError("joint_weights and reference_joints must have shape (6,)")
 
-    incident: list[list[int]] = [[] for _ in range(n)]
-    for a, b in np.asarray(edges, dtype=np.int32):
-        incident[int(a)].append(int(b))
-        incident[int(b)].append(int(a))
+    # Compute every undirected incident-edge compatibility matrix once and
+    # update both endpoint score arrays. The previous per-viewpoint loop built
+    # the same A×B matrix again as B×A.
+    base_connectivity = [np.zeros(len(reps), dtype=np.int32) for reps in representatives]
+    any_connectivity = [np.zeros(len(reps), dtype=np.int32) for reps in representatives]
+    needs_pruning = [
+        len(representatives[i]) > max(1, int(cap_by_viewpoint[i])) for i in range(n)
+    ]
+    unique_edges = sorted({
+        (min(int(a), int(b)), max(int(a), int(b)))
+        for a, b in np.asarray(edges, dtype=np.int32)
+        if int(a) != int(b)
+    })
+    for a, b in unique_edges:
+        if not needs_pruning[a] and not needs_pruning[b]:
+            continue
+        reps_a = np.asarray(representatives[a], dtype=np.float64)
+        reps_b = np.asarray(representatives[b], dtype=np.float64)
+        if not len(reps_a) or not len(reps_b):
+            continue
+        delta = np.abs(periodic_joint_delta(
+            reps_a[:, None, :] - reps_b[None, :, :], joint_periods,
+        ))
+        base_ok = np.max(delta[..., :3], axis=2) <= threshold_rad
+        any_ok = np.max(delta, axis=2) <= threshold_rad
+        if needs_pruning[a]:
+            base_connectivity[a] += np.any(base_ok, axis=1)
+            any_connectivity[a] += np.any(any_ok, axis=1)
+        if needs_pruning[b]:
+            base_connectivity[b] += np.any(base_ok, axis=0)
+            any_connectivity[b] += np.any(any_ok, axis=0)
 
     out_reps: list[np.ndarray] = []
     out_meta: list[dict[str, np.ndarray]] = []
@@ -75,32 +221,36 @@ def prune_candidate_sets(
         if k <= cap:
             chosen = list(range(k))
         else:
-            base_conn = np.zeros(k, dtype=np.int32)
-            any_conn = np.zeros(k, dtype=np.int32)
-            for nb in sorted(set(incident[vp])):
-                other = np.asarray(representatives[nb], dtype=np.float64)
-                if not len(other):
-                    continue
-                delta = np.abs(reps[:, None, :] - other[None, :, :])
-                base_conn += np.any(np.max(delta[..., :3], axis=2) <= threshold_rad, axis=1)
-                any_conn += np.any(np.max(delta, axis=2) <= threshold_rad, axis=1)
+            base_conn = base_connectivity[vp]
+            any_conn = any_connectivity[vp]
             variants = np.asarray(md["variant"]).astype("U")
             tilt = np.asarray(md["tilt_deg"], dtype=np.float64)
-            distance = np.linalg.norm((reps - ref) * weights, axis=1)
+            distance = np.linalg.norm(
+                periodic_joint_delta(reps - ref, joint_periods) * weights, axis=1,
+            )
             chosen: list[int] = []
+            # Incrementally maintain each candidate's distance to the nearest
+            # selected branch. Recomputing min(distance(candidate, every chosen))
+            # inside the sort key caused millions of tiny NumPy calls.
+            min_diversity = np.full(k, np.inf, dtype=np.float64)
 
             def choose_from(pool: list[int], limit: int) -> None:
                 remaining = list(pool)
                 while remaining and len(chosen) < limit:
                     def key(i: int):
-                        diversity = (np.inf if not chosen else
-                                     min(np.linalg.norm((reps[i] - reps[j]) * weights)
-                                         for j in chosen))
                         return (-int(base_conn[i]), -int(any_conn[i]), float(tilt[i]),
-                                -float(diversity), float(distance[i]), int(i))
+                                -float(min_diversity[i]), float(distance[i]), int(i))
                     best = min(remaining, key=key)
                     chosen.append(best)
                     remaining.remove(best)
+                    delta_to_best = periodic_joint_delta(
+                        reps - reps[best], joint_periods,
+                    )
+                    np.minimum(
+                        min_diversity,
+                        np.linalg.norm(delta_to_best * weights, axis=1),
+                        out=min_diversity,
+                    )
 
             nominal = [i for i in range(k) if variants[i] == "nominal"]
             augmented = [i for i in range(k) if variants[i] != "nominal"]
@@ -278,6 +428,7 @@ def build_gtsp_problem(
     reconfig_weight_wrist: float = 1.0,
     reconfig_exclude_last: bool = False,
     candidate_tilt_costs: list[np.ndarray] | None = None,
+    joint_periods: np.ndarray | None = None,
 ) -> dict:
     """Build a complete integer GTSP matrix with Delaunay non-edges forbidden.
 
@@ -306,6 +457,10 @@ def build_gtsp_problem(
                else np.asarray(joint_weights, dtype=np.float64))
     if weights.shape != (6,) or np.any(weights < 0.0):
         raise ValueError("joint_weights must be 6 non-negative values")
+    periods = (np.zeros(6, dtype=np.float64) if joint_periods is None
+               else np.asarray(joint_periods, dtype=np.float64))
+    if periods.shape != (6,) or np.any(periods < 0.0):
+        raise ValueError("joint_periods must be 6 non-negative values")
     base_idx = np.arange(3, dtype=np.int32)
     any_idx = np.arange(6, dtype=np.int32)
 
@@ -352,7 +507,9 @@ def build_gtsp_problem(
     for a, b in sorted(allowed_view_edges):
         qa = np.asarray(representatives[a], dtype=np.float64)
         qb = np.asarray(representatives[b], dtype=np.float64)
-        diff = qa[:, None, :] - qb[None, :, :]
+        diff = periodic_joint_delta(
+            qa[:, None, :] - qb[None, :, :], periods,
+        )
         # 2차(동점 깨기) 비용은 per-joint 가중 L2 — wrist roll 등 싼 관절은 작게 반영.
         l2 = np.linalg.norm(diff * weights[None, None, :], axis=2)
         joint_cost = np.rint(l2 * joint_cost_scale).astype(np.int64)
@@ -420,6 +577,7 @@ def build_gtsp_problem(
         "forbidden_cost": int(forbidden_cost),
         "joint_cost_scale": int(joint_cost_scale),
         "joint_weights": weights,
+        "joint_periods": periods,
         "reconfig_base_joints": base_idx,
         "reconfig_any_joints": any_idx,
         "allowed_view_edges": allowed_view_edges,
@@ -556,6 +714,7 @@ def write_result_hdf5(
                     ("viewpoint_order", np.int32),
                     ("selected_candidate_index", np.int32),
                     ("selected_joints", np.float64),
+                    ("selected_joint_turns", np.int16),
                     ("edge_linf_rad", np.float64),
                     ("edge_linf_base_rad", np.float64),
                     ("edge_linf_wrist_rad", np.float64),
@@ -610,6 +769,7 @@ def read_result_hdf5(path: Path) -> dict:
             for key in (
                 "feasibility_witness", "viewpoint_order", "selected_candidate_index",
                 "selected_joints", "edge_linf_rad", "edge_linf_base_rad",
+                "selected_joint_turns",
                 "edge_linf_wrist_rad", "edge_l2_rad", "is_reconfiguration",
                 "is_reconfiguration_base", "is_reconfiguration_wrist",
                 "selected_pose_variant", "selected_roll_deg", "selected_tilt_deg",

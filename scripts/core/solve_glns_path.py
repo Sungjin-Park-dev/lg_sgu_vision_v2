@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
@@ -36,7 +37,9 @@ from common.glns_utils import (  # noqa: E402
     find_hamiltonian_open_path,
     induce_adjacency,
     parse_glns_tour,
+    periodic_joint_delta,
     prune_candidate_sets,
+    unwrap_joint_path,
     write_result_hdf5,
     write_simple_gtsp,
 )
@@ -74,6 +77,8 @@ def _parse_args() -> argparse.Namespace:
                         help=f"IK seeds per viewpoint (default: {PT.NUM_IK_SEEDS})")
     parser.add_argument("--ik-batch-size", type=int, default=PT.IK_BATCH_SIZE,
                         help=f"IK GPU batch size (default: {PT.IK_BATCH_SIZE})")
+    parser.add_argument("--ik-seed", type=int, default=PT.IK_RANDOM_SEED,
+                        help=f"Deterministic cuRobo IK seed (default: {PT.IK_RANDOM_SEED})")
     parser.add_argument("--reconfig-threshold-deg", type=float,
                         default=PT.RECONFIG_THRESHOLD_DEG,
                         help=f"L-inf reconfiguration threshold (default: {PT.RECONFIG_THRESHOLD_DEG})")
@@ -138,6 +143,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("Either --viewpoints or --num-viewpoints is required")
     if args.num_seeds <= 0 or args.ik_batch_size <= 0:
         parser.error("--num-seeds and --ik-batch-size must be > 0")
+    if args.ik_seed < 0:
+        parser.error("--ik-seed must be >= 0")
     if args.reconfig_threshold_deg <= 0.0:
         parser.error("--reconfig-threshold-deg must be > 0")
     if not 0.0 < args.roll_step_deg <= 180.0:
@@ -259,6 +266,28 @@ def _default_output(object_name: str, count: int) -> Path:
     return config.get_ik_path(object_name, count, f"glns_result_{stamp}.h5")
 
 
+def _joint_limits_and_periods(robot_cfg) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read active-joint limits and mark joints with at least two full turns as periodic."""
+    kin = robot_cfg["robot_cfg"]["kinematics"]
+    names = list(kin["cspace"]["joint_names"])
+    limit_clip = float(kin["cspace"].get("position_limit_clip", 0.0))
+    root = ET.parse(kin["urdf_path"]).getroot()
+    joints = {node.attrib.get("name"): node for node in root.findall("joint")}
+    lower, upper, periods = [], [], []
+    for name in names:
+        node = joints.get(name)
+        limit = None if node is None else node.find("limit")
+        if limit is None or "lower" not in limit.attrib or "upper" not in limit.attrib:
+            raise ValueError(f"URDF joint limits missing for {name}")
+        lo, hi = float(limit.attrib["lower"]), float(limit.attrib["upper"])
+        lower.append(lo + limit_clip)
+        upper.append(hi - limit_clip)
+        # A ±π joint cannot cross its endpoint even though its pose is angularly
+        # equivalent. Require a full extra revolution of available range.
+        periods.append(2.0 * np.pi if hi - lo >= 4.0 * np.pi - 1e-6 else 0.0)
+    return np.asarray(lower), np.asarray(upper), np.asarray(periods)
+
+
 def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg=30.0,
                          tilt_augment=False, tilt_angles_deg=(5.0, 10.0),
                          tilt_azimuths=8):
@@ -297,10 +326,11 @@ def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg
 
 def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                                    num_seeds, batch_size, wrist3_fixed,
-                                   lock_nominal_wrist3):
+                                   lock_nominal_wrist3, joint_periods=None,
+                                   ik_seed=PT.IK_RANDOM_SEED):
     sols, success = PT.solve_ik_multi_seed(
         robot_cfg, world, targets["position"], targets["quaternion"],
-        num_seeds=num_seeds, batch_size=batch_size,
+        num_seeds=num_seeds, batch_size=batch_size, random_seed=ik_seed,
     )
     representatives, metadata = [], []
     for vp in range(n_viewpoints):
@@ -313,7 +343,8 @@ def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                 q = np.asarray(q, dtype=np.float64).copy()
                 if lock_nominal_wrist3:
                     q[-1] = wrist3_fixed
-                if any(np.max(np.abs(q - prior)) <= PT.DP_CANDIDATE_DEDUP_RAD for prior in kept):
+                if any(np.max(np.abs(periodic_joint_delta(q - prior, joint_periods)))
+                       <= PT.DP_CANDIDATE_DEDUP_RAD for prior in kept):
                     continue
                 kept.append(q)
                 fields["variant"].append(targets["variant"][pose_idx])
@@ -365,7 +396,8 @@ def _tilt_cone_poses(world_pose, wd_m, tilt_deg, n_azimuth):
 
 def _tilt_compatible_solution(viewpoint, neighbor_configs, *, world_poses, world, robot_cfg,
                               wd_m, wrist3_fixed, num_seeds, batch_size,
-                              big_base_rad, tilt_magnitudes_deg, n_azimuth):
+                              big_base_rad, tilt_magnitudes_deg, n_azimuth,
+                              ik_seed=PT.IK_RANDOM_SEED):
     """outlier viewpoint 를 ±tilt 로 재-IK 해 이웃과 big-base reconfig 없는 collision-free 해 탐색.
 
     작은 tilt 부터 시도하고, base(어깨/팔꿈치) L∞ 가 모든 이웃에 대해 big_base_rad 미만인 해 중
@@ -374,7 +406,8 @@ def _tilt_compatible_solution(viewpoint, neighbor_configs, *, world_poses, world
     for tilt_deg in tilt_magnitudes_deg:
         ps, quats = _tilt_cone_poses(world_poses[viewpoint], wd_m, tilt_deg, n_azimuth)
         sols, succ = PT.solve_ik_multi_seed(
-            robot_cfg, world, ps, quats, num_seeds=num_seeds, batch_size=batch_size)
+            robot_cfg, world, ps, quats, num_seeds=num_seeds, batch_size=batch_size,
+            random_seed=ik_seed)
         dof = sols.shape[2]
         reps = PT.cluster_ik_solutions(sols.reshape(1, -1, dof), succ.reshape(1, -1))[0]
         if not len(reps):
@@ -396,7 +429,8 @@ def _tilt_compatible_solution(viewpoint, neighbor_configs, *, world_poses, world
 
 def _repair_branch_outliers(order, selected, candidates, *, world_poses, world, robot_cfg,
                             wd_m, wrist3_fixed, num_seeds, batch_size,
-                            big_base_rad, outlier_max_len, tilt_magnitudes_deg, n_azimuth):
+                            big_base_rad, outlier_max_len, tilt_magnitudes_deg, n_azimuth,
+                            ik_seed=PT.IK_RANDOM_SEED):
     """GLNS 경로의 short branch-run(강제 big-base reconfig outlier)을 tilt-repair 또는 drop.
 
     big-base reconfig edge 가 경로를 branch-run 으로 가른다. 양쪽 run 이 모두 길면 '진짜 전환'
@@ -438,7 +472,8 @@ def _repair_branch_outliers(order, selected, candidates, *, world_poses, world, 
                 v, outside, world_poses=world_poses, world=world, robot_cfg=robot_cfg,
                 wd_m=wd_m, wrist3_fixed=wrist3_fixed, num_seeds=num_seeds,
                 batch_size=batch_size, big_base_rad=big_base_rad,
-                tilt_magnitudes_deg=tilt_magnitudes_deg, n_azimuth=n_azimuth)
+                tilt_magnitudes_deg=tilt_magnitudes_deg, n_azimuth=n_azimuth,
+                ik_seed=ik_seed)
             if sol is not None:
                 selected[p] = sol
                 candidates[p] = -1                  # tilt-repaired(비-nominal 후보)
@@ -527,10 +562,17 @@ def main() -> int:
     else:
         graph_edges = source_edges
 
-    print("[3/6] Computing fresh collision-aware IK candidates...")
+    print(f"[3/6] Computing fresh collision-aware IK candidates (seed={args.ik_seed})...")
     world_poses = PT.build_camera_poses(positions, normals, source["wd_m"])
     world = PT.build_collision_world(args.object)
     robot_cfg = PT._resolve_robot_config(PT.ROBOT_CONFIG)
+    joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
+    periodic_names = [
+        name for name, period in zip(
+            robot_cfg["robot_cfg"]["kinematics"]["cspace"]["joint_names"], joint_periods)
+        if period > 0.0
+    ]
+    print(f"  Periodic joint lifting enabled: {periodic_names}")
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
     targets = _build_pose_variants(
         world_poses, source["wd_m"], roll_augment=args.roll_augment,
@@ -542,6 +584,7 @@ def main() -> int:
     representatives_raw, candidate_metadata_raw = _solve_pose_variant_candidates(
         targets, n_viewpoints, world, robot_cfg, args.num_seeds, args.ik_batch_size,
         wrist3_fixed, lock_nominal_wrist3=not (args.roll_augment or args.tilt_augment),
+        joint_periods=joint_periods, ik_seed=args.ik_seed,
     )
     removed_collision = _collision_filter_representatives(
         representatives_raw, robot_cfg, world, candidate_metadata_raw,
@@ -567,15 +610,21 @@ def main() -> int:
         )
         cap_by_viewpoint[members] = cap
         component_caps[cid] = cap
+    prune_started = time.perf_counter()
     representatives, candidate_metadata = prune_candidate_sets(
         representatives_raw, candidate_metadata_raw, induced_edges, cap_by_viewpoint,
         np.deg2rad(args.reconfig_threshold_deg), joint_weights,
         reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
+        joint_periods=joint_periods,
     )
     candidate_counts = np.asarray([len(reps) for reps in representatives], dtype=np.int32)
+    prune_seconds = time.perf_counter() - prune_started
     if len(components):
         print("  Candidate caps: " + ", ".join(
             f"component {cid}=K{component_caps[cid]}" for cid in range(len(components))))
+    print(f"  Candidate pruning: {int(candidate_counts_raw.sum())} raw → "
+          f"{int(candidate_counts.sum())} retained, {prune_seconds:.2f}s "
+          f"({len(induced_edges)} undirected edges, no reverse recomputation)")
 
     print("[5/6] Solving one open GTSP per component...")
     threshold_rad = np.deg2rad(args.reconfig_threshold_deg)
@@ -616,14 +665,29 @@ def main() -> int:
             if len(members) == 1:
                 viewpoint = int(members[0])
                 reps = representatives[viewpoint]
-                candidate = int(np.argmin(np.linalg.norm(reps - config.ROBOT_START_STATE, axis=1)))
+                candidate = int(np.argmin(np.linalg.norm(
+                    periodic_joint_delta(reps - config.ROBOT_START_STATE, joint_periods)
+                    * joint_weights, axis=1,
+                )))
+                selected_single = unwrap_joint_path(
+                    reps[candidate:candidate + 1], joint_lower, joint_upper, joint_periods,
+                    threshold_rad, joint_weights=joint_weights,
+                    reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
+                )
+                single_turns = np.zeros_like(selected_single, dtype=np.int16)
+                periodic = joint_periods > 0.0
+                single_turns[:, periodic] = np.rint(
+                    (selected_single[:, periodic] - reps[candidate:candidate + 1, periodic])
+                    / joint_periods[periodic]
+                ).astype(np.int16)
                 base.update(
                     status="solved", reason="trivial singleton", solver_cost=0,
                     reconfig_unit=1, reconfig_unit_base=1, reconfig_unit_wrist=1,
                     forbidden_cost=1, joint_cost_scale=1000,
                     viewpoint_order=np.array([viewpoint], dtype=np.int32),
                     selected_candidate_index=np.array([candidate], dtype=np.int32),
-                    selected_joints=reps[candidate:candidate + 1],
+                    selected_joints=selected_single,
+                    selected_joint_turns=single_turns,
                     edge_linf_rad=np.empty((0,)), edge_linf_base_rad=np.empty((0,)),
                     edge_linf_wrist_rad=np.empty((0,)), edge_l2_rad=np.empty((0,)),
                     is_reconfiguration=np.empty((0,), dtype=bool),
@@ -670,6 +734,7 @@ def main() -> int:
                         np.rint((np.asarray(md["tilt_deg"]) / 5.0) ** 2).astype(np.int64)
                         for md in candidate_metadata
                     ],
+                    joint_periods=joint_periods,
                 )
                 instance = temp_root / f"component_{cid:03d}.gtsp"
                 tour_file = temp_root / f"component_{cid:03d}.tour.txt"
@@ -681,10 +746,21 @@ def main() -> int:
                 decoded = decode_and_validate_tour(parse_glns_tour(tour_file), problem)
                 order = decoded["viewpoint_order"]
                 candidates = decoded["candidate_order"]
-                selected = np.stack([
+                selected_wrapped = np.stack([
                     representatives[int(vp)][int(candidate)]
                     for vp, candidate in zip(order, candidates)
                 ])
+                selected = unwrap_joint_path(
+                    selected_wrapped, joint_lower, joint_upper, joint_periods,
+                    threshold_rad, joint_weights=joint_weights,
+                    reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
+                )
+                selected_turns = np.zeros_like(selected, dtype=np.int16)
+                periodic = joint_periods > 0.0
+                selected_turns[:, periodic] = np.rint(
+                    (selected[:, periodic] - selected_wrapped[:, periodic])
+                    / joint_periods[periodic]
+                ).astype(np.int16)
                 diff = np.diff(selected, axis=0)
                 absd = np.abs(diff)
                 linf_base = np.max(absd[:, base_idx_arr], axis=1)
@@ -710,7 +786,8 @@ def main() -> int:
                     forbidden_cost=problem["forbidden_cost"],
                     joint_cost_scale=problem["joint_cost_scale"],
                     viewpoint_order=order, selected_candidate_index=candidates,
-                    selected_joints=selected, edge_linf_rad=linf,
+                    selected_joints=selected, selected_joint_turns=selected_turns,
+                    edge_linf_rad=linf,
                     edge_linf_base_rad=linf_base, edge_linf_wrist_rad=linf_any,
                     edge_l2_rad=l2,
                     is_reconfiguration=is_reconfig,
@@ -744,6 +821,7 @@ def main() -> int:
                 print(f"    SOLVED: reconfigs={int(is_reconfig.sum())} "
                       f"(base={int(is_reconfig_base.sum())}, "
                       f"any={int(is_reconfig_any.sum())}), "
+                      f"lifted_joints={int(np.count_nonzero(selected_turns))}, "
                       f"cost={decoded['cost']}, {elapsed:.2f}s")
                 if args.tilt_repair and len(order) >= 2:
                     try:
@@ -755,18 +833,29 @@ def main() -> int:
                             big_base_rad=np.deg2rad(args.big_base_deg),
                             outlier_max_len=args.outlier_max_len,
                             tilt_magnitudes_deg=_tilt_magnitudes(args.tilt_repair_max_deg),
-                            n_azimuth=args.tilt_repair_azimuths)
+                            n_azimuth=args.tilt_repair_azimuths, ik_seed=args.ik_seed)
                     except Exception as rexc:  # noqa: BLE001 — keep the valid un-repaired solve
                         print(f"    [tilt-repair warning] {rexc} — keeping un-repaired path")
                         repaired, dropped = [], []
                     if (repaired or dropped) and len(rep_sel) >= 1:
-                        rep_sel = np.stack(rep_sel)
+                        rep_wrapped = np.stack(rep_sel)
+                        rep_sel = unwrap_joint_path(
+                            rep_wrapped, joint_lower, joint_upper, joint_periods,
+                            threshold_rad, joint_weights=joint_weights,
+                            reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
+                        )
+                        rep_turns = np.zeros_like(rep_sel, dtype=np.int16)
+                        periodic = joint_periods > 0.0
+                        rep_turns[:, periodic] = np.rint(
+                            (rep_sel[:, periodic] - rep_wrapped[:, periodic])
+                            / joint_periods[periodic]
+                        ).astype(np.int16)
                         fields = _path_reconfig_fields(
                             rep_sel, threshold_rad, base_idx_arr, any_idx_arr)
                         base.update(
                             viewpoint_order=np.asarray(rep_order, dtype=np.int32),
                             selected_candidate_index=np.asarray(rep_cand, dtype=np.int32),
-                            selected_joints=rep_sel, **fields)
+                            selected_joints=rep_sel, selected_joint_turns=rep_turns, **fields)
                         repaired_all.extend(int(v) for v, _ in repaired)
                         dropped_all.extend(int(v) for v in dropped)
                         print(f"    Tilt-repair: repaired {[(v, round(d, 1)) for v, d in repaired]}, "
@@ -798,6 +887,7 @@ def main() -> int:
         "robot_config": PT.ROBOT_CONFIG,
         "num_ik_seeds": args.num_seeds,
         "ik_batch_size": args.ik_batch_size,
+        "ik_seed": args.ik_seed,
         "wrist3_fixed_rad": (float("nan") if (args.roll_augment or args.tilt_augment)
                               else wrist3_fixed),
         "roll_augmented": bool(args.roll_augment),
@@ -810,6 +900,10 @@ def main() -> int:
         "max_matrix_mib": float(args.max_matrix_mib),
         "reconfig_threshold_deg": args.reconfig_threshold_deg,
         "joint_weights": joint_weights.astype(float).tolist(),
+        "joint_lower_rad": joint_lower.astype(float).tolist(),
+        "joint_upper_rad": joint_upper.astype(float).tolist(),
+        "joint_periods_rad": joint_periods.astype(float).tolist(),
+        "joint_unwrapped": True,
         "reconfig_base_joints": list(base_joints),
         "reconfig_wrist_joints": list(wrist_joints),
         "reconfig_weight_base": float(weight_base),

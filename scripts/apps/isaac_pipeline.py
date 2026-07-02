@@ -6,9 +6,9 @@ Boots Isaac Sim with the same workcell as scene.py, then opens
 an Omni UI window with four panels:
 
     A) Load object (dropdown + native viewport gizmo move)
-    B) plan_trajectory parameters + [Generate Trajectory]   (subprocess)
+    B) GLNS trajectory parameters + [Generate Trajectory]  (subprocess)
     C) Ghost preview with Play/Pause/Stop/Slider            (in-process; sim, ROS-free)
-    D) publish_trajectory parameters + [Publish]            (subprocess; real mode only)
+    D) Execute trajectory on Isaac UR20 or real robot       (subprocess)
 
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
@@ -54,6 +54,10 @@ JOINT_NAMES = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+
+# Must match scripts/core/plan_trajectory.py::IK_RANDOM_SEED. Kept local because
+# this module is imported by Isaac Sim's bundled Python before the uv subprocess.
+IK_RANDOM_SEED = 123
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
@@ -348,7 +352,157 @@ def load_trajectory_csv(csv_path: str):
     times = np.array(times, dtype=np.float64)
     if len(solutions) == 0:
         raise ValueError("CSV contains no trajectory rows")
+    if len(times) > 1 and np.any(np.diff(times) <= 0.0):
+        raise ValueError("CSV time column must be strictly increasing")
     return solutions, times
+
+
+# =============================================================================
+# Direct Isaac executor — drives the real articulation in-process, without ROS.
+# =============================================================================
+
+class IsaacArticulationExecutor:
+    """Apply CSV joint targets directly to Isaac's UR20 articulation each frame."""
+
+    APPROACH_MAX_JOINT_VEL_RAD_S = 0.5
+    MIN_APPROACH_TIME_S = 0.5
+
+    def __init__(self, articulation_root: str, joint_names: list[str],
+                 log: Callable[[str], None]):
+        self._articulation_root = articulation_root
+        self._joint_names = joint_names
+        self._log = log
+        self._articulation = None
+        self._controller = None
+        self._indices = None
+        self._positions = np.zeros((0, len(joint_names)), dtype=np.float64)
+        self._times = np.zeros(0, dtype=np.float64)
+        self._elapsed = 0.0
+        self._running = False
+        self._on_done: Optional[Callable[[int], None]] = None
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def _initialize(self):
+        from isaacsim.core.prims import SingleArticulation
+
+        # Rebind on every execution because Stop/Play can recreate the physics view.
+        art = SingleArticulation(prim_path=self._articulation_root)
+        art.initialize()
+        indices = np.array(
+            [art.get_dof_index(name) for name in self._joint_names], dtype=np.int32,
+        )
+        if np.any(indices < 0):
+            raise RuntimeError(f"UR20 joint lookup failed: {indices.tolist()}")
+        self._articulation = art
+        self._controller = art.get_articulation_controller()
+        self._indices = indices
+
+    def start(self, csv_path: str, on_done: Optional[Callable[[int], None]] = None) -> bool:
+        try:
+            self._initialize()
+            solutions, csv_times = load_trajectory_csv(csv_path)
+            current = np.asarray(
+                self._articulation.get_joint_positions(joint_indices=self._indices),
+                dtype=np.float64,
+            )
+            if current.shape != (len(self._joint_names),) or not np.all(np.isfinite(current)):
+                raise RuntimeError(f"invalid current UR20 joint state: {current}")
+
+            relative_times = csv_times - csv_times[0]
+            start_diff = float(np.max(np.abs(solutions[0] - current)))
+            if start_diff > 1e-4:
+                approach_time = max(
+                    start_diff / self.APPROACH_MAX_JOINT_VEL_RAD_S,
+                    self.MIN_APPROACH_TIME_S,
+                )
+                self._positions = np.vstack([current, solutions])
+                self._times = np.concatenate([[0.0], approach_time + relative_times])
+            else:
+                self._positions = solutions
+                self._times = relative_times
+
+            self._elapsed = 0.0
+            self._running = True
+            self._on_done = on_done
+            self._apply_target(self._positions[0])
+            self._log(
+                f"[execute] Isaac in-process trajectory: {len(solutions)} CSV waypoints, "
+                f"duration={self._times[-1]:.2f}s"
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — report runtime/Isaac API failures in UI
+            self._log(f"[execute] Isaac articulation start failed: {exc}")
+            self._running = False
+            self._on_done = None
+            return False
+
+    def _apply_target(self, q: np.ndarray):
+        from isaacsim.core.utils.types import ArticulationAction
+
+        self._controller.apply_action(ArticulationAction(
+            joint_positions=np.asarray(q, dtype=np.float64),
+            joint_indices=self._indices,
+        ))
+
+    def start_joint_target(self, target_q, *, label: str,
+                           on_done: Optional[Callable[[int], None]] = None) -> bool:
+        """Move from the current Isaac joint state to one target without ROS."""
+        try:
+            self._initialize()
+            current = np.asarray(
+                self._articulation.get_joint_positions(joint_indices=self._indices),
+                dtype=np.float64,
+            )
+            target = np.asarray(target_q, dtype=np.float64)
+            if current.shape != target.shape or target.shape != (len(self._joint_names),):
+                raise RuntimeError(
+                    f"joint target shape mismatch: current={current.shape}, target={target.shape}")
+            if not np.all(np.isfinite(current)) or not np.all(np.isfinite(target)):
+                raise RuntimeError("joint target contains non-finite values")
+            max_delta = float(np.max(np.abs(target - current)))
+            duration = max(
+                max_delta / self.APPROACH_MAX_JOINT_VEL_RAD_S,
+                self.MIN_APPROACH_TIME_S,
+            )
+            self._positions = np.vstack([current, target])
+            self._times = np.array([0.0, duration], dtype=np.float64)
+            self._elapsed = 0.0
+            self._running = True
+            self._on_done = on_done
+            self._apply_target(current)
+            self._log(f"[execute] Isaac {label}: duration={duration:.2f}s")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"[execute] Isaac joint move failed: {exc}")
+            self._running = False
+            self._on_done = None
+            return False
+
+    def step(self, dt: float):
+        if not self._running:
+            return
+        self._elapsed = min(self._elapsed + max(float(dt), 0.0), float(self._times[-1]))
+        q = np.array([
+            np.interp(self._elapsed, self._times, self._positions[:, j])
+            for j in range(self._positions.shape[1])
+        ], dtype=np.float64)
+        self._apply_target(q)
+        if self._elapsed >= float(self._times[-1]):
+            self._running = False
+            callback, self._on_done = self._on_done, None
+            self._log("[execute] Isaac UR20 trajectory complete")
+            if callback is not None:
+                callback(0)
+
+    def cancel(self):
+        if not self._running:
+            return
+        self._running = False
+        self._on_done = None
+        self._log("[execute] Isaac trajectory cancelled; holding last target")
 
 
 # =============================================================================
@@ -574,7 +728,7 @@ def clear_artic_commands(*graph_paths: str) -> None:
 
 
 class PipelineWindow:
-    """Four-panel Omni UI window: Load / Generate / Preview / Publish + Log."""
+    """Four-panel Omni UI window: Load / Generate / Preview / Execute + Log."""
 
     LOG_MAX_LINES = 500
 
@@ -615,6 +769,9 @@ class PipelineWindow:
         self._preview = PreviewPlayer(
             ghost_root_prim, base_link_path, chain, self._append_log,
         )
+        self._sim_executor = IsaacArticulationExecutor(
+            articulation_root, JOINT_NAMES, self._append_log,
+        )
 
         self._uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
         if not Path(self._uv).exists() and shutil.which("uv") is None:
@@ -623,6 +780,8 @@ class PipelineWindow:
         # Mutable field models (created in _build).
         self._fields: dict = {}
         self._btn_generate = None
+        self._btn_home_approach = None
+        self._btn_home_return = None
         self._btn_cancel_gen = None
         self._btn_check_ik = None
         self._btn_cancel_ik = None
@@ -728,8 +887,8 @@ class PipelineWindow:
 
     def _pipeline_text(self) -> str:
         if self._pipeline_mode == "moveit":
-            return "● MoveIt (Inspection locked)"
-        return "● Inspection"
+            return "MoveIt (Inspection locked)"
+        return "Inspection"
 
     def _on_pipeline_mode_changed(self, *_):
         if self._pipeline_combo is None:
@@ -740,18 +899,18 @@ class PipelineWindow:
     def apply_pipeline_mode(self, mode: str):
         """Pipeline mode = command source + UI lock. It does NOT toggle any graph —
         the Run mode (sim/real) owns graph selection (see apply_mode). Both MoveIt
-        (RViz move_group) and Inspection (Publish panel) ultimately command the same
+        (RViz move_group) and Inspection (Execute panel) ultimately command the same
         controller; pipeline mode only changes which tool the user drives with and
         locks the other.
 
         moveit     → Inspection panels greyed/locked (use RViz to drive the robot).
-        inspection → Inspection panels active (Publish drives the current robot:
+        inspection → Inspection panels active (Execute drives the current robot:
                      Isaac in sim, real robot in real).
         """
         self._pipeline_mode = mode
         self._set_inspection_ui_enabled(mode != "moveit")
         if mode == "inspection":
-            self._sync_mode_ui()  # restore Publish-button state after unlock
+            self._sync_mode_ui()  # restore Execute-button state after unlock
         self._sync_pipeline_ui()
         # Activate exactly the controller for this mode so the OTHER source is
         # blocked at the controller level: MoveIt → scaled_joint_trajectory_controller,
@@ -759,7 +918,15 @@ class PipelineWindow:
         # deactivated, so MoveIt Execute is rejected ("controller not active").
         # (No-op in real mode if its stack uses the same controller names; best-effort
         # if the ROS stack isn't up yet.)
-        if mode == "moveit":
+        if self._mode == "sim":
+            # Inspection SIM executes directly through SingleArticulation and must
+            # not require ROS or allow the MoveIt graph to overwrite PD targets.
+            self._moveit_graph.set_active(mode == "moveit")
+            self._graph.set_active(False)
+            if mode == "moveit":
+                self._set_relay_forwarding(True)
+                self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
+        elif mode == "moveit":
             self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
         else:
             self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
@@ -799,6 +966,22 @@ class PipelineWindow:
             ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
             on_line=self._append_log,
             on_exit=lambda rc: self._append_log(f"[ctrl] switch exit={rc}"))
+
+    def _ensure_inspection_controller_cmd(self) -> str:
+        """Shell snippet that activates the inspection controller (jtc) and
+        deactivates MoveIt's (scaled), so a real publish always reaches an ACTIVE
+        controller.
+
+        Prepended to every real controller-publish because the one-shot switch in
+        apply_pipeline_mode/apply_mode can miss: a sim→real run-mode change does
+        NOT switch controllers, and restarting the shell-2 UR stack resets it to
+        scaled-active. Idempotent and best-effort ('|| true' keeps it non-fatal
+        when already in that state), so it is safe to run before every send."""
+        return (
+            f"ros2 control switch_controllers "
+            f"--activate {INSPECTION_CONTROLLER} --deactivate {MOVEIT_CONTROLLER} "
+            f"|| true"
+        )
 
     # Style overrides toggled with the lock so panels also *look* disabled
     # (this Isaac theme doesn't auto-grey on .enabled=False).
@@ -842,23 +1025,23 @@ class PipelineWindow:
         # Run mode (sim/real) is a TOP-LEVEL axis like Pipeline mode — it must stay
         # selectable in BOTH MoveIt and Inspection. So it is NOT added to the
         # Inspection lock lists (_inspection_frames/_lock).
-        frame = ui.CollapsableFrame("Run Mode (sim / real)", height=0, collapsed=False)
+        frame = ui.CollapsableFrame("Run Mode", height=0, collapsed=False)
         with frame:
             with ui.VStack(spacing=4):
                 with ui.HStack(height=26, spacing=8):
                     ui.Label("Run mode", width=80)
                     idx = 0 if self._mode == "sim" else 1
                     self._mode_combo = ui.ComboBox(
-                        idx, "sim (Isaac only)", "real (ROS robot)")
+                        idx, "Simulation (Isaac only)", "Real (ROS robot)")
                     self._mode_combo.model.add_item_changed_fn(self._on_mode_changed)
-                    self._mode_label = ui.Label(self._mode_text(), width=120)
+                    # self._mode_label = ui.Label(self._mode_text(), width=120)
                 # ui.Label("sim = Isaac only, no ROS — A Load, B Generate, C Preview.  "
                 #          "real = all of that + D Publish to the robot & mirror /joint_states "
                 #          "(needs ur_robot_driver).",
                 #          height=40, word_wrap=True)
 
     def _mode_text(self) -> str:
-        return f"● {self._mode.upper()}"
+        return f"{self._mode.upper()}"
 
     def _on_mode_changed(self, *_):
         if self._mode_combo is None:
@@ -882,18 +1065,22 @@ class PipelineWindow:
         is nothing to replay when sim is re-entered (works even if the goal is still
         active). No rebuild / cancel / timing needed.
 
-        sim↔real also requires relaunching the matching ROS stack (셸2).
+        REAL and MoveIt modes require the matching ROS stack; Inspection+SIM does not.
         """
         self._mode = mode
         if mode == "sim":
-            self._set_relay_forwarding(True)   # relay feeds Isaac
-            self._set_moveit_driving(True)     # MoveIt drives Isaac + publishes state/clock
             clear_artic_commands(self._moveit_graph_path)
             self._graph.set_active(False)      # /ActionGraph mirror off
-            which = "/MoveItGraph drives (live /isaac_joint_commands)"
+            if self._pipeline_mode == "moveit":
+                self._set_relay_forwarding(True)
+                self._moveit_graph.set_active(True)
+                which = "/MoveItGraph drives (live /isaac_joint_commands)"
+            else:
+                self._moveit_graph.set_active(False)
+                which = "in-process executor drives Isaac UR20 (ROS-free)"
         else:  # real
             self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
-            self._set_moveit_driving(False)    # MoveIt graph: no drive, no state/clock
+            self._moveit_graph.set_active(False)
             clear_artic_commands(self._graph_path)
             self._graph.set_active(True)       # /ActionGraph mirror on
             which = "/ActionGraph mirrors real /joint_states (twin)"
@@ -916,25 +1103,6 @@ class PipelineWindow:
             ["bash", "-c", cmd], cwd=PROJECT_ROOT, on_line=self._append_log,
             on_exit=lambda rc: self._append_log(f"[relay] param set exit={rc}"))
 
-    # /MoveItGraph nodes that are "Isaac IS the robot" duties — enabled in sim,
-    # disabled in real. SubscribeJointCommand is NOT here (harmless when idle). In
-    # real mode, leaving PublishJointState on would feed /isaac_joint_states →
-    # (셸2) /joint_states → /ActionGraph mirror → Isaac → /isaac_joint_states, a
-    # self-driving loop that makes the robot shake; /clock belongs to sim time only.
-    _MOVEIT_SIM_ONLY_NODES = ("ArticulationController", "PublishJointState", "PublishClock")
-
-    def _set_moveit_driving(self, on: bool):
-        """Enable (sim) / disable (real) /MoveItGraph's robot-driving + state/clock
-        publishing nodes, without disabling the whole graph."""
-        import omni.graph.core as og
-        for name in self._MOVEIT_SIM_ONLY_NODES:
-            try:
-                node = og.Controller.node(f"{self._moveit_graph_path}/{name}")
-                if node is not None and hasattr(node, "set_disabled"):
-                    node.set_disabled(not on)
-            except Exception as e:  # noqa: BLE001 — best effort
-                self._append_log(f"[run-mode] toggle {name} failed: {e}")
-
     def _sync_mode_ui(self):
         if self._mode_label is not None:
             self._mode_label.text = self._mode_text()
@@ -947,14 +1115,32 @@ class PipelineWindow:
                 "color": 0xFF33CC33 if self._mode == "real" else 0xFF2277EE
             }
         if self._btn_publish is not None:
-            # Publish now works in both sim (→ Isaac) and real (→ real robot); it is
+            # Execute works in both sim (→ Isaac) and real (→ real robot); it is
             # available in Inspection pipeline mode (locked in MoveIt mode).
+            self._btn_publish.text = (
+                "Execute on Isaac UR20" if self._mode == "sim"
+                else "Execute on Real Robot"
+            )
             self._btn_publish.enabled = (
-                self._pipeline_mode == "inspection") and not self._pub_runner.running
+                self._pipeline_mode == "inspection"
+                and not self._pub_runner.running and not self._sim_executor.running
+            )
+        # Unified labels across sim/real (sim naming is the standard).
+        if self._btn_home_approach is not None:
+            self._btn_home_approach.text = "Move to Scan Start"
+        if self._btn_home_return is not None:
+            self._btn_home_return.text = "Return to HOME"
+        home_enabled = (
+            self._pipeline_mode == "inspection" and not self._gen_runner.running
+            and not self._sim_executor.running
+        )
+        for button in (self._btn_home_approach, self._btn_home_return):
+            if button is not None:
+                button.enabled = home_enabled
 
     def _build_panel_object(self):
         ui = self._ui
-        frame = ui.CollapsableFrame("A. Load Object", height=0)
+        frame = ui.CollapsableFrame("Load Object", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
@@ -971,7 +1157,7 @@ class PipelineWindow:
 
     def _build_panel_generate(self):
         ui = self._ui
-        frame = ui.CollapsableFrame("B. Generate Trajectory (DP | GLNS)", height=0)
+        frame = ui.CollapsableFrame("Generate Trajectory", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
@@ -979,12 +1165,6 @@ class PipelineWindow:
                 #          "count are read from the h5 path; the object's live pose comes from the "
                 #          "scene — load & place it in panel A first.",
                 #          height=40, word_wrap=True)
-                with ui.HStack(height=26, spacing=8):
-                    ui.Label("Planner backend", width=110)
-                    # 0=DP (plan_trajectory), 1=GLNS (solve_glns_path → verify --join).
-                    # Both emit the same trajectory CSV → preview/publish unchanged.
-                    self._backend_combo = ui.ComboBox(
-                        0, "DP (plan_trajectory)", "GLNS (solve + verify --join)")
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
                     self._lock(ui.StringField(model=self._h5_path_model))
@@ -1000,22 +1180,26 @@ class PipelineWindow:
                     self._btn_cancel_ik = self._lock(ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik))
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
-                        self._fields["spacing"]       = self._row("--spacing",       0.01)
-                        self._fields["output_suffix"] = self._row("--output-suffix", "dp")
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops (GLNS)", 2)
                         self._fields["glns_roll_augment"] = self._row("--roll-augment (GLNS, 1/0)", 1)
                         self._fields["glns_tilt_augment"] = self._row("--tilt-augment (GLNS, 1/0)", 1)
                         self._fields["glns_tilt_angles"] = self._row("--tilt-angles-deg (GLNS)", "5 10")
                         self._fields["glns_tilt_azimuths"] = self._row("--tilt-azimuths (GLNS)", 8)
                         self._fields["glns_max_candidates"] = self._row(
-                            "--max-candidates-per-viewpoint (GLNS)", 16)
+                            "--max-candidates-per-viewpoint (GLNS)", 32)
+                        self._fields["glns_num_seeds"] = self._row(
+                            "--num-seeds (GLNS)", 32)
+                        self._fields["glns_ik_batch_size"] = self._row(
+                            "--ik-batch-size (GLNS)", 128)
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_generate = self._lock(ui.Button("Generate Trajectory", clicked_fn=self._on_generate))
+                    self._btn_generate = self._lock(ui.Button(
+                        "Generate Scan Motion", clicked_fn=self._on_generate))
+                with ui.HStack(height=28, spacing=6):
                     self._btn_cancel_gen = self._lock(ui.Button("Cancel", clicked_fn=self._on_cancel_generate))
 
     def _build_panel_preview(self):
         ui = self._ui
-        frame = ui.CollapsableFrame("C. Preview in Simulation", height=0)
+        frame = ui.CollapsableFrame("Preview in Simulation", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
@@ -1046,7 +1230,7 @@ class PipelineWindow:
 
     def _build_panel_publish(self):
         ui = self._ui
-        frame = ui.CollapsableFrame("D. Publish to Real Robot (publish_trajectory.py)", height=0)
+        frame = ui.CollapsableFrame("Execute Trajectory", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
@@ -1057,14 +1241,24 @@ class PipelineWindow:
                     self._lock(ui.StringField(model=self._csv_path_model))
                     self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_publish = self._lock(ui.Button("Publish to Robot", clicked_fn=self._on_publish))
-                    self._btn_cancel_pub = self._lock(ui.Button("Cancel Publish", clicked_fn=self._on_cancel_publish))
+                    self._btn_home_approach = self._lock(ui.Button(
+                        "Move to Scan Start",
+                        clicked_fn=lambda: self._on_plan_home_transition("approach")))
+                    self._btn_home_return = self._lock(ui.Button(
+                        "Return to HOME",
+                        clicked_fn=lambda: self._on_plan_home_transition("return")))
+                    self._btn_home_approach.enabled = True
+                    self._btn_home_return.enabled = True
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_publish = self._lock(ui.Button(
+                        "Execute Selected CSV", clicked_fn=self._on_execute))
+                    self._btn_cancel_pub = self._lock(ui.Button(
+                        "Cancel Execution", clicked_fn=self._on_cancel_execute))
 
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
-            return "● REAL mode — sends the CSV to the live robot (ur_robot_driver required)."
-        return ("⛔ Disabled in SIM mode — this is the only step that needs REAL. "
-                "Switch Run mode to 'real' to publish to the robot.")
+            return "● REAL mode — executes the CSV on the live robot."
+        return "● SIM mode — executes the CSV on the Isaac UR20 articulation."
 
     def _build_log(self):
         ui = self._ui
@@ -1752,8 +1946,7 @@ class PipelineWindow:
                 f"'{self._current_object}'. Pose & collision mesh come from the SCENE "
                 "object — load the matching object or pick the matching h5.")
 
-        spacing = self._get_field("spacing", float)
-        suffix  = self._get_field("output_suffix", str).strip() or "dp"
+        spacing = 0.01
 
         # Read the object's live world pose (gizmo-moved) and pass it to the
         # planner. No silent fallback: if there's no target prim, abort so we
@@ -1766,54 +1959,40 @@ class PipelineWindow:
             return
         pos_robot, quat_wxyz = pose
 
-        backend_idx = 0
-        combo = getattr(self, "_backend_combo", None)
-        if combo is not None:
-            backend_idx = combo.model.get_item_value_model().get_value_as_int()
+        # GLNS solve → collision-aware verification/join. Both stages stream
+        # stdout; verify prints the joined CSV path last for preview/publish capture.
+        hops = max(1, int(self._get_field("glns_hops", int)))
+        augment = ""
+        if int(self._get_field("glns_roll_augment", int)) != 0:
+            augment += " --roll-augment"
+        if int(self._get_field("glns_tilt_augment", int)) != 0:
+            angles = " ".join(
+                str(float(x)) for x in self._get_field("glns_tilt_angles", str).split())
+            azimuths = max(1, int(self._get_field("glns_tilt_azimuths", int)))
+            augment += (f" --tilt-augment --tilt-angles-deg {angles}"
+                        f" --tilt-azimuths {azimuths}")
+        max_candidates = max(1, int(self._get_field("glns_max_candidates", int)))
+        augment += f" --max-candidates-per-viewpoint {max_candidates}"
+        num_seeds = max(1, int(self._get_field("glns_num_seeds", int)))
+        ik_batch_size = max(1, int(self._get_field("glns_ik_batch_size", int)))
+        augment += (f" --num-seeds {num_seeds} --ik-batch-size {ik_batch_size}"
+                    f" --ik-seed {IK_RANDOM_SEED}")
+        det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
+        trajectory_dir = f"data/{obj}/trajectory/{n_vp}"
+        pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
+        quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
+        shell = (
+            f"{self._uv} run --no-sync scripts/core/solve_glns_path.py "
+            f"--object {obj!r} --viewpoints {h5!r} "
+            f"--object-position {pos_s} --object-quat {quat_s} "
+            f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
+            f"&& {self._uv} run --no-sync scripts/core/verify_glns_trajectory.py "
+            f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
+            f"--no-home-bracket --output-dir {trajectory_dir!r}"
+        )
+        cmd = ["bash", "-c", shell]
 
-        if backend_idx == 1:
-            # GLNS backend: solve_glns_path → verify_glns_trajectory --join, chained in
-            # one shell (publish-style bash -c). Both stages stream stdout; verify prints
-            # the joined "CSV saved to ..." LAST, so CSV_PATH_RE captures the joined
-            # trajectory (same 14-col schema as DP → preview/publish need no change).
-            hops = max(1, int(self._get_field("glns_hops", int)))
-            augment = ""
-            if int(self._get_field("glns_roll_augment", int)) != 0:
-                augment += " --roll-augment"
-            if int(self._get_field("glns_tilt_augment", int)) != 0:
-                angles = " ".join(
-                    str(float(x)) for x in self._get_field("glns_tilt_angles", str).split())
-                azimuths = max(1, int(self._get_field("glns_tilt_azimuths", int)))
-                augment += (f" --tilt-augment --tilt-angles-deg {angles}"
-                            f" --tilt-azimuths {azimuths}")
-            max_candidates = max(1, int(self._get_field("glns_max_candidates", int)))
-            augment += f" --max-candidates-per-viewpoint {max_candidates}"
-            det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
-            pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
-            quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
-            shell = (
-                f"{self._uv} run scripts/core/solve_glns_path.py "
-                f"--object {obj!r} --viewpoints {h5!r} "
-                f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
-                f"&& {self._uv} run scripts/core/verify_glns_trajectory.py "
-                f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing}"
-            )
-            cmd = ["bash", "-c", shell]
-        else:
-            # DP backend (default): plan_trajectory.py end-to-end.
-            cmd = [
-                self._uv, "run", "scripts/core/plan_trajectory.py",
-                "--object", obj,
-                "--num-viewpoints", str(n_vp),
-                "--viewpoints", h5,
-                "--spacing", str(spacing),
-                "--output-suffix", suffix,
-                "--object-position", *(f"{v:.6f}" for v in pos_robot),
-                "--object-quat", *(f"{v:.6f}" for v in quat_wxyz),
-            ]
-
-        self._btn_generate.enabled = False
+        self._set_trajectory_buttons_enabled(False)
         self._append_log("[generate] $ " + " ".join(cmd))
         generated_csv_path: list[str] = []
 
@@ -1830,7 +2009,7 @@ class PipelineWindow:
 
         def on_exit(rc: int):
             self._append_log(f"[generate] exit code = {rc}")
-            self._btn_generate.enabled = True
+            self._set_trajectory_buttons_enabled(True)
             if rc == 0 and generated_csv_path:
                 csv = generated_csv_path[0]
                 if self._preview.load(csv):
@@ -1839,6 +2018,89 @@ class PipelineWindow:
                     self._append_log(f"[preview] auto-loaded generated CSV: {csv}")
 
         self._gen_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
+
+    def _set_trajectory_buttons_enabled(self, enabled: bool):
+        if self._btn_generate is not None:
+            self._btn_generate.enabled = enabled
+        home_enabled = enabled and self._pipeline_mode == "inspection"
+        for button in (self._btn_home_approach, self._btn_home_return):
+            if button is not None:
+                button.enabled = home_enabled
+
+    def _on_plan_home_transition(self, transition: str):
+        """Move HOME↔scan-start straight to the joint target (no planning yet).
+
+        sim drives the Isaac articulation in-process (visualisation); real
+        publishes the same target to the inspection controller for a direct,
+        velocity-limited joint move. Collision-aware planning comes later.
+        """
+        if transition not in {"approach", "return"}:
+            raise ValueError(f"unknown HOME transition: {transition}")
+        if (self._gen_runner.running or self._sim_executor.running
+                or self._pub_runner.running):
+            self._append_log("[home] a move is already running")
+            return
+
+        # Joint target is identical for sim and real.
+        if transition == "approach":
+            csv = self._csv_path_model.get_value_as_string().strip()
+            if not csv or not Path(csv).exists():
+                self._append_log(f"[home] scan CSV not found: {csv!r}")
+                return
+            try:
+                solutions, _times = load_trajectory_csv(csv)
+                target_q = np.asarray(solutions[0], dtype=np.float64)
+            except Exception as exc:  # noqa: BLE001
+                self._append_log(f"[home] scan CSV load failed: {exc}")
+                return
+            label = "move to scan start"
+        else:
+            from common import config as robot_config
+            target_q = np.asarray(robot_config.ROBOT_START_STATE, dtype=np.float64)
+            label = "return to HOME"
+
+        if self._preview.loaded:
+            self._preview.stop()
+        self._set_trajectory_buttons_enabled(False)
+        self._btn_publish.enabled = False
+
+        def re_enable():
+            self._set_trajectory_buttons_enabled(True)
+            self._btn_publish.enabled = True
+
+        if self._mode == "sim":
+            def on_sim_done(rc: int):
+                self._append_log(f"[home] {label} exit code = {rc}")
+                re_enable()
+
+            if not self._sim_executor.start_joint_target(
+                target_q, label=label, on_done=on_sim_done,
+            ):
+                re_enable()
+            return
+
+        # real: send the joint target straight to the inspection controller —
+        # a direct current→target move (velocity-limited in publish_trajectory).
+        # Activate the inspection controller first (see helper) so the send lands
+        # on an ACTIVE controller. NB: --joint-target=<v> (not a space) so argparse
+        # takes a leading-'-' negative value as the argument, not an option.
+        q_str = ",".join(f"{v:.6f}" for v in target_q)
+        shell_cmd = (
+            "source /opt/ros/jazzy/setup.bash && "
+            f"{self._ensure_inspection_controller_cmd()} && "
+            f"exec {self._uv} run --no-sync scripts/core/publish_trajectory.py "
+            f"--joint-target={q_str!r} --target controller"
+        )
+        self._append_log(f"[home] {label} → real robot (direct joint target)")
+        self._append_log("[home] $ " + shell_cmd)
+
+        def on_exit(rc: int):
+            self._append_log(f"[home] {label} exit code = {rc}")
+            re_enable()
+
+        self._pub_runner.start(
+            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
+            on_line=self._append_log, on_exit=on_exit)
 
     def _on_cancel_generate(self):
         if self._gen_runner.running:
@@ -1986,58 +2248,73 @@ class PipelineWindow:
             self._refresh_status()
 
     # ------------------------------------------------------------------
-    # Publish panel callbacks
+    # Execute panel callbacks
     # ------------------------------------------------------------------
-    def _on_publish(self):
-        # Publish drives the CURRENT robot via the trajectory controller — in sim it
-        # routes to Isaac (sim stack), in real to the real robot. Works in both Run
-        # modes. The Run mode already selected the correct Isaac graph, so we do NOT
-        # toggle graphs here. (The button is UI-locked in MoveIt pipeline mode.)
-        if self._pub_runner.running:
-            self._append_log("[publish] already running")
+    def _on_execute(self):
+        # Execute drives the CURRENT robot: SIM applies in-process articulation
+        # targets without ROS; REAL sends FollowJointTrajectory through ROS2.
+        if self._pub_runner.running or self._sim_executor.running:
+            self._append_log("[execute] already running")
             return
         csv = self._csv_path_model.get_value_as_string().strip()
         if not csv or not Path(csv).exists():
-            self._append_log(f"[publish] CSV not found: {csv!r}")
+            self._append_log(f"[execute] CSV not found: {csv!r}")
             return
 
-        # Ghost preview and Publish both move things in the viewport; stop the ghost
-        # so the two don't fight.
-        if self._preview.state.playing:
+        # Execution always drives the real Isaac articulation (or the real robot
+        # mirrored into Isaac), never the preview ghost. Hide the ghost even when
+        # preview is paused so two robot poses cannot overlap in the viewport.
+        if self._preview.loaded:
             self._preview.stop()
 
-        # Route by Run mode so Inspection is independent of which 셸2 stack is up:
-        #   sim  → stream straight to Isaac (/isaac_joint_commands); no 셸2 needed.
-        #   real → send to the real robot's trajectory controller (needs real 셸2).
-        target = "isaac" if self._mode == "sim" else "controller"
+        if self._mode == "sim":
+            self._btn_publish.enabled = False
+            self._set_trajectory_buttons_enabled(False)
+
+            def on_sim_done(rc: int):
+                self._append_log(f"[execute] exit code = {rc}")
+                self._btn_publish.enabled = True
+                self._set_trajectory_buttons_enabled(True)
+
+            if not self._sim_executor.start(csv, on_done=on_sim_done):
+                self._btn_publish.enabled = True
+                self._set_trajectory_buttons_enabled(True)
+            return
+
+        # REAL execution remains on the ROS2 trajectory controller path. Make sure
+        # the inspection controller is active first (see helper).
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
+            f"{self._ensure_inspection_controller_cmd()} && "
             f"exec {self._uv} run --no-sync scripts/core/publish_trajectory.py "
-            f"--csv {csv!r} --target {target}"
+            f"--csv {csv!r} --target controller"
         )
         cmd = ["bash", "-c", shell_cmd]
 
         self._btn_publish.enabled = False
-        self._append_log("[publish] $ " + shell_cmd)
+        self._append_log("[execute] target=real robot")
+        self._append_log("[execute] $ " + shell_cmd)
 
         def on_line(line: str):
             self._append_log(line)
 
         def on_exit(rc: int):
-            self._append_log(f"[publish] exit code = {rc}")
+            self._append_log(f"[execute] exit code = {rc}")
             self._btn_publish.enabled = True
 
         self._pub_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
 
-    def _on_cancel_publish(self):
+    def _on_cancel_execute(self):
+        if self._sim_executor.running:
+            self._sim_executor.cancel()
+            self._btn_publish.enabled = True
+            self._set_trajectory_buttons_enabled(True)
+            return
         if self._pub_runner.running:
-            self._append_log("[publish] terminating publisher...")
+            self._append_log("[execute] terminating trajectory sender...")
             self._pub_runner.terminate()
         if self._mode == "sim":
-            # sim streams directly to /isaac_joint_commands — killing the publisher
-            # stops the stream immediately and Isaac holds the last commanded pose.
-            # There is no controller goal to cancel.
-            self._append_log("[publish] sim stream stopped (Isaac holds current pose)")
+            self._append_log("[execute] no Isaac trajectory is running")
             return
         # real: the controller already holds the whole trajectory goal and keeps
         # executing it, so terminating the publisher is not enough — cancel the goal.
@@ -2046,11 +2323,11 @@ class PipelineWindow:
             f"timeout 3 ros2 service call /{INSPECTION_CONTROLLER}/follow_joint_trajectory"
             "/_action/cancel_goal action_msgs/srv/CancelGoal '{}'"
         )
-        self._append_log(f"[publish] cancelling goals on {INSPECTION_CONTROLLER}")
+        self._append_log(f"[execute] cancelling goals on {INSPECTION_CONTROLLER}")
         self._ctrl_runner.start(
             ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
             on_line=self._append_log,
-            on_exit=lambda rc: self._append_log(f"[publish] cancel exit={rc}"))
+            on_exit=lambda rc: self._append_log(f"[execute] cancel exit={rc}"))
 
     # ------------------------------------------------------------------
     # Per-frame pump
@@ -2061,10 +2338,11 @@ class PipelineWindow:
         self._pub_runner.pump()
         self._ctrl_runner.pump()
         self._relay_runner.pump()
-        # While a Publish trajectory is executing, lock BOTH mode combos so the user
+        self._sim_executor.step(dt)
+        # While a trajectory is executing, lock BOTH mode combos so the user
         # can't switch pipeline mode (would deactivate the inspection controller and
         # abort the trajectory) OR run mode (sim/real) mid-execution.
-        executing = self._pub_runner.running
+        executing = self._pub_runner.running or self._sim_executor.running
         if self._pipeline_combo is not None:
             self._pipeline_combo.enabled = not executing
         if self._mode_combo is not None:

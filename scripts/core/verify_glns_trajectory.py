@@ -17,8 +17,9 @@ joint 순서(``selected_joints``)를 ``plan_trajectory.py`` 의 Phase 4-6
 plan_trajectory 는 일체 수정하지 않고 라이브러리로 재사용한다(solve_glns_path 와 동일 패턴).
 
 ``--join``(기본 on)이면 충돌-free 성분들을 하나의 연속 실행 궤적으로 잇는다: 방문 순서·방향을
-seam 거리(joint L∞)로 최적화하고, 성분 사이와 양 끝 HOME 을 ``plan_reconfig_transits``(direct→
-via-home 사다리)로 가교한 뒤 ``_stitch_pieces`` 로 봉합한다. seam 은 절대 조용히 드롭하지 않고
+viewpoint component 간 seam 거리(joint L∞)로만 최적화하고 ``_stitch_pieces``로
+봉합한다. HOME 접근/복귀는 기본적으로 별도 계획하며, ``--home-bracket``을 명시한
+경우에만 양 끝에 붙인다. seam 은 절대 조용히 드롭하지 않고
 실패 시 hard-error(``glns_trajectory_joined.csv/.npz`` 미생성). 각 성분의 resample/drop 은
 성분 내부로 한정돼(``interpolate_and_resample`` 의 "최장 run keep" 이 성분 경계를 넘지 못함).
 
@@ -83,14 +84,23 @@ def _parse_args() -> argparse.Namespace:
                         help="via-roll/tilt/home 사다리 비활성 — direct(plan_cspace) 실패분은 "
                              "드롭(viewpoint skip). graph-direct 만으로 도는지 확인용")
     parser.add_argument("--join", action=argparse.BooleanOptionalAction, default=True,
-                        help="충돌-free 성분들을 seam transit + HOME 브래킷으로 하나의 연속 "
-                             "궤적(glns_trajectory_joined.csv)으로 연결 (default: on)")
+                        help="충돌-free 성분들을 seam transit으로 하나의 연속 "
+                             "scan 궤적(glns_trajectory_joined.csv)으로 연결 (default: on)")
     parser.add_argument("--order", choices=("optimized", "fixed"), default="optimized",
                         help="성분 방문 순서: optimized(seam 거리 최소) / fixed(id 순서). default optimized")
-    parser.add_argument("--no-home-bracket", action="store_true",
-                        help="joined 궤적 양 끝의 HOME 접근/복귀 생략 — 성분만 연결")
+    parser.add_argument("--home-bracket", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="joined 궤적 양 끝에 HOME 접근/복귀를 붙임 "
+                             "(default: off; use separate HOME transition planning)")
     parser.add_argument("--require-full-coverage", action="store_true",
                         help="fail a component and joined output if any viewpoint is skipped")
+    parser.add_argument("--home-transitions-only", action="store_true",
+                        help="plan HOME→scan-start and scan-end→HOME from an existing "
+                             "glns_trajectory_joined.npz, without replanning the scan")
+    parser.add_argument("--home-transition", choices=("both", "approach", "return"),
+                        default="both",
+                        help="with --home-transitions-only, plan both legs or only "
+                             "HOME→start / end→HOME (default: both)")
     args = parser.parse_args()
     if not args.result.exists():
         parser.error(f"Result not found: {args.result}")
@@ -104,7 +114,8 @@ class _SeamFailure(RuntimeError):
 
 
 def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig_rad,
-                                 wd_m, wrist3_fixed, spacing, enable_via_ladder=True):
+                                 wd_m, spacing, enable_via_ladder=True,
+                                 motion_planner=None):
     """한 성분의 Phase 4-5(transit 계획 + resample). 파일 I/O·충돌게이트 없음.
 
     반환 dict 의 ``ok`` 가 False 면 안전 연속 구간이 viewpoint 2개 미만(`<2 safe-run`)이라
@@ -116,8 +127,8 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
 
     # reconfig 경계는 plan_trajectory main()/Phase 5(_build_runs) 와 동일하게 selected 의
     # 6-DoF L∞ 로 재산출한다(Phase 4 transit 대상과 Phase 5 run-building 이 일치해야 함).
-    # GLNS strict r_any and continuous verifier both use all six joints.
-    # transit 은 wr3 를 0 으로 평탄화해 계획한다(검사 무관 DOF, lock_wrist3 기본 True).
+    # GLNS strict r_any and continuous verifier both use all six joints. The
+    # selected wrist_3 values are preserved through transit planning as well.
     jumps = np.max(np.abs(np.diff(selected, axis=0)), axis=1)              # (M-1,)
     is_reconfig = jumps > reconfig_rad
     reconfig_indices = np.where(is_reconfig)[0]
@@ -132,22 +143,35 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
                   f"edge 에서 불일치 — wrist_3 lock/threshold 가정 확인 필요. "
                   f"재산출값으로 진행.")
 
-    # --- Phase 4: reconfig 지점 transit 계획(충돌회피 motion) ---
+    # 작은 jump는 원래 joint 직선 보간 대상이다. 이 중 충돌하는 edge도 viewpoint를
+    # drop하기 전에 MotionGen fallback 대상으로 승격한다. reconfiguration edge와 합쳐
+    # 한 번에 batch planning하므로 planner warmup/호출 비용도 공유한다.
+    scan_edge_indices = np.where(~is_reconfig)[0]
+    collision_fallback_indices = PT.find_colliding_interpolation_edges(
+        selected, scan_edge_indices, robot_cfg, world_config,
+    )
+    if len(collision_fallback_indices):
+        labels = [f"{int(vp_order[i])}→{int(vp_order[i + 1])}"
+                  for i in collision_fallback_indices]
+        print(f"    Scan interpolation collision: {len(collision_fallback_indices)} edge(s) "
+              f"→ MotionGen fallback [{', '.join(labels)}]")
+
+    # --- Phase 4: reconfig + colliding scan edge transit 계획(충돌회피 motion) ---
+    motion_indices = np.union1d(reconfig_indices, collision_fallback_indices).astype(np.int64)
     transit_segments, transit_stats = {}, []
-    if len(reconfig_indices) > 0:
+    if len(motion_indices) > 0:
         transit_segments, transit_stats = PT.plan_reconfig_transits(
-            selected, reconfig_indices, robot_cfg, world_config,
+            selected, motion_indices, robot_cfg, world_config,
             label_idx=vp_order, wd_m=wd_m, enable_via_ladder=enable_via_ladder,
+            lock_wrist3=False, motion_planner=motion_planner,
         )
-        # 안전망: direct/via-home route 는 transit 경로의 wrist_3 를 lock 값으로 평탄화.
-        # (via-roll/via-tilt 는 의도적으로 rolled 중간자세를 쓰므로 덮어쓰면 가교가 깨진다.)
-        # roll-augment scan 자세의 wr3(≤~13°)는 transit 경계에서만 작게 흡수된다.
-        routes = {s["idx"]: s.get("route") for s in transit_stats if s.get("success")}
-        for idx in transit_segments:
-            if routes.get(idx) in ("direct", "via-home"):
-                transit_segments[idx][:, -1] = wrist3_fixed
     n_transit_ok = len(transit_segments)
-    n_transit_req = int(len(reconfig_indices))
+    n_transit_req = int(len(motion_indices))
+    n_reconfig_req = int(len(reconfig_indices))
+    n_collision_fallback_req = int(len(collision_fallback_indices))
+    n_collision_fallback_ok = sum(
+        int(i) in transit_segments for i in collision_fallback_indices
+    )
 
     # --- Phase 5: transit 병합 + uniform resample (연속 scan edge 를 densify-충돌검증) ---
     try:
@@ -170,8 +194,11 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
         "covered": int(runs_info["kept"][2]),
         "dropped": skipped_orig,
         "n_runs": len(runs_info["runs"]),
-        "reconfig_req": n_transit_req,
+        "reconfig_req": n_reconfig_req,
+        "transit_req": n_transit_req,
         "transit_ok": n_transit_ok,
+        "collision_fallback_req": n_collision_fallback_req,
+        "collision_fallback_ok": n_collision_fallback_ok,
         "reconfig_mismatch": mismatch,
     }
 
@@ -222,18 +249,21 @@ def _collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_c
 
 
 def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
-                      wrist3_fixed, spacing, out_csv, enable_via_ladder=True,
-                      require_full_coverage=False):
+                      spacing, out_csv, enable_via_ladder=True,
+                      require_full_coverage=False, motion_planner=None):
     """한 성분을 Phase 4-6 으로 검증(per-component CSV/npz 기록). 결과 dict 반환."""
     pr = _plan_and_resample_component(
         component, robot_cfg=robot_cfg, world_config=world_config,
-        reconfig_rad=reconfig_rad, wd_m=wd_m, wrist3_fixed=wrist3_fixed,
+        reconfig_rad=reconfig_rad, wd_m=wd_m,
         spacing=spacing, enable_via_ladder=enable_via_ladder,
+        motion_planner=motion_planner,
     )
     if not pr["ok"]:
         return {
             "M": pr["M"], "covered": 0, "dropped": [], "n_runs": 0,
-            "reconfig_req": 0, "transit_ok": 0, "n_collisions": 0,
+            "reconfig_req": 0, "transit_req": 0, "transit_ok": 0,
+            "collision_fallback_req": 0, "collision_fallback_ok": 0,
+            "n_collisions": 0,
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": 0,
             "reconfig_mismatch": pr.get("reconfig_mismatch", 0), "csv": None,
@@ -246,7 +276,10 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
         return {
             "M": pr["M"], "covered": pr["covered"], "dropped": pr["dropped"],
             "n_runs": pr["n_runs"], "reconfig_req": pr["reconfig_req"],
+            "transit_req": pr["transit_req"],
             "transit_ok": pr["transit_ok"], "n_collisions": 0,
+            "collision_fallback_req": pr["collision_fallback_req"],
+            "collision_fallback_ok": pr["collision_fallback_ok"],
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": len(pr["final_traj"]),
             "reconfig_mismatch": pr["reconfig_mismatch"], "csv": None,
@@ -261,7 +294,10 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
     return {
         "M": pr["M"], "covered": pr["covered"], "dropped": pr["dropped"],
         "n_runs": pr["n_runs"], "reconfig_req": pr["reconfig_req"],
+        "transit_req": pr["transit_req"],
         "transit_ok": pr["transit_ok"], "reconfig_mismatch": pr["reconfig_mismatch"],
+        "collision_fallback_req": pr["collision_fallback_req"],
+        "collision_fallback_ok": pr["collision_fallback_ok"],
         "final_traj": pr["final_traj"], "final_is_transit": pr["final_is_transit"],
         "entry": pr["entry"], "exit": pr["exit"], **gate,
     }
@@ -275,58 +311,66 @@ def _linf(a, b) -> float:
     return float(np.max(np.abs(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64))))
 
 
-def _choose_order(endpoints, home_q, *, strategy="optimized"):
+def _choose_order(endpoints, home_q=None, *, strategy="optimized"):
     """방문 순서 + 성분별 방향 결정. 반환 [(성분_index, reversed_bool), ...].
 
-    ``optimized``: HOME→…→HOME 총 seam 거리(joint L∞) 최소화 — 작은 K(≤6) 정확 brute-force,
-    큰 K greedy 최근접. via-home 이 모든 seam 을 backstop 하므로 순서는 feasibility 무관,
-    순수 cycle-time 최적화. ``fixed``: 입력 순서·원방향 그대로.
+    ``optimized``: component 간 seam 거리(joint L∞)만 최소화한다. HOME 접근/복귀는
+    scan 경로와 독립적으로 계획하므로 순서 비용에 포함하지 않는다. 작은 K(≤6)는
+    정확 brute-force, 큰 K는 모든 시작 component/방향을 비교하는 greedy를 쓴다.
+    ``home_q``는 기존 호출자 호환을 위해 남겨두지만 최적화에 사용하지 않는다.
+    ``fixed``: 입력 순서·원방향 그대로.
     """
     K = len(endpoints)
     if K <= 1 or strategy == "fixed":
         return [(i, False) for i in range(K)]
     ends = [(np.asarray(e0, np.float64), np.asarray(e1, np.float64)) for (e0, e1) in endpoints]
-    home = np.asarray(home_q, np.float64)
     if K <= 6:
-        d_home = [[_linf(home, ends[k][s]) for s in (0, 1)] for k in range(K)]
         d_btw = [[[[_linf(ends[a][sa], ends[b][sb]) for sb in (0, 1)]
                    for b in range(K)] for sa in (0, 1)] for a in range(K)]
         best, best_cost = None, float("inf")
         for perm in itertools.permutations(range(K)):
             for bits in itertools.product((0, 1), repeat=K):
-                first = perm[0]
-                cost = d_home[first][1 if bits[first] else 0]          # HOME → entry(first)
+                cost = 0.0
                 for j in range(K - 1):
                     a, b = perm[j], perm[j + 1]
                     # exit(a)=side(0 if reversed else 1), entry(b)=side(1 if reversed else 0)
                     cost += d_btw[a][0 if bits[a] else 1][b][1 if bits[b] else 0]
-                last = perm[-1]
-                cost += d_home[last][0 if bits[last] else 1]           # exit(last) → HOME
                 if cost < best_cost - 1e-12:
                     best_cost, best = cost, (perm, bits)
         perm, bits = best
         return [(k, bool(bits[k])) for k in perm]
-    # greedy nearest-endpoint from HOME (larger K)
-    order, remaining, cur = [], set(range(K)), home
-    while remaining:
-        bk, brev, bd = None, False, float("inf")
-        for k in remaining:
-            for rev in (False, True):
-                d = _linf(cur, ends[k][1 if rev else 0])
-                if d < bd:
-                    bd, bk, brev = d, k, rev
-        order.append((bk, brev))
-        cur = ends[bk][0 if brev else 1]
-        remaining.discard(bk)
-    return order
+    # Larger K: remove HOME anchoring by trying every component/orientation as
+    # the greedy chain's start and retaining the shortest viewpoint-only chain.
+    best_order, best_cost = None, float("inf")
+    for first in range(K):
+        for first_rev in (False, True):
+            order = [(first, first_rev)]
+            remaining = set(range(K)) - {first}
+            cur = ends[first][0 if first_rev else 1]
+            cost = 0.0
+            while remaining:
+                bk, brev, bd = None, False, float("inf")
+                for k in sorted(remaining):
+                    for rev in (False, True):
+                        d = _linf(cur, ends[k][1 if rev else 0])
+                        if d < bd:
+                            bd, bk, brev = d, k, rev
+                order.append((bk, brev))
+                cost += bd
+                cur = ends[bk][0 if brev else 1]
+                remaining.remove(bk)
+            if cost < best_cost - 1e-12:
+                best_order, best_cost = order, cost
+    return best_order
 
 
-def _plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m, wrist3_fixed,
+def _plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m,
+                        motion_planner=None,
                         enable_via_ladder=True):
     """모든 seam(q_from→q_to)을 한 번의 plan_reconfig_transits batch 로 계획.
 
-    반환: pair 별 ``(seg|None, route|None)``. direct/via-home route 는 wrist_3 를 lock 값으로
-    평탄화(성분 내 transit 과 동일 규칙). warm BatchMotionPlanner 1회 build 로 모든 seam 처리.
+    반환: pair 별 ``(seg|None, route|None)``. All six planned joints, including
+    wrist_3, are preserved. warm BatchMotionPlanner 1회 build 로 모든 seam 처리.
     """
     if not pairs:
         return []
@@ -335,15 +379,13 @@ def _plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m, wrist3_fixed,
     transit_segments, transit_stats = PT.plan_reconfig_transits(
         seam_selected, reconfig_indices, robot_cfg, world_config,
         wd_m=wd_m, enable_via_ladder=enable_via_ladder,
+        lock_wrist3=False, motion_planner=motion_planner,
     )
     routes = {s["idx"]: s.get("route") for s in transit_stats if s.get("success")}
     out = []
     for i in range(len(pairs)):
         idx = 2 * i
         seg, route = transit_segments.get(idx), routes.get(idx)
-        if seg is not None and route in ("direct", "via-home"):
-            seg = seg.copy()
-            seg[:, -1] = wrist3_fixed
         out.append((seg, route))
     return out
 
@@ -364,9 +406,9 @@ def _resample_seam(q_from, q_to, seam_wp, *, robot_cfg, world_config, reconfig_r
     return traj, np.ones(len(traj), dtype=bool)
 
 
-def _join_components(included, home_q, *, robot_cfg, world_config, wd_m, wrist3_fixed,
+def _join_components(included, home_q, *, robot_cfg, world_config, wd_m,
                      spacing, reconfig_rad, enable_via_ladder, home_bracket,
-                     order_strategy, out_csv):
+                     order_strategy, out_csv, motion_planner=None):
     """충돌-free 성분들을 순서최적화 + seam transit + HOME 브래킷으로 한 궤적으로 stitch.
 
     seam(via-home 포함)이 하나라도 실패하면 ``_SeamFailure`` — 성분을 조용히 드롭하지 않는다.
@@ -398,7 +440,7 @@ def _join_components(included, home_q, *, robot_cfg, world_config, wd_m, wrist3_
 
     seam_results = _plan_seams_batched(
         pairs, robot_cfg=robot_cfg, world_config=world_config, wd_m=wd_m,
-        wrist3_fixed=wrist3_fixed, enable_via_ladder=enable_via_ladder,
+        enable_via_ladder=enable_via_ladder, motion_planner=motion_planner,
     )
     for lbl, (seg, _route) in zip(labels, seam_results):
         if seg is None:
@@ -437,6 +479,50 @@ def _join_components(included, home_q, *, robot_cfg, world_config, wd_m, wrist3_
     }
 
 
+def _plan_home_transitions(scan_traj, home_q, *, robot_cfg, world_config, wd_m,
+                           spacing, reconfig_rad, enable_via_ladder,
+                           motion_planner, out_dir, transitions="both"):
+    """Plan and save HOME approach/return independently from the scan trajectory."""
+    scan = np.asarray(scan_traj, dtype=np.float64)
+    if scan.ndim != 2 or scan.shape[1] != 6 or len(scan) < 2:
+        raise ValueError("joined scan trajectory must have shape (N>=2, 6)")
+    home = np.asarray(home_q, dtype=np.float64)
+    specs = [
+        ("approach", (home, scan[0]), "HOME→scan-start",
+         "glns_trajectory_home_to_start"),
+        ("return", (scan[-1], home), "scan-end→HOME",
+         "glns_trajectory_end_to_home"),
+    ]
+    if transitions not in {"both", "approach", "return"}:
+        raise ValueError(f"unknown HOME transition selection: {transitions}")
+    selected = specs if transitions == "both" else [s for s in specs if s[0] == transitions]
+    pairs = [s[1] for s in selected]
+    planned = _plan_seams_batched(
+        pairs, robot_cfg=robot_cfg, world_config=world_config, wd_m=wd_m,
+        enable_via_ladder=enable_via_ladder, motion_planner=motion_planner,
+    )
+    results = []
+    for (_kind, pair, label, stem), (segment, route) in zip(selected, planned):
+        out_csv = Path(out_dir) / f"{stem}.csv"
+        if segment is None:
+            out_csv.unlink(missing_ok=True)
+            out_csv.with_suffix(".npz").unlink(missing_ok=True)
+            results.append({"label": label, "route": None, "ok": False, "gate": None})
+            continue
+        traj, mask = _resample_seam(
+            pair[0], pair[1], segment, robot_cfg=robot_cfg, world_config=world_config,
+            reconfig_rad=reconfig_rad, spacing=spacing,
+        )
+        gate = _collision_gate_and_save(
+            traj, mask, robot_cfg=robot_cfg, world_config=world_config, out_csv=out_csv,
+        )
+        results.append({
+            "label": label, "route": route,
+            "ok": bool(gate["collision_free"]), "gate": gate,
+        })
+    return results
+
+
 def main() -> int:
     args = _parse_args()
     out_dir = args.output_dir if args.output_dir is not None else args.result.parent
@@ -470,8 +556,43 @@ def main() -> int:
 
     robot_cfg = PT._resolve_robot_config(PT.ROBOT_CONFIG)
     world_config = PT.build_collision_world(object_name)
-    wrist3_fixed = config.ROBOT_START_STATE[-1]
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
+
+    scan_joints = None
+    if args.home_transitions_only:
+        scan_npz = out_dir / "glns_trajectory_joined.npz"
+        if not scan_npz.exists():
+            print(f"HOME TRANSITIONS FAILED: scan trajectory not found: {scan_npz}")
+            return 2
+        if scan_npz.stat().st_mtime_ns < args.result.stat().st_mtime_ns:
+            print("HOME TRANSITIONS FAILED: joined scan is older than the GLNS result; "
+                  "run Plan scan motion first.")
+            return 2
+        with np.load(scan_npz) as scan_data:
+            scan_joints = np.asarray(scan_data["joints"], dtype=np.float64)
+    motion_planner = PT.build_reconfig_motion_planner(robot_cfg, world_config)
+
+    if args.home_transitions_only:
+        print("-" * 64)
+        print("PLAN HOME TRANSITIONS (scan trajectory remains unchanged)")
+        home_results = _plan_home_transitions(
+            scan_joints, home_q, robot_cfg=robot_cfg, world_config=world_config,
+            wd_m=wd_m, spacing=args.spacing, reconfig_rad=reconfig_rad,
+            enable_via_ladder=not args.no_via, motion_planner=motion_planner,
+            out_dir=out_dir, transitions=args.home_transition,
+        )
+        all_home_ok = True
+        for item in home_results:
+            if not item["ok"]:
+                all_home_ok = False
+                print(f"  {item['label']}: FAILED (no collision-free route)")
+                continue
+            gate = item["gate"]
+            print(f"  {item['label']}: OK [{item['route']}], "
+                  f"{gate['n_waypoints']} waypoints, time={gate['total_time']:.1f}s")
+            print(f"    CSV: {gate['csv']}")
+        print("=" * 64)
+        return 0 if all_home_ok else 2
 
     rows = []
     join_inputs = []   # 충돌-free 성분(joined 대상): final_traj/endpoints
@@ -494,9 +615,10 @@ def main() -> int:
         out_csv = out_dir / f"glns_trajectory_comp{cid}.csv"
         res = _verify_component(
             component, robot_cfg=robot_cfg, world_config=world_config,
-            reconfig_rad=reconfig_rad, wd_m=wd_m, wrist3_fixed=wrist3_fixed,
+            reconfig_rad=reconfig_rad, wd_m=wd_m,
             spacing=args.spacing, out_csv=out_csv, enable_via_ladder=not args.no_via,
             require_full_coverage=args.require_full_coverage,
+            motion_planner=motion_planner,
         )
         rows.append((cid, "solved", n_members, res))
 
@@ -515,7 +637,10 @@ def main() -> int:
         time_note = (f", time={res['total_time']:.1f}s "
                      f"(scan={res['total_time'] - res['transit_time']:.1f}s, "
                      f"transit={res['transit_time']:.1f}s)") if res["collision_free"] else ""
-        print(f"    transit {res['transit_ok']}/{res['reconfig_req']} OK, "
+        fallback_note = (f", scan-collision fallback "
+                         f"{res['collision_fallback_ok']}/{res['collision_fallback_req']}"
+                         if res["collision_fallback_req"] else "")
+        print(f"    transit {res['transit_ok']}/{res['transit_req']} OK{fallback_note}, "
               f"coverage {res['covered']}/{res['M']}, "
               f"{res['n_waypoints']} waypoints{time_note}{drop_note}")
         print(f"    → {verdict}")
@@ -550,7 +675,7 @@ def main() -> int:
         tstr = f"{res['total_time']:.1f}" if res["collision_free"] else "-"
         print(f"{cid:>4} {status:>10} {res['M']:>4} {res['covered']:>6} "
               f"{len(res['dropped']):>5} {res['reconfig_req']:>6} "
-              f"{res['transit_ok']}/{res['reconfig_req']:<6} {coll:>5} {tstr:>8}")
+              f"{res['transit_ok']}/{res['transit_req']:<6} {coll:>5} {tstr:>8}")
 
     print("-" * 64)
     all_clean = solved_total > 0 and solved_clean == solved_total
@@ -580,16 +705,16 @@ def main() -> int:
             try:
                 jr = _join_components(
                     join_inputs, home_q, robot_cfg=robot_cfg, world_config=world_config,
-                    wd_m=wd_m, wrist3_fixed=wrist3_fixed, spacing=args.spacing,
+                    wd_m=wd_m, spacing=args.spacing,
                     reconfig_rad=reconfig_rad, enable_via_ladder=not args.no_via,
-                    home_bracket=not args.no_home_bracket, order_strategy=args.order,
-                    out_csv=joined_csv,
+                    home_bracket=args.home_bracket, order_strategy=args.order,
+                    out_csv=joined_csv, motion_planner=motion_planner,
                 )
             except _SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} — 가교 불가(via-home 포함). joined 미생성.")
                 print("=" * 64)
                 return 2
-            hb = not args.no_home_bracket
+            hb = args.home_bracket
             seq = (["HOME"] if hb else []) + [f"comp{c}" for c in jr["order"]] + \
                   (["HOME"] if hb else [])
             print(f"  order({args.order}): {' → '.join(seq)}")

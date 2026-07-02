@@ -12,10 +12,12 @@ from common.glns_utils import (
     find_hamiltonian_open_path,
     induce_adjacency,
     parse_glns_tour,
+    periodic_joint_delta,
     prune_candidate_sets,
     read_result_hdf5,
     write_result_hdf5,
     write_simple_gtsp,
+    unwrap_joint_path,
 )
 
 
@@ -126,6 +128,53 @@ class GlnsUtilsTests(unittest.TestCase):
         np.testing.assert_array_equal(p1[0], p2[0])
         self.assertEqual(m1[0]["variant"][0], "nominal")
         self.assertLessEqual(len(p1[0]), 2)
+
+    def test_periodic_cost_and_limit_aware_path_unwrap(self):
+        periods = np.array([2 * np.pi, 2 * np.pi, 0, 2 * np.pi, 2 * np.pi, 2 * np.pi])
+        lower = np.array([-2 * np.pi, -2 * np.pi, -np.pi, -2 * np.pi, -2 * np.pi, -2 * np.pi])
+        upper = -lower
+        q0 = np.deg2rad([0, 0, 0, 0, 156.8, 0])
+        q1 = np.deg2rad([0, 0, 0, 0, -103.6, 0])
+        shortest = periodic_joint_delta(q1 - q0, periods)
+        self.assertAlmostEqual(abs(np.rad2deg(shortest[4])), 99.6, places=6)
+
+        unwrapped = unwrap_joint_path(
+            np.stack([q0, q1]), lower, upper, periods,
+            threshold_rad=np.deg2rad(120), reference_joints=np.zeros(6),
+        )
+        self.assertAlmostEqual(
+            abs(np.rad2deg(unwrapped[1, 4] - unwrapped[0, 4])), 99.6, places=6,
+        )
+        self.assertTrue(np.all(unwrapped >= lower - 1e-9))
+        self.assertTrue(np.all(unwrapped <= upper + 1e-9))
+        np.testing.assert_allclose(
+            periodic_joint_delta(unwrapped - np.stack([q0, q1]), periods), 0.0,
+            atol=1e-10,
+        )
+
+        reps = [q0[None, :], q1[None, :]]
+        problem = build_gtsp_problem(
+            np.arange(2), reps, np.array([[0, 1]], dtype=np.int32),
+            reconfig_threshold_rad=np.deg2rad(120), joint_periods=periods,
+        )
+        self.assertLess(problem["costs"][0, 1], problem["reconfig_unit_any"])
+
+    def test_pruning_reuses_edge_matrix_for_both_endpoint_scores(self):
+        reps = [
+            np.array([[0.0] * 6, [2.0] * 6]),
+            np.array([[2.1] * 6, [4.0] * 6]),
+        ]
+        metadata = [{
+            "variant": np.array(["tilt", "tilt"]),
+            "tilt_deg": np.array([5.0, 5.0]),
+        } for _ in reps]
+        pruned, _ = prune_candidate_sets(
+            reps, metadata, np.array([[0, 1]], dtype=np.int32),
+            cap_by_viewpoint=np.array([1, 1]), threshold_rad=0.3,
+            joint_weights=np.ones(6), reference_joints=np.zeros(6),
+        )
+        np.testing.assert_array_equal(pruned[0][0], np.full(6, 2.0))
+        np.testing.assert_array_equal(pruned[1][0], np.full(6, 2.1))
 
     def test_decode_open_tour_and_reject_forbidden_transition(self):
         problem = build_gtsp_problem(

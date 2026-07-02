@@ -2,10 +2,20 @@ import unittest
 
 import numpy as np
 
-from core.solve_glns_path import _build_pose_variants
+from core import plan_trajectory as PT
+from core.solve_glns_path import _build_pose_variants, _joint_limits_and_periods
 
 
 class PoseAugmentationTests(unittest.TestCase):
+    def test_ur20_periodic_joints_follow_urdf_limits(self):
+        lower, upper, periods = _joint_limits_and_periods(
+            PT._resolve_robot_config(PT.ROBOT_CONFIG),
+        )
+        np.testing.assert_allclose(periods, [2 * np.pi, 2 * np.pi, 0,
+                                             2 * np.pi, 2 * np.pi, 2 * np.pi])
+        self.assertTrue(np.all(lower <= 0.0))
+        self.assertTrue(np.all(upper >= 0.0))
+
     def test_default_pose_variants_preserve_surface_and_working_distance(self):
         pose = np.eye(4, dtype=np.float64)[None, ...]
         pose[0, :3, 3] = [0.2, -0.1, 0.5]
