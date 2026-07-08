@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
@@ -99,6 +100,45 @@ def disable_joint(prim: Usd.Prim) -> None:
     UsdPhysics.Joint(prim).GetJointEnabledAttr().Set(False)
 
 
+def relativize_asset_paths(layer: Sdf.Layer, out_dir: Path) -> int:
+    """Re-anchor absolute asset paths in `layer` to `./`-relative ones. Returns count.
+
+    Stage.Flatten() resolves every asset path to an absolute host path, so a plain
+    Export() bakes this machine's filesystem into a committed binary (the UR20 diffuse
+    texture). Bare search-path refs like `OmniPBR.mdl` carry no '/' and are left alone.
+    Same convention as relativize_usd_assets.py: force a leading './' so the result is
+    layer-anchored rather than resolved against the search path.
+    """
+    n = 0
+
+    def to_rel(path: str) -> str | None:
+        if not os.path.isabs(path) or not os.path.exists(path):
+            return None
+        rel = os.path.relpath(path, out_dir.resolve())
+        return rel if rel.startswith((".", "/")) else "./" + rel
+
+    def visit(spec: Sdf.PrimSpec) -> None:
+        nonlocal n
+        for child in spec.nameChildren:
+            visit(child)
+        for prop in spec.properties:
+            value = getattr(prop, "default", None)
+            if isinstance(value, Sdf.AssetPath):
+                rel = to_rel(value.path)
+                if rel:
+                    prop.default = Sdf.AssetPath(rel)
+                    n += 1
+            elif isinstance(value, Sdf.AssetPathArray):
+                rels = [to_rel(a.path) or a.path for a in value]
+                if any(r != a.path for r, a in zip(rels, value)):
+                    prop.default = Sdf.AssetPathArray([Sdf.AssetPath(r) for r in rels])
+                    n += len(rels)
+
+    for root in layer.rootPrims:
+        visit(root)
+    return n
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
@@ -151,8 +191,10 @@ def main():
             n_jdisabled += 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    n_relativized = relativize_asset_paths(flat, args.output.parent)
     flat.Export(str(args.output))
     print(f"[ghost-usd] wrote {args.output}")
+    print(f"           relativized {n_relativized} absolute asset path(s)")
     print(f"           stripped APIs from {n_stripped} prims, "
           f"bound ghost material to {n_bound} prims, "
           f"hid {n_hidden} collision visual prims, "
