@@ -35,3 +35,6 @@ data/**/video*/
 
 # reorient_mesh.py backups
 *.obj.bak
+
+# 외부 반입 자료(대용량 CAD/스크래치 텍스처 드롭)
+ff/
