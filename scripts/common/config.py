@@ -75,7 +75,8 @@ MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 # 따라서 robot frame z = world z - 0.805.
 
 # 대상 객체 설정 — visual: world (-0.1, 1.1, 0.795), robot frame z = 0.795-0.805 = -0.010
-# rotation = identity: 물체 방향은 config가 아니라 **메시에 베이크**한다(prep/reorient_mesh.py).
+# rotation = identity: 물체 방향은 config가 아니라 **메시에 베이크**한다
+# (setup/prepare_object_mesh.py reorient).
 # 그래야 viser(로컬 프레임)와 Isaac(월드 프레임)이 회전 차이 없이 동일하게 보임.
 # (이전 [0.7071,0,0,0.7071]은 순수 z-yaw였음 → identity로 바꿔도 bottom 필터는 불변, sample은 90° yaw만 풀림.)
 TARGET_OBJECT = {
@@ -93,7 +94,7 @@ MOUNT_HEIGHT = 0.805
 # 주의: rotation 을 여기서 주면 mesh-bake 와 달리 viewer 마다 적용이 필요 — viewpoint_studio /
 # Isaac scene 은 config rotation 을 반영하도록 맞춰져 있다(둘 다 동일 외형). z-yaw 는 bottom-filter
 # 가 불변이라 기존 viewpoint h5 재생성 불필요(비-z 회전은 재생성 필요).
-# 아래 값은 optimize_placement.py(GLNS 배치 스윕)의 min-reconfig best.
+# 아래 값은 기존 GLNS 배치 스윕에서 얻은 min-reconfig best.
 # 실제 joined motion reconfig = scan reconfig + seam(=solved component 수-1) 을 최소화(1~2개 미커버 허용).
 # 전부 base reconfig=0. 각 물체별 placement_sweep/summary 참조. (coverage-우선 best 는 커밋 이력/summary 참고)
 OBJECT_PLACEMENTS = {

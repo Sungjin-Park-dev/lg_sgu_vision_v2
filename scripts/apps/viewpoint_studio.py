@@ -4,20 +4,20 @@
 Two ways to put viewpoints on screen, both object-centric:
 
   * **Generate** — pick an object, tune clustering parameters, and
-    regenerate viewpoints in-process via the ``generate_viewpoints.py`` seam
+    regenerate viewpoints in-process via the ``viewpoint/cli.py`` seam
     (``load_meshes`` / ``prepare_grid`` / ``cluster_coacd`` / ``cluster_and_order``).
     Viewpoints are generated with surface sampling only. Surface spacing is derived
     from camera FOV and overlap; CoACD is cached per (object, spacing, threshold)
     so tuning sub-cluster parameters is fast (~2s).
   * **Existing h5** — load a previously saved ``viewpoints*.h5`` for the object.
 
-Rendered elements (same as the static plotly export, ``common/viewpoint_viz.py``):
+Rendered elements (same as ``core/viewpoint/visualization.py``):
 translucent mesh, per-cluster markers, intra-cluster path lines, inter-cluster
 transitions, and — for generated results — translucent CoACD part overlays.
 Layers toggle independently; a playback slider scrubs/auto-plays the visit order.
 
 Scope: sampling is fixed to ``surface`` and ordering to ``lawnmower`` in this app.
-Grid sampling remains available in ``generate_viewpoints.py`` for CLI/batch use.
+Grid sampling remains available in ``viewpoint/cli.py`` for CLI/batch use.
 Material filtering and bottom-filter tuning are not exposed. Found parameters can
 be persisted with **Save** for the downstream plan_trajectory step.
 
@@ -47,11 +47,17 @@ DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # -> scripts/
 from common import config
-from common.viewpoint_viz import _BOLD_COLORS, _PART_COLORS
-from core.generate_viewpoints import (
-    load_meshes, prepare_grid as prepare_viewpoints, cluster_coacd, cluster_and_order,
-    save_viewpoints_hdf5, build_local_delaunay_adjacency, ViewpointGenParams,
+from core.viewpoint import (
+    ViewpointGenParams,
+    build_local_delaunay_adjacency,
+    cluster_and_order,
+    cluster_coacd,
+    load_meshes,
+    load_viewpoints_hdf5,
+    prepare_grid as prepare_viewpoints,
+    save_viewpoints_hdf5,
 )
+from core.viewpoint.visualization import _BOLD_COLORS, _PART_COLORS
 
 HIGHLIGHT_RGB = (255, 235, 59)   # moving playback marker
 TRAIL_RGB = (255, 205, 0)        # visited path so far
@@ -141,12 +147,6 @@ def part_rgb(j: int) -> tuple[int, int, int]:
     return hex_to_rgb(_PART_COLORS[j % len(_PART_COLORS)])
 
 
-def _attr_str(value) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
-
-
 def discover_objects(data_root: Path) -> list[str]:
     """Object names that have data/{object}/mesh/source.obj."""
     return [p.parent.parent.name for p in sorted(data_root.glob("*/mesh/source.obj"))]
@@ -168,42 +168,36 @@ def _make_entry(path: Path, object_name: str, label: str) -> ViewpointEntry:
 
 
 def load_viewpoint_h5(path: Path) -> dict:
-    """Read positions/normals/clusters/path_order + mesh path + working distance."""
-    with h5py.File(path, "r") as f:
-        g = f["viewpoints"]
-        positions = np.asarray(g["positions"], dtype=np.float64)
-        normals = np.asarray(g["normals"], dtype=np.float64)
-        n = len(positions)
-
-        cluster_id = (np.asarray(g["cluster_id"], dtype=np.int32)
-                      if "cluster_id" in g else np.zeros(n, dtype=np.int32))
-        path_order = (np.asarray(g["path_order"], dtype=np.int32)
-                      if "path_order" in g else np.arange(n, dtype=np.int32))
-        cluster_order = (np.asarray(g["cluster_order"], dtype=np.int32)
-                         if "cluster_order" in g else np.unique(cluster_id))
-        adjacency = None
-        if "adjacency" in g:
-            ag = g["adjacency"]
-            if "edges" in ag and "component_id" in ag:
-                adjacency = {
-                    "edges": np.asarray(ag["edges"], dtype=np.int32),
-                    "component_id": np.asarray(ag["component_id"], dtype=np.int32),
-                    "method": _attr_str(ag.attrs.get("method", "local_tangent_delaunay")),
-                    "stats": {
-                        key: ag.attrs[key]
-                        for key in ("num_edges", "num_components", "num_isolated")
-                        if key in ag.attrs
-                    },
-                }
-
-        wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
-        input_mesh = None
-        if "metadata" in f:
-            md = f["metadata"]
-            if "input_mesh" in md.attrs:
-                input_mesh = _attr_str(md.attrs["input_mesh"])
-            if "camera_spec" in md and "working_distance_mm" in md["camera_spec"].attrs:
-                wd_m = float(md["camera_spec"].attrs["working_distance_mm"]) / 1000.0
+    """Adapt the canonical ViewpointData model to the Studio scene dictionary."""
+    viewpoint = load_viewpoints_hdf5(path)
+    positions = viewpoint.positions
+    normals = viewpoint.normals
+    n = viewpoint.count
+    cluster_id = (
+        viewpoint.cluster_id
+        if viewpoint.cluster_id is not None
+        else np.zeros(n, dtype=np.int32)
+    )
+    path_order = (
+        viewpoint.path_order
+        if viewpoint.path_order is not None
+        else np.arange(n, dtype=np.int32)
+    )
+    cluster_order = (
+        viewpoint.cluster_order
+        if viewpoint.cluster_order is not None
+        else np.unique(cluster_id)
+    )
+    adjacency = None
+    if viewpoint.adjacency is not None and viewpoint.adjacency.component_id is not None:
+        adjacency = {
+            "edges": viewpoint.adjacency.edges,
+            "component_id": viewpoint.adjacency.component_id,
+            "method": viewpoint.adjacency.method,
+            "stats": viewpoint.adjacency.stats,
+        }
+    wd_m = viewpoint.working_distance_m
+    input_mesh = viewpoint.input_mesh
 
     camera_positions = positions + normals * wd_m
     return _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,

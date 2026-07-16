@@ -44,7 +44,7 @@ ros2 service call /controller_manager/list_controllers \
 ros2 topic echo /joint_states --once   # joint position 출력
 ```
 
-이 상태에서 `move_to_start.py`, `publish_trajectory.py` 등 모두 동작.
+이 상태에서 `isaac_pipeline.py --mode real`의 Home/Execute 기능이 동작한다.
 
 ---
 
@@ -130,26 +130,12 @@ Robot connected to reverse interface
 
 ---
 
-## Move to Start
+## HOME 이동과 궤적 실행
 
-URSim 또는 mock hardware 어느 쪽이든 사용 가능:
-
-```bash
-uv run scripts/robot/move_to_start.py
-```
-
-목표 자세는 `scripts/common/config.py`의 `ROBOT_START_STATE` (radian 배열).
-
-기본값:
-- `--duration 5.0` — 최소 이동 시간 (초)
-- `--max-vel 0.5` — joint 최대 각속도 (rad/s)
-
-URSim 모드에서 `Position Tolerance` 위반(error_code=-4) 시:
-```bash
-uv run scripts/robot/move_to_start.py --duration 10 --max-vel 0.3
-```
-
-천천히 이동시키면 controller가 트래킹 가능.
+URSim 또는 mock hardware 어느 쪽이든 `scripts/apps/isaac_pipeline.py --mode real`을
+실행한 뒤 Home 패널과 Execute 패널을 사용한다. 목표 HOME 자세는
+`scripts/common/config.py`의 `ROBOT_START_STATE`이며, 실제 전송은 앱이
+`core/trajectory/publish.py`를 통해 수행한다.
 
 ---
 
@@ -161,7 +147,6 @@ URSim 사용 시 동시에 띄우는 셸 구성:
 |---|---|---|
 | **A** | `start_ursim.sh -m UR20` | URSim 컨테이너 (호스트 daemon에 띄움) |
 | **B** | `ur_control.launch.py ...` | ur_robot_driver |
-| **C** | `move_to_start.py`, `publish_trajectory.py` | 명령 전송 |
-| **D** | `scene.py` (Isaac Sim) | 시각화 — 옵션 |
+| **C** | `isaac_pipeline.py --mode real` | Isaac 시각화 + HOME/궤적 전송 |
 
 각각 `docker exec -it ros-jazzy bash`로 별도 셸 진입.

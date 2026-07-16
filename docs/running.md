@@ -5,17 +5,16 @@ UR20 비전 검사 파이프라인 실행 흐름. 환경 셋업은 [setup_docker
 ## 전체 흐름
 
 ```
-[1. 뷰포인트 생성]   generate_viewpoints.py → viewpoints.h5
+[1. 뷰포인트 생성]   apps/viewpoint_studio.py → viewpoints.h5
         ↓
-[2. IK + 궤적 계획]  plan_trajectory.py        → trajectory_dp.csv
+[2. IK + 궤적 계획]  apps/trajectory_studio.py → trajectory CSV
         ↓
-[3. 로봇 실행]       publish_trajectory.py  → ROS2 action goal
-        ↓                                      ↑
-[4. 시각화 (선택)]   scene.py  └─ ur_robot_driver
-                     (Isaac Sim)
+[3. 시각화/로봇 실행] apps/isaac_pipeline.py → Isaac Sim / ROS2 action goal
+                                                   ↑
+                                            ur_robot_driver
 ```
 
-1, 2단계는 **CSV 생성** (오프라인 계산), 3단계는 **로봇 제어** (ROS2 통신), 4단계는 **시각화**.
+1, 2단계는 **CSV 생성** 중심이며, 3단계가 Isaac 시각화와 선택적인 로봇 제어를 통합한다.
 
 ## 셸 구성
 
@@ -44,10 +43,10 @@ docker exec -it ros-jazzy bash
 
 ```bash
 # 기본 (dbscan 클러스터링)
-uv run scripts/core/generate_viewpoints.py --object sample
+uv run scripts/core/viewpoint/cli.py --object sample
 
 # 재질 RGB 필터 + 옵션
-uv run scripts/core/generate_viewpoints.py --object sample --material-rgb "0,255,0" \
+uv run scripts/core/viewpoint/cli.py --object sample --material-rgb "0,255,0" \
     --cluster-method coacd+dbscan --normal-weight 0.05 --coacd-threshold 0.25
 ```
 
@@ -64,7 +63,7 @@ uv run scripts/core/generate_viewpoints.py --object sample --material-rgb "0,255
 **셸 C** (venv + GPU 사용 — cuRobo):
 
 ```bash
-uv run scripts/core/plan_trajectory.py --object sample --num-viewpoints 124
+uv run scripts/core/trajectory/cli.py --object sample --num-viewpoints 124
 ```
 
 옵션:
@@ -114,24 +113,17 @@ URSim은 별도 컨테이너로 띄움 + PolyScope에서 External Control 프로
 
 ### 3b. 시작 자세 복귀
 
-**셸 C**:
-```bash
-uv run scripts/robot/move_to_start.py
-```
-
-목표 자세: `scripts/common/config.py`의 `ROBOT_START_STATE`.
-
-기본값: `--duration 5.0`, `--max-vel 0.5`. tolerance 위반 시 더 천천히:
-```bash
-uv run scripts/robot/move_to_start.py --duration 10 --max-vel 0.3
-```
+`scripts/apps/isaac_pipeline.py --mode real`을 실행하고 Home 패널의
+`Move to Scan Start` 또는 `Return HOME`을 사용한다. HOME 목표는
+`scripts/common/config.py`의 `ROBOT_START_STATE`다.
 
 ### 3c. 궤적 전송
 
-**셸 C**:
+Isaac Pipeline의 Execute 패널에서 CSV를 선택하고 실행한다. 앱은 내부적으로 다음
+런타임을 호출한다.
 
 ```bash
-uv run scripts/core/publish_trajectory.py \
+uv run scripts/core/trajectory/publish.py \
     --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
 ```
 
@@ -141,27 +133,18 @@ uv run scripts/core/publish_trajectory.py \
 - CSV의 `time` 컬럼을 ROS trajectory `time_from_start`로 사용
 - CSV 헤더 prefix(`ur20_*`) 자동 매칭 (suffix 기반)
 
-### 3d. RViz 워크셀 마커 (선택)
-
-```bash
-uv run scripts/robot/publish_workcell_markers.py --object sample
-```
-
-`config.py`의 TABLE/WALLS/ROBOT_MOUNT/TARGET_OBJECT를 RViz에 마커로 표시.
-
----
-
 ## 4. Isaac Sim 시각화 (선택)
 
 **셸 B**:
 ```bash
 source /workspace/.venv/bin/activate
-uv run scripts/isaac/scene.py --object sample
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync scripts/apps/isaac_pipeline.py \
+    --object sample --mode sim
 ```
 
 - `--no-sync` — `uv sync`가 cuRobo path-install을 건드리지 않도록
 - `--object sample` — 워크셀(테이블/벽/타겟) 함께 로드
-- `--usd-path PATH` — 다른 USD 사용 (기본: `workcell/robot/ur20/ur20.usd`)
+- `--usd-path PATH` — 다른 USD 사용 (기본: `workcell/robot/ur20_with_camera.usd`)
 
 GUI에 UR20 + 워크셀 표시. ROS2 `/joint_states` 구독 → 시뮬 로봇이 driver 상태 미러링.
 
@@ -174,7 +157,8 @@ USD가 없으면 GUI URDF Importer로 먼저 변환. [setup_isaac_sim.md](setup_
 
 | 인터페이스 | 타입 | 용도 |
 |---|---|---|
-| `/scaled_joint_trajectory_controller/follow_joint_trajectory` | Action | 궤적 실행 |
+| `/joint_trajectory_controller/follow_joint_trajectory` | Action | Inspection 궤적 실행 |
+| `/scaled_joint_trajectory_controller/follow_joint_trajectory` | Action | MoveIt 궤적 실행 |
 | `/joint_states` | Topic | 로봇 현재 상태 (driver 발행) |
 | `/io_and_status_controller/robot_mode` | Topic | 로봇 모드 (RUNNING=7) |
 | `/io_and_status_controller/safety_mode` | Topic | 안전 모드 (NORMAL=1) |
@@ -186,28 +170,21 @@ USD가 없으면 GUI URDF Importer로 먼저 변환. [setup_isaac_sim.md](setup_
 ## 전체 워크플로우 예시 (sample 객체, 124 뷰포인트)
 
 ```bash
-# 셸 C — 오프라인 계산
-uv run scripts/core/generate_viewpoints.py --object sample \
-    --material-rgb "0,255,0" --cluster-method coacd+dbscan \
-    --normal-weight 0.05 --coacd-threshold 0.25
-uv run scripts/core/plan_trajectory.py --object sample --num-viewpoints 124
+# 셸 C — viewpoint 생성/튜닝
+uv run --no-sync scripts/apps/viewpoint_studio.py --object sample
+
+# 셸 C — Isaac 없이 궤적 생성/재생이 필요할 때
+uv run --no-sync scripts/apps/trajectory_studio.py --object sample
 
 # 셸 A — driver
 source /opt/ros/jazzy/setup.bash
 ros2 launch ur_robot_driver ur_control.launch.py \
     ur_type:=ur20 use_mock_hardware:=true launch_rviz:=true
 
-# 셸 B — Isaac Sim 시각화 (선택)
+# 셸 B — Isaac 통합 생성/preview/실행
 source /workspace/.venv/bin/activate
 OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync python \
-    scripts/isaac/scene.py --object sample
-
-# 셸 C — 로봇 제어
-source /opt/ros/jazzy/setup.bash
-uv run scripts/robot/publish_workcell_markers.py --object sample &
-uv run scripts/robot/move_to_start.py
-uv run scripts/core/publish_trajectory.py \
-    --csv data/sample/trajectory/124/trajectory_dp_ee_s0010_eev50mms_av20dps_jv0p30_corner30d_x2p5.csv
+    scripts/apps/isaac_pipeline.py --object sample --mode real
 ```
 
 ---
@@ -222,10 +199,10 @@ URSim 모드에서 External Control 프로그램이 Play되지 않음. PolyScope
 ### `State tolerances failed: Position Error: X, Tolerance: 0.200000`
 
 trajectory가 너무 빠름. controller가 트래킹 못 함:
-- `move_to_start.py --duration 10 --max-vel 0.3`로 천천히
+- 앱 Home 이동 또는 궤적의 속도 제한을 낮춰 천천히 실행
 - 또는 mock hardware 모드 (tolerance 위반 없음)
 
-### `KeyError: 'shoulder_pan_joint'` (publish_trajectory.py)
+### `KeyError: 'shoulder_pan_joint'` (trajectory/publish.py)
 
 CSV 헤더가 표준 이름이거나 prefix(`ur20_`) 붙은 형식 — 둘 다 지원. ValueError 메시지에 실제 fieldnames 표시되니 확인.
 

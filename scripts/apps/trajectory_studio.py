@@ -7,7 +7,7 @@ One browser tool that replicates isaac_pipeline.py Panels A/B/C without Isaac Si
       representative IK branches (green=collision-free / red=collision) and, on "Apply
       pose", an aggregate reachability sweep that recolors every viewpoint green/red.
   (C) Generate a collision-free trajectory via the GLNS backend (solve + verify --join)
-      OR the DP backend (plan_trajectory.py), then play it back densely (transit=red /
+      OR the DP backend (trajectory/cli.py), then play it back densely (transit=red /
       scan=green).
 
 The live IK reuses plan_trajectory's robot_cfg / collision world / wrist_3 lock /
@@ -20,7 +20,7 @@ DP reloads its npz sidecar. Both backends emit {joints, ee_positions, is_transit
 so dense playback is identical.
 
 Publish to the real robot is intentionally NOT here — use isaac_pipeline.py /
-publish_trajectory.py with the generated CSV.
+trajectory/publish.py with the generated CSV.
 
 사용법:
     uv run --no-sync scripts/apps/trajectory_studio.py --object sample
@@ -41,7 +41,6 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
-import h5py
 import numpy as np
 import torch
 import trimesh
@@ -51,15 +50,14 @@ from scipy.spatial.transform import Rotation
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
-sys.path.insert(0, str(SCRIPTS_ROOT / "core"))
-sys.path.insert(0, str(SCRIPTS_ROOT / "apps"))
 
 from common import config  # noqa: E402
-from common.glns_utils import read_result_hdf5  # noqa: E402
-import plan_trajectory as PT  # noqa: E402
-from ik_backend import (  # noqa: E402
+from core import trajectory as PT  # noqa: E402
+from core.glns import read_result_hdf5  # noqa: E402
+from core.trajectory.live_ik import (  # noqa: E402
     MAX_REP_SLIDER, RobotViz, IKBackend, discover_objects, discover_viewpoints,
 )
+from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 
 DATA_ROOT = PROJECT_ROOT / "data"
 OBJ_NODE = "/studio/object"          # 물체 이동 gizmo (mesh 는 자식 → 드래그하면 따라온다)
@@ -514,7 +512,11 @@ class TrajectoryStudio:
             self.status.content = "선택된 viewpoints h5 가 없습니다."
             return
         self._vp_path = vps[label]
-        positions, normals, path_order, _cluster, wd_m = PT.load_viewpoints(self._vp_path)
+        viewpoint = load_viewpoints_hdf5(self._vp_path)
+        positions = viewpoint.positions
+        normals = viewpoint.normals
+        path_order = viewpoint.path_order
+        wd_m = viewpoint.working_distance_m
         if path_order is not None:                  # 방문 순서로 정렬 (파이프라인과 동일)
             order = np.argsort(path_order)
             positions, normals = positions[order], normals[order]
@@ -694,7 +696,7 @@ class TrajectoryStudio:
             det_h5 = PROJECT_ROOT / f"data/{obj}/ik/{n}/glns_result_studio.h5"
             det_h5.parent.mkdir(parents=True, exist_ok=True)
             shell = (
-                f"uv run --no-sync scripts/core/solve_glns_path.py "
+                f"uv run --no-sync scripts/core/glns/solve.py "
                 f"--object {obj} --viewpoints '{vp}' "
                 f"--object-position {pos_s} --object-quat {quat_s} "
                 f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
@@ -708,7 +710,7 @@ class TrajectoryStudio:
         else:
             suffix = "dp"
             cmd = [
-                "uv", "run", "--no-sync", "scripts/core/plan_trajectory.py",
+                "uv", "run", "--no-sync", "scripts/core/trajectory/cli.py",
                 "--object", obj, "--num-viewpoints", str(n),
                 "--viewpoints", vp, "--spacing", str(spacing),
                 "--output-suffix", suffix,
@@ -746,7 +748,7 @@ class TrajectoryStudio:
         self._pending_npz = self._pending_csv = None
         self._pending_kind = "glns_motion"
         cmd = [
-            "uv", "run", "--no-sync", "scripts/core/verify_glns_trajectory.py",
+            "uv", "run", "--no-sync", "scripts/core/glns/verify.py",
             "--result", str(result_path), "--join", "--require-full-coverage",
             "--no-home-bracket", "--spacing", str(spacing),
             "--output-dir", str(output_dir),
@@ -832,10 +834,9 @@ class TrajectoryStudio:
         if not source_path.exists():
             self.status.content = f"Source viewpoint HDF5 not found: `{source_path}`"
             return
-        with h5py.File(source_path, "r") as f:
-            group = f["viewpoints"]
-            positions = np.asarray(group["positions"], dtype=np.float64)
-            normals = np.asarray(group["normals"], dtype=np.float64)
+        viewpoint = load_viewpoints_hdf5(source_path)
+        positions = viewpoint.positions
+        normals = viewpoint.normals
 
         object_name = str(_decode_attr(metadata["object"]))
         object_position = np.asarray(_decode_attr(metadata["object_position"]), dtype=np.float64)
@@ -1187,7 +1188,7 @@ def parse_args():
     parser.add_argument("--object", type=str, default=None, help="object name (data/{object}/...)")
     parser.add_argument("--result", type=Path, default=None, help="optional glns_result*.h5 to open")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8082)
+    parser.add_argument("--port", type=int, default=8081)
     return parser.parse_args()
 
 

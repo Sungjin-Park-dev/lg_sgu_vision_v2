@@ -149,7 +149,7 @@ source /workspace/.venv/bin/activate
 
 또는 매 명령마다 `uv run` 사용:
 ```bash
-uv run scripts/core/publish_trajectory.py --csv ...
+uv run scripts/core/trajectory/publish.py --csv ...
 ```
 
 ## 동작 검증

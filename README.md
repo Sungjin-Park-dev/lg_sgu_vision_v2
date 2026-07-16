@@ -4,15 +4,21 @@ UR20 로봇을 이용한 비전 검사 궤적 생성 시스템. cuRobo(IK/충돌
 
 ## 디렉토리 구조
 
-사용자가 직접 실행하는 것은 `scripts/apps/`의 GUI 3개다. 나머지 폴더
-(`core`, `prep`, `isaac`, `moveit`, `robot`, `common`, `tools`, `julia`)는 이들이
-라이브러리/서브프로세스로 쓰는 엔진·유틸이다.
+사용자가 직접 실행하는 것은 `scripts/apps/`의 GUI 3개다. `core`와 `common`은
+앱이 사용하는 런타임, `setup`은 자산을 준비할 때만 실행하는 도구이며,
+`moveit`과 `julia`는 외부 런타임 연동 파일이다.
 
 ```
 scripts/apps/          ★ 사용자 직접 실행 GUI
   viewpoint_studio.py    뷰포인트 생성/튜닝/시각화 (viser)
   trajectory_studio.py   Isaac 없이 브라우저에서 배치+라이브 IK+궤적(DP|GLNS) 생성/재생 (viser)
   isaac_pipeline.py      Isaac Sim 물체 선택+기즈모 이동+궤적 생성/preview/publish
+
+scripts/core/          viewpoint·trajectory·glns·isaac 도메인 엔진
+scripts/common/        공유 설정·수학
+scripts/setup/         object/camera/ghost USD 준비 도구
+scripts/moveit/        MoveIt sim/real 연동 구성
+scripts/julia/glns/    GLNS.jl 런타임
 ```
 
 기타 최상위: `workcell/`(로봇·환경 URDF/USD/config), `data/{object}/`(mesh·viewpoint·궤적),
@@ -36,7 +42,7 @@ julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
 
 ## 실행 방법
 
-진입점은 `scripts/apps/` 의 GUI 4개다. 이들이 내부적으로 `core/` 엔진을 서브프로세스로
+진입점은 `scripts/apps/` 의 GUI 3개다. 이들이 내부적으로 `core/` 엔진을 서브프로세스로
 호출하므로, core CLI 를 직접 부를 필요는 없다 (core 세부는 각 항목의 문서 링크 참고).
 
 viser 기반 2개(`viewpoint_studio`, `trajectory_studio`)는 브라우저 도구다 — 실행하면 뜨는
@@ -61,7 +67,7 @@ uv run --no-sync scripts/apps/viewpoint_studio.py --object curved_structure
 ### 2. 궤적 생성/미리보기 (headless) — `trajectory_studio.py`
 
 Isaac 없이 브라우저에서: 물체를 gizmo 로 배치 → 라이브 IK 도달성 확인 → 궤적 생성
-(DP 또는 GLNS) → 재생. `plan_trajectory` / `solve_glns_path` 엔진을 감싼다.
+(DP 또는 GLNS) → 재생. `core.trajectory` / `core.glns` 엔진을 감싼다.
 
 ```bash
 uv run --no-sync scripts/apps/trajectory_studio.py --object sample
@@ -97,3 +103,19 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync scripts/apps/isaac_pipeline.py \
 
 자세히: [docs/running.md](docs/running.md), [docs/moveit_inspection_mode.md](docs/moveit_inspection_mode.md),
 [docs/run_2x2_modes.md](docs/run_2x2_modes.md).
+
+## 자산 준비 도구
+
+새 물체나 카메라/ghost USD를 준비할 때만 `scripts/setup/`을 직접 실행한다.
+
+```bash
+# data/{object}/mesh/ 안의 raw OBJ를 m 단위 source.obj로 정규화
+uv run scripts/setup/prepare_object_mesh.py normalize \
+    --object sample --input raw_export.obj
+
+# object USD 및 preview ghost 재생성
+uv run scripts/setup/build_object_usd.py --object sample --force
+uv run scripts/setup/build_ghost_usd.py
+```
+
+카메라 CAD를 교체할 때는 `build_camera_mesh.py --source /path/to/camera.obj`를 사용한다.

@@ -2,7 +2,7 @@
 
 viser 기반 인터랙티브 스튜디오. 물체를 골라 **그 자리에서 viewpoint를 생성**하거나
 (파라미터 튜닝), 기존 `viewpoints*.h5`를 불러와 본다. 정적 plotly
-HTML(`common/viewpoint_viz.py`)의 인터랙티브 대체 + 경로 순서 재생 + 실시간 재생성.
+HTML(`core/viewpoint/visualization.py`)의 인터랙티브 대체 + 경로 순서 재생 + 실시간 재생성.
 
 ## 실행
 
@@ -28,14 +28,14 @@ uv run scripts/apps/viewpoint_studio.py --viewpoints data/sample/viewpoint/124/v
 
 ## Generate (surface + coacd + sub-cluster)
 
-`generate_viewpoints.py`의 import 시임을 직접 호출:
+`core.viewpoint`의 공개 import 시임을 직접 호출:
 `load_meshes` → `prepare_grid` → `cluster_coacd` → `cluster_and_order`.
 
 `viewpoint_studio.py`는 **surface 샘플링 전용**이다.
 
 - `surface` — 표면 직접 균일 샘플링(FPS) + 순서 `lawnmower`(탄젠트 row sweep).
   곡면·측벽까지 표면적 기준으로 고르게 덮음 (PCA 투영 그리드의 곡면 누락 해결).
-- `grid` 샘플링 코드는 `generate_viewpoints.py`/CLI에만 남겨둔다. 스튜디오 UI에서는 선택하지 않는다.
+- `grid` 샘플링 코드는 `viewpoint/cli.py`/CLI에만 남겨둔다. 스튜디오 UI에서는 선택하지 않는다.
 - surface 간격은 직접 mm로 입력하지 않고, 카메라 FOV와 overlap에서 계산한다.
 - 클러스터 내부 순서는 표면점 기준 tangent plane에서 긴 축을 scan, 짧은 축을 row로 잡고
   `→ ← → ←` 형태로 훑는다. row 간격은 FOV-derived spacing을 사용하고, 두 시작 방향 중
@@ -75,7 +75,7 @@ uv run scripts/apps/viewpoint_studio.py --viewpoints data/sample/viewpoint/124/v
 필터)도 `(object, surface_spacing)`별 1회 캐시.
 
 `[Save h5]` → `data/{object}/viewpoint/{N}/viewpoints_{method}.h5` 기록(method=`coacd+{sub}`)
-→ `plan_trajectory.py`가 바로 소비. (대상 디렉토리가 root 소유면 `PermissionError`
+→ `trajectory/cli.py`가 바로 소비. (대상 디렉토리가 root 소유면 `PermissionError`
 → 상태에 안내. → [[root-owned-data-and-container-paths]] 참고용 메모.)
 
 ## 화면 구성 / 레이어

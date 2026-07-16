@@ -115,7 +115,7 @@ docker exec -it ros-jazzy bash -c \
 > → `colcon build --packages-select topic_based_ros2_control --cmake-args -DBUILD_TESTING=OFF`)
 
 > **/clock 필수**: cuMotion/move_group/controller_manager가 `use_sim_time:=True`라 Isaac이
-> `/clock`을 발행해야 컨트롤러가 활성화된다. `scene.py`의 `build_moveit_graph()`가
+> `/clock`을 발행해야 컨트롤러가 활성화된다. `core/isaac/scene.py`의 `build_moveit_graph()`가
 > `ROS2PublishClock`로 발행하므로, Isaac 앱을 **이 수정 이후 버전으로 재시작**해야 함.
 
 > `ur_type`/`xrdf_path`는 인자로 override 가능(기본 ur20 + scripts/moveit/ur20.xrdf).
@@ -191,7 +191,7 @@ Isaac 타임라인 Stop/Pause↔Play를 매끄럽게 처리하기 위해 세 가
   토픽 스왑으로는 못 막는다.
 
 ### 4) Inspection Publish 라우팅 — 셸2 독립 (run모드별 자동)
-- `publish_trajectory.py --target {isaac|controller}` 추가, 앱이 run모드로 선택:
+- `trajectory/publish.py --target {isaac|controller}` 추가, 앱이 run모드로 선택:
   - **sim** = `--target isaac`: `/isaac_joint_commands`로 JointState **100Hz 직접 스트리밍**
     (`STREAM_HZ`, 선형 재샘플링으로 매끄럽게). 현재자세는 `/isaac_joint_states`에서 읽음.
     **셸2 없이도** Isaac sim 로봇 구동.

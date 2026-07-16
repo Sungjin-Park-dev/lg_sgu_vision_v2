@@ -2,7 +2,7 @@
 """
 Omni UI panel for the trajectory pipeline inside Isaac Sim.
 
-Boots Isaac Sim with the same workcell as scene.py, then opens
+Boots Isaac Sim through the shared ``core.isaac.scene`` runtime, then opens
 an Omni UI window with four panels:
 
     A) Load object (dropdown + native viewport gizmo move)
@@ -14,7 +14,7 @@ The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
 
 Preview overlays a pre-built physics-free ghost UR20 with the camera attached
-(built via scripts/isaac/usd/build_ghost_usd.py) at /World/UR20_preview and
+(built via scripts/setup/build_ghost_usd.py) at /World/UR20_preview and
 poses each link by writing one xformOp per frame via FK. The real /World/UR20
 articulation is never touched by preview.
 
@@ -43,8 +43,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Reuse loaders from scene.py — same workcell, robot, camera.
-from isaac import scene as urctl  # noqa: E402
+# Reuse the core Isaac scene loaders — same workcell, robot, camera.
+from core.isaac import scene as urctl  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -55,7 +55,7 @@ JOINT_NAMES = [
     "wrist_3_joint",
 ]
 
-# Must match scripts/core/plan_trajectory.py::IK_RANDOM_SEED. Kept local because
+# Must match scripts/core/trajectory/settings.py::IK_RANDOM_SEED. Kept local because
 # this module is imported by Isaac Sim's bundled Python before the uv subprocess.
 IK_RANDOM_SEED = 123
 
@@ -1298,7 +1298,7 @@ class PipelineWindow:
         if not usd_path.exists():
             self._append_log(
                 f"[object] '{obj}' has no source.usd — build it once, then retry:\n"
-                f"  uv run scripts/isaac/usd/build_object_usd.py --object {obj}")
+                f"  uv run scripts/setup/build_object_usd.py --object {obj}")
             return
         self._append_log(f"[object] loading '{obj}' ...")
         try:
@@ -1311,7 +1311,7 @@ class PipelineWindow:
             f"[object] loaded '{obj}'. Move it with the viewport gizmo (W/E), then Generate.")
 
     def _on_log_object_pose(self):
-        """Print the current object world orientation — feed it to reorient_mesh.py."""
+        """Print the current object world orientation for prepare_object_mesh.py."""
         pose = self._read_object_world_pose()
         if pose is None:
             self._append_log("[object] no target prim on stage — Load Object first.")
@@ -1322,7 +1322,8 @@ class PipelineWindow:
             f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
             f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}  "
             f"(world z = {rz + urctl.MOUNT_HEIGHT:.4f})\n"
-            f"[object] bake upright: uv run scripts/prep/reorient_mesh.py --object {obj} "
+            f"[object] bake upright: uv run scripts/setup/prepare_object_mesh.py "
+            f"reorient --object {obj} "
             f"--world-target-quat {w:.6f} {x:.6f} {y:.6f} {z:.6f}")
 
     def _read_object_world_pose(self):
@@ -1367,29 +1368,12 @@ class PipelineWindow:
     @staticmethod
     def _load_camera_viewpoint_points(h5_path: str):
         """Return camera viewpoint points in the target object's local frame."""
-        import h5py
-        from common import config as _config
+        from core.viewpoint.storage import load_viewpoints_hdf5
 
-        with h5py.File(h5_path, "r") as f:
-            if "viewpoints" not in f:
-                raise ValueError("missing 'viewpoints' group")
-            grp = f["viewpoints"]
-            if "positions" not in grp or "normals" not in grp:
-                raise ValueError("expected viewpoints/positions and viewpoints/normals")
-
-            positions = np.array(grp["positions"], dtype=np.float64)
-            normals = np.array(grp["normals"], dtype=np.float64)
-            if positions.ndim != 2 or positions.shape[1] != 3:
-                raise ValueError(f"positions must be shaped (N, 3), got {positions.shape}")
-            if normals.shape != positions.shape:
-                raise ValueError(
-                    f"normals shape {normals.shape} does not match positions {positions.shape}")
-
-            wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
-            if "metadata" in f and "camera_spec" in f["metadata"]:
-                cs = f["metadata"]["camera_spec"]
-                if "working_distance_mm" in cs.attrs:
-                    wd_m = float(cs.attrs["working_distance_mm"]) / 1000.0
+        viewpoint = load_viewpoints_hdf5(h5_path)
+        positions = viewpoint.positions
+        normals = viewpoint.normals
+        wd_m = viewpoint.working_distance_m
 
         n = np.linalg.norm(normals, axis=1, keepdims=True)
         safe_normals = np.divide(
@@ -1560,7 +1544,7 @@ class PipelineWindow:
             f"isaac_pipeline_ik_{os.getpid()}_{int(time.time() * 1000)}.json"
         )
         cmd = [
-            self._uv, "run", "scripts/core/check_viewpoint_ik.py",
+            self._uv, "run", "scripts/core/trajectory/check_ik.py",
             "--object", obj,
             "--viewpoints", h5,
             "--output", str(result_path),
@@ -1982,11 +1966,11 @@ class PipelineWindow:
         pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
         quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
         shell = (
-            f"{self._uv} run --no-sync scripts/core/solve_glns_path.py "
+            f"{self._uv} run --no-sync scripts/core/glns/solve.py "
             f"--object {obj!r} --viewpoints {h5!r} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
-            f"&& {self._uv} run --no-sync scripts/core/verify_glns_trajectory.py "
+            f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
             f"--no-home-bracket --output-dir {trajectory_dir!r}"
         )
@@ -2088,7 +2072,7 @@ class PipelineWindow:
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
             f"{self._ensure_inspection_controller_cmd()} && "
-            f"exec {self._uv} run --no-sync scripts/core/publish_trajectory.py "
+            f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
             f"--joint-target={q_str!r} --target controller"
         )
         self._append_log(f"[home] {label} → real robot (direct joint target)")
@@ -2286,7 +2270,7 @@ class PipelineWindow:
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
             f"{self._ensure_inspection_controller_cmd()} && "
-            f"exec {self._uv} run --no-sync scripts/core/publish_trajectory.py "
+            f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
             f"--csv {csv!r} --target controller"
         )
         cmd = ["bash", "-c", shell_cmd]
@@ -2384,14 +2368,14 @@ def main():
     simulation_app.update()
 
     # Physics-free ghost overlay for trajectory preview. Built once offline
-    # by scripts/isaac/usd/build_ghost_usd.py — referencing it here
+    # by scripts/setup/build_ghost_usd.py — referencing it here
     # should add zero physics state and leave the real /World/UR20
     # articulation untouched.
     ghost_usd_path = args.usd_path.parent / GHOST_USD_NAME
     if not ghost_usd_path.exists():
         sys.exit(
             f"Ghost USD not found: {ghost_usd_path}\n"
-            f"Build it first: uv run scripts/isaac/usd/build_ghost_usd.py"
+            f"Build it first: uv run scripts/setup/build_ghost_usd.py"
         )
     base_link, chain = spawn_preview_ghost(
         usd_path=ghost_usd_path,

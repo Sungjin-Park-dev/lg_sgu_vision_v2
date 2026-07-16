@@ -1,6 +1,6 @@
 # Delaunay-constrained GLNS experiment
 
-`solve_glns_path.py`는 기존 DP trajectory pipeline과 독립적인 실험 도구다.
+`glns/solve.py`는 기존 DP trajectory pipeline과 독립적인 실험 도구다.
 원본 viewpoint HDF5의 순서를 변경하지 않고, Delaunay 연결 성분마다 viewpoint 순서와
 collision-free IK branch를 GLNS로 함께 선택한다.
 
@@ -22,7 +22,7 @@ Hamiltonian open path가 없으면 `infeasible`로 기록하며 비-Delaunay edg
 viewpoint HDF5를 현재 generator로 다시 생성해 `viewpoints/adjacency`가 있어야 한다.
 
 ```bash
-uv run scripts/core/generate_viewpoints.py \
+uv run scripts/core/viewpoint/cli.py \
   --object sample --material-rgb "0,255,0" \
   --sampling-mode surface --surface-spacing 25 \
   --cluster-method coacd+agglomerative --coacd-threshold 0.2 \
@@ -38,7 +38,7 @@ julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
 ## 실행
 
 ```bash
-uv run --no-sync scripts/core/solve_glns_path.py \
+uv run --no-sync scripts/core/glns/solve.py \
   --object sample \
   --viewpoints data/sample/viewpoint/74/viewpoints_coacd+agglomerative.h5 \
   --roll-augment --tilt-augment
@@ -79,7 +79,7 @@ uv run --no-sync scripts/apps/trajectory_studio.py \
 
 기본 재생은 GLNS가 고른 **이산 자세**를 viewpoint 단위로 순간이동시킬 뿐, viewpoint 사이의
 실제 이동(transit via-roll 우회 등)은 보여주지 않는다. **Component 폴더의 `Dense trajectory (CSV)`
-토글**을 켜면, `verify_glns_trajectory.py`가 같은 디렉토리에 저장한
+토글**을 켜면, `glns/verify.py`가 같은 디렉토리에 저장한
 `glns_trajectory_comp{cid}.npz`(검증된 dense 궤적)를 읽어 실제 motion을 재생한다.
 
 - step slider가 viewpoint 대신 **dense waypoint 단위**로 바뀐다(예: 성분 0 → 836 waypoint).
@@ -87,23 +87,23 @@ uv run --no-sync scripts/apps/trajectory_studio.py \
   스치지 않고 어떻게 도는지 눈으로 확인 가능.
 - npz가 없는(검증 미실행 또는 충돌 FAIL) 성분은 토글을 켜도 기존 이산 자세 재생으로 폴백한다.
 
-먼저 `verify_glns_trajectory.py`를 돌려 npz를 만들어 두어야 한다.
+먼저 `glns/verify.py`를 돌려 npz를 만들어 두어야 한다.
 
 ## 충돌 고려 검증 (collision-aware verification)
 
 GLNS는 각 viewpoint의 **정적 자세 충돌**만 검사하고 viewpoint 사이의 **이동(motion)** 은
-계획·충돌검사하지 않는다. `verify_glns_trajectory.py`는 GLNS 결과를 받아 **성분마다 독립적으로**
-GLNS가 고른 joint 순서를 `plan_trajectory.py`의 Phase 4-6
+계획·충돌검사하지 않는다. `glns/verify.py`는 GLNS 결과를 받아 **성분마다 독립적으로**
+GLNS가 고른 joint 순서를 `trajectory/cli.py`의 Phase 4-6
 (reconfig transit 계획 → densify 충돌검증 → uniform resample → FK/시간 → CSV)에 그대로
 흘려보내, "충돌을 고려하면 이 경로가 실제로 실행 가능한가"를 확인한다.
 
-`plan_trajectory`는 일체 수정하지 않고 라이브러리로 재사용한다(`solve_glns_path`와 동일 패턴).
+두 단계는 `core.trajectory` 공개 API의 동일한 IK·collision·motion 구현을 재사용한다.
 두 도구가 같은 collision world / robot config / wrist_3 lock 값을 쓰므로 GLNS에서 충돌-free였던
 자세는 여기서도 충돌-free다 — 검증 대상은 **오직 자세 사이의 이동**이다. 결과에 박제된 물체 배치
 (`object_position`/`object_quat_wxyz`)를 config에 주입해 GLNS IK가 풀린 바로 그 world를 재현한다.
 
 ```bash
-uv run --no-sync scripts/core/verify_glns_trajectory.py \
+uv run --no-sync scripts/core/glns/verify.py \
   --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5 \
   --require-full-coverage
 ```

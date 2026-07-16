@@ -182,7 +182,7 @@ Inspection 모드의 좌측 패널은 검사 워크플로 **A → B → C → D*
 | **Load Object** | 선택한 객체 USD를 씬에 로드. 이후 뷰포트 gizmo로 이동/회전(**W**=이동, **E**=회전) |
 | **Log Pose** | 현재 객체의 위치/자세를 Log 패널에 출력(배치 확인·기록용) |
 
-### B. Generate Trajectory (`plan_trajectory.py`) — 검사 경로 생성
+### B. Generate Trajectory (`trajectory/cli.py`) — 검사 경로 생성
 | 항목 | 설명 |
 |---|---|
 | **Viewpoints (h5)** + **Browse...** | 뷰포인트 `.h5` 파일 경로 지정 |
@@ -203,7 +203,7 @@ Inspection 모드의 좌측 패널은 검사 워크플로 **A → B → C → D*
 
 > Preview는 **고스트만** 움직인다 — 실제 로봇/Isaac 로봇은 움직이지 않는다.
 
-### D. Publish to Robot (`publish_trajectory.py`) — 실제 구동
+### D. Publish to Robot (`trajectory/publish.py`) — 실제 구동
 | 항목 | 설명 |
 |---|---|
 | **CSV path** + **Browse...** | 전송할 trajectory CSV(패널 C와 공유) |

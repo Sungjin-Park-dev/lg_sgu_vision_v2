@@ -1,4 +1,4 @@
-# generate_viewpoints.py
+# viewpoint/cli.py
 
 메시 표면에 뷰포인트를 생성하고, 클러스터링 + GTSP로 방문 순서를 최적화한다.
 **배치(sampling)** 와 **클러스터 내부 순서(ordering)** 를 선택할 수 있다.
@@ -140,7 +140,8 @@ HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
 
 ## HTML 시각화
 
-`scripts/common/viewpoint_viz.py`의 `visualize_clusters_html()`로 생성 (내부 전용, 직접 실행 안 함).
+`scripts/core/viewpoint/visualization.py`의 `visualize_clusters_html()`로 생성한다
+(내부 전용, 직접 실행하지 않음).
 
 **시각화 요소**:
 - **메시**: 반투명 회색 배경
@@ -153,4 +154,6 @@ HDF5 구조는 [architecture.md](architecture.md#viewpointsh5) 참조.
 
 ## 하류 호환성
 
-`plan_trajectory.py`의 `load_viewpoints()`는 `cluster_id`, `cluster_order`를 **필수**로 읽는다. 두 데이터가 없으면 에러로 종료. 레거시 non-clustered 모드는 제거됨.
+모든 소비자는 `core.viewpoint.load_viewpoints_hdf5()`가 반환하는 `ViewpointData`를 사용한다.
+`positions`와 `normals`는 필수이며, `path_order`, cluster, adjacency가 없는 legacy 파일은
+optional 필드를 `None`으로 읽어 각 앱의 기존 fallback을 적용한다.
