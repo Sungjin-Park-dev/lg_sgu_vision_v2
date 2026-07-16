@@ -20,17 +20,16 @@ julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
 
 ```bash
 # 뷰포인트 생성: http://localhost:8080
-uv run --no-sync scripts/apps/viewpoint_studio.py --object sample
+uv run --no-sync scripts/apps/viewpoint_studio.py
 
 # 궤적 생성: http://localhost:8081
-uv run --no-sync scripts/apps/trajectory_studio.py --object sample
+uv run --no-sync scripts/apps/trajectory_studio.py
 ```
 
-Isaac Pipeline은 Isaac Sim과 ROS 환경이 준비된 컨테이너에서 실행한다.
+Isaac Pipeline도 프로젝트 루트에서 `uv`로 실행한다.
 
 ```bash
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
-  scripts/apps/isaac_pipeline.py --object sample --mode sim
+uv run --no-sync scripts/apps/isaac_pipeline.py
 ```
 
 ## 3. 기본 데이터 흐름
