@@ -1,121 +1,27 @@
 # lg_sgu_vision_v2
 
-UR20 로봇을 이용한 비전 검사 궤적 생성 시스템. cuRobo(IK/충돌검사) 기반.
+UR20 로봇의 비전 검사 지점과 충돌 회피 궤적을 만들고, 시뮬레이션 또는 로봇에서 실행하는 도구다.
 
-## 디렉토리 구조
+## 주요 기능
 
-사용자가 직접 실행하는 것은 `scripts/apps/`의 GUI 3개다. `core`와 `common`은
-앱이 사용하는 런타임, `setup`은 자산을 준비할 때만 실행하는 도구이며,
-`moveit`과 `julia`는 외부 런타임 연동 파일이다.
+| 기능 | 실행 파일 |
+|---|---|
+| 뷰포인트 생성·수정 | `scripts/apps/viewpoint_studio.py` |
+| IK 확인 및 DP·GLNS 궤적 생성 | `scripts/apps/trajectory_studio.py` |
+| Isaac Sim 미리보기와 로봇 실행 | `scripts/apps/isaac_pipeline.py` |
 
-```
-scripts/apps/          ★ 사용자 직접 실행 GUI
-  viewpoint_studio.py    뷰포인트 생성/튜닝/시각화 (viser)
-  trajectory_studio.py   Isaac 없이 브라우저에서 배치+라이브 IK+궤적(DP|GLNS) 생성/재생 (viser)
-  isaac_pipeline.py      Isaac Sim 물체 선택+기즈모 이동+궤적 생성/preview/publish
+## 빠른 시작
 
-scripts/core/          viewpoint·trajectory·glns·isaac 도메인 엔진
-scripts/common/        공유 설정·수학
-scripts/setup/         object/camera/ghost USD 준비 도구
-scripts/moveit/        MoveIt sim/real 연동 구성
-scripts/julia/glns/    GLNS.jl 런타임
-```
-
-기타 최상위: `workcell/`(로봇·환경 URDF/USD/config), `data/{object}/`(mesh·viewpoint·궤적),
-`docs/`(상세 문서·로그), `curobo/`(cuRobo 라이브러리, 별도 clone).
-
-## 환경 설정
-
-NVIDIA GPU + CUDA 12.x toolkit(`nvcc`), Python 3.12 필요.
+Python 3.12 환경에서 의존성을 설치한다.
 
 ```bash
-# 1. uv 설치
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Python 의존성 (Isaac Sim, torch, cuRobo 포함)
 uv sync
-
-# 3. Julia + GLNS (trajectory_studio 의 GLNS 경로용)
-curl -fsSL https://install.julialang.org | sh
-julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
 ```
 
-## 실행 방법
-
-진입점은 `scripts/apps/` 의 GUI 3개다. 이들이 내부적으로 `core/` 엔진을 서브프로세스로
-호출하므로, core CLI 를 직접 부를 필요는 없다 (core 세부는 각 항목의 문서 링크 참고).
-
-viser 기반 2개(`viewpoint_studio`, `trajectory_studio`)는 브라우저 도구다 — 실행하면 뜨는
-`http://localhost:<port>` 에 접속한다. 이미 sync 된 환경에서는 cuRobo 재빌드를 피하려고
-`uv run --no-sync` 를 쓴다.
-
-### 1. 뷰포인트 생성/튜닝 — `viewpoint_studio.py`
-
-브라우저에서 물체를 골라 파라미터 튜닝으로 viewpoint 를 실시간 재생성하거나, 기존
-`viewpoints*.h5` 를 불러와 확인·수정한다 (메시·클러스터·경로·CoACD 파트 시각화 + 순서
-재생 + Save).
+첫 번째 앱을 실행하고 브라우저에서 `http://localhost:8080`에 접속한다.
 
 ```bash
-uv run --no-sync scripts/apps/viewpoint_studio.py --object curved_structure
-# http://localhost:8080 → Generate / Save
+uv run --no-sync scripts/apps/viewpoint_studio.py --object sample
 ```
 
-출력: `data/{object}/viewpoint/{N}/viewpoints_*.h5`.
-자세히: [docs/viewpoint_studio.md](docs/viewpoint_studio.md),
-[docs/generate_viewpoints.md](docs/generate_viewpoints.md).
-
-### 2. 궤적 생성/미리보기 (headless) — `trajectory_studio.py`
-
-Isaac 없이 브라우저에서: 물체를 gizmo 로 배치 → 라이브 IK 도달성 확인 → 궤적 생성
-(DP 또는 GLNS) → 재생. `core.trajectory` / `core.glns` 엔진을 감싼다.
-
-```bash
-uv run --no-sync scripts/apps/trajectory_studio.py --object sample
-# http://localhost:8082
-
-# 이미 만들어진 GLNS 결과 h5 를 바로 열기:
-uv run --no-sync scripts/apps/trajectory_studio.py \
-    --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5
-```
-
-GLNS 경로를 쓰려면 최초 1회 Julia 패키지를 설치한다:
-
-```bash
-julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
-```
-
-출력: `data/{object}/trajectory/{N}/trajectory_dp.{csv,html}` 등.
-자세히: [docs/plan_trajectory.md](docs/plan_trajectory.md),
-[docs/glns_path.md](docs/glns_path.md).
-
-### 3. Isaac Sim 통합 파이프라인 — `isaac_pipeline.py`
-
-Isaac Sim 을 띄워 물체 선택 + 뷰포트 gizmo 이동 + 궤적 생성/ghost preview + 실행까지
-한 창에서 처리한다. 실로봇 전송까지 포함하는 전체 워크플로.
-
-```bash
-OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync scripts/apps/isaac_pipeline.py \
-    --object sample --mode sim
-```
-
-- `--mode {sim,real}` (기본 `sim`) — 궤적을 Isaac UR20(sim) 또는 실로봇(real)으로 전송
-- `--pipeline-mode {inspection,moveit}` (기본 `inspection`) — 궤적 생성 백엔드
-
-자세히: [docs/running.md](docs/running.md), [docs/moveit_inspection_mode.md](docs/moveit_inspection_mode.md),
-[docs/run_2x2_modes.md](docs/run_2x2_modes.md).
-
-## 자산 준비 도구
-
-새 물체나 카메라/ghost USD를 준비할 때만 `scripts/setup/`을 직접 실행한다.
-
-```bash
-# data/{object}/mesh/ 안의 raw OBJ를 m 단위 source.obj로 정규화
-uv run scripts/setup/prepare_object_mesh.py normalize \
-    --object sample --input raw_export.obj
-
-# object USD 및 preview ghost 재생성
-uv run scripts/setup/build_object_usd.py --object sample --force
-uv run scripts/setup/build_ghost_usd.py
-```
-
-카메라 CAD를 교체할 때는 `build_camera_mesh.py --source /path/to/camera.obj`를 사용한다.
+전체 설치 방법, 기능별 작업 순서와 기술 참고자료는 [문서 홈](docs/README.md)에서 찾을 수 있다.
