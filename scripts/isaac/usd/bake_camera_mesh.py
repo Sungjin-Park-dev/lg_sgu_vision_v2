@@ -14,7 +14,8 @@ Pipeline:
 
 Both outputs come from one in-memory geometry on purpose: camera_body.obj is not an
 intermediate, it is the URDF visual+collision mesh, the MorphIt sphere-fitting input and
-what ik_inspector.py renders. Generating them separately guarantees they drift apart.
+what the viser IK tools render (ik_backend.RobotViz, via trajectory_studio). Generating
+them separately guarantees they drift apart.
 
 `camera.usdc` is overwritten in place -- ur20_with_camera.usd references the literal string
 `./camera/camera.usdc`, so the filename is load-bearing. Commit 0c85601 is the precedent for

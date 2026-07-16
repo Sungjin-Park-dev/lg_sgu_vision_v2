@@ -6,7 +6,7 @@
 "잘 나온다" = GLNS solve 결과의 **reconfiguration(특히 base joint 재구성)이 최소**.
 
 2단계 스윕:
-  Stage 1 (값쌈, 배치당 수 초) — in-process cuRobo IK(`ik_inspector.IKBackend`)로 XYZ 그리드
+  Stage 1 (값쌈, 배치당 수 초) — in-process cuRobo IK(`ik_backend.IKBackend`)로 XYZ 그리드
     전체의 viewpoint 도달률을 빠르게 스윕. 이건 `trajectory_studio._sweep_reachability` 와 동일한
     로직(wrist_3 lock)이라 GLNS 대비 보수적(과소평가)이므로, **상대적 top-K pre-filter** 로만 쓴다.
   Stage 2 (비쌈) — 살아남은 배치에만 `solve_glns_path.py` 를 Studio 기본 파라미터로 subprocess
@@ -110,7 +110,7 @@ def sweep_reachability(backend, positions, normals, wd_m) -> np.ndarray:
     trajectory_studio._sweep_reachability (trajectory_studio.py:577-590) 와 동일 로직.
     """
     world_poses = PT.build_camera_poses(positions, normals, wd_m)
-    from ik_inspector import _wxyz_from_matrix  # noqa: PLC0415
+    from ik_backend import _wxyz_from_matrix  # noqa: PLC0415
 
     N = len(world_poses)
     free = np.zeros(N, dtype=bool)
@@ -123,7 +123,7 @@ def sweep_reachability(backend, positions, normals, wd_m) -> np.ndarray:
 
 def stage1_grid_sweep(object_name, positions, normals, wd_m, grid, base_quat, log):
     """그리드 각 셀의 Stage-1 도달률을 잰다. returns list of cell dicts, achievable mask."""
-    from ik_inspector import IKBackend  # noqa: PLC0415  (heavy: curobo)
+    from ik_backend import IKBackend  # noqa: PLC0415  (heavy: curobo)
 
     log(f"[Stage 1] {object_name}: {len(grid)} cells × {len(positions)} vp IK sweep…")
     backend = IKBackend(object_name)

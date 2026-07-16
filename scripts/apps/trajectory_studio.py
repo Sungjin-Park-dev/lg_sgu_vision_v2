@@ -11,7 +11,7 @@ One browser tool that replicates isaac_pipeline.py Panels A/B/C without Isaac Si
       scan=green).
 
 The live IK reuses plan_trajectory's robot_cfg / collision world / wrist_3 lock /
-batch_collision_check (via ik_inspector.IKBackend), so a viewpoint that shows 0
+batch_collision_check (via ik_backend.IKBackend), so a viewpoint that shows 0
 collision-free reps here is exactly the one DP/GLNS will drop (cross-validation).
 
 Generation runs the same headless core scripts as a subprocess (isolated cuRobo
@@ -57,7 +57,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT / "apps"))
 from common import config  # noqa: E402
 from common.glns_utils import read_result_hdf5  # noqa: E402
 import plan_trajectory as PT  # noqa: E402
-from ik_inspector import (  # noqa: E402
+from ik_backend import (  # noqa: E402
     MAX_REP_SLIDER, RobotViz, IKBackend, discover_objects, discover_viewpoints,
 )
 
