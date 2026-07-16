@@ -4,12 +4,16 @@
 
 ## 카메라
 
-| 항목 | 기본값 |
-|---|---|
-| FOV | 50 × 50 mm |
-| working distance | 250 mm |
-| overlap | 0.7 |
-| tool0 → camera optical offset | 0.346 m |
+용어·기준점은 [camera-geometry.md](camera-geometry.md)를 단일 진실원으로 한다.
+
+| 항목 | 값 | 코드 심볼 |
+|---|---|---|
+| FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
+| frame_standoff (optical_frame→object) | 46 mm | `CAMERA_WORKING_DISTANCE_MM` |
+| WD (lens_front→object, 벤더공칭) | 250 mm (기준점 파킹) | — |
+| mount_offset (flange→optical_frame) | 0.346 m | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
+| overlap | 0.5 | `CAMERA_OVERLAP_RATIO` |
+| 렌즈 / 센서 | MFA121-U50 f=50mm / AR0820 8.08×4.55mm | — |
 
 ## 로봇과 충돌
 

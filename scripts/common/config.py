@@ -12,18 +12,25 @@ DATA_ROOT = PROJECT_ROOT / "data"
 # 카메라 사양
 # ============================================================================
 
-# 카메라 시야각 (mm)
+# 용어·기준점 표준: docs/reference/camera-geometry.md (단일 진실원)
+
+# FOV_footprint 가정 (mm). ⚠️ 실제 광학값 아님 — scene.py 의 "footprint 트릭"용 입력.
+#   (focalLength=frame_standoff, aperture=이 값 으로 넣어 작업거리에서 프러스텀이 이 크기를 덮게 함)
+#   실 센서(AR0820 8.08×4.55mm)와 다름. viewpoint col_spacing 계산에도 쓰임.
 CAMERA_FOV_WIDTH_MM = 50.0
 CAMERA_FOV_HEIGHT_MM = 50.0
 
-# 작업 거리 (mm) - camera_optical_frame에서 검사 표면까지의 거리 (카메라 끝 기준에서는 46)
-# CAMERA_WORKING_DISTANCE_MM = 250.0
+# frame_standoff (mm): optical_frame → object_plane 거리. poses.py 가 이 값으로 viewpoint 를
+#   표면에서 띄운다 → 바꾸면 전체 기하 재생성. ⚠️ 이름은 "working distance"지만 광학 WD 아님.
+#   같은 배치: body_face→object=251mm ≈ 벤더 메일(2026-07) WD 250mm / lens_front→object=173mm.
+#   (WD 기준점 78mm·재생성 여부는 파킹 — camera-geometry.md §미해결)
 CAMERA_WORKING_DISTANCE_MM = 46.0
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
 
 # 센서 해상도 (pixels) + 픽셀 크기 (mm)
+# ⚠️ placeholder — 실제 AR0820 native 는 3848×2168 @ 2.1µm (8.08×4.55mm). camera-geometry.md 참고.
 CAMERA_RESOLUTION_W = 4096
 CAMERA_RESOLUTION_H = 3000
 CAMERA_PIXEL_SIZE_MM = 0.010
@@ -253,8 +260,8 @@ ROBOT_MOUNT = {
 DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
 DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20_with_camera.urdf"
 
-# 툴 오프셋: flange/camera_mount에서 camera_optical_frame까지의 거리 (미터)
-# End-Effector로부터 카메라 초점까지의 실제 거리로 변경해야 합니다.
+# mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
+# ⚠️ optical_frame(0.346)은 실제 렌즈앞면(0.219)보다 127mm 앞 허공 — 낡은 기준(파킹).
 TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.346
 
 
