@@ -1,0 +1,40 @@
+# Run the lg_sgu_vision system image with GPU + X11 + the repo bind-mounted.
+#
+#   xhost +local:root                       # allow the container to reach X (host)
+#   docker compose -f docker/compose.yaml up -d --build
+#   docker exec -it ros-jazzy bash /workspace/docker/install_env.sh   # once per machine
+#
+# The repo (build context `..`) is mounted at /workspace, so code edits and the
+# .venv / ros2_overlay created by install_env.sh live on the host and survive
+# `docker compose down`.
+services:
+  ros-jazzy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: lg_sgu_vision:system
+    container_name: ros-jazzy
+    # host network + host IPC: ROS 2 DDS discovery and Isaac<->ROS shared memory.
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: ${DISPLAY:-:1}
+      NVIDIA_VISIBLE_DEVICES: all
+      # `graphics` (in `all`) makes the NVIDIA Container Toolkit inject the
+      # Vulkan ICD Isaac Sim's renderer needs. Without it Isaac dies with
+      # VkResult ERROR_INCOMPATIBLE_DRIVER / "no suitable CUDA GPU found".
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ..:/workspace
+    working_dir: /workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: sleep infinity

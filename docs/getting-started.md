@@ -1,22 +1,20 @@
 # 시작 가이드
 
-뷰포인트와 궤적 작업은 로컬 `uv` 환경을 기본으로 한다. Isaac Sim, ROS2, MoveIt이 필요한 작업만 Docker 환경을 사용한다.
+모든 작업은 `ros-jazzy` 컨테이너 하나에서 실행한다. 컨테이너 빌드·설치는 [환경 설정](guides/environment-setup.md)을 참고한다.
 
-## 1. 로컬 환경 준비
+## 1. 환경 준비
 
-필수 조건은 Python 3.12와 NVIDIA GPU다. 프로젝트 루트에서 다음을 실행한다.
-
-```bash
-uv sync
-```
-
-GLNS를 사용할 경우 Julia 환경을 한 번 준비한다.
+프로젝트 루트에서 컨테이너를 빌드·시작하고, venv와 ROS overlay를 최초 1회 설치한다.
 
 ```bash
-julia --project=scripts/julia/glns -e 'using Pkg; Pkg.instantiate()'
+xhost +local:root
+docker compose -f docker/compose.yaml up -d --build
+docker exec -it ros-jazzy bash /workspace/docker/install_env.sh
 ```
 
 ## 2. 앱 선택
+
+컨테이너 셸(`docker exec -it ros-jazzy bash`)에서 실행한다.
 
 ```bash
 # 뷰포인트 생성: http://localhost:8080
@@ -24,11 +22,8 @@ uv run --no-sync scripts/apps/viewpoint_studio.py
 
 # 궤적 생성: http://localhost:8081
 uv run --no-sync scripts/apps/trajectory_studio.py
-```
 
-Isaac Pipeline도 프로젝트 루트에서 `uv`로 실행한다.
-
-```bash
+# Isaac Pipeline
 uv run --no-sync scripts/apps/isaac_pipeline.py
 ```
 

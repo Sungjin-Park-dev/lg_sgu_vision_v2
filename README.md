@@ -12,13 +12,15 @@ UR20 로봇의 비전 검사 지점과 충돌 회피 궤적을 만들고, 시뮬
 
 ## 빠른 시작
 
-Python 3.12 환경에서 의존성을 설치한다.
+모든 작업은 `ros-jazzy` 컨테이너 하나에서 실행한다. 이미지를 빌드·시작하고 환경을 설치한다.
 
 ```bash
-uv sync
+xhost +local:root
+docker compose -f docker/compose.yaml up -d --build
+docker exec -it ros-jazzy bash /workspace/docker/install_env.sh
 ```
 
-첫 번째 앱을 실행하고 브라우저에서 `http://localhost:8080`에 접속한다.
+컨테이너 셸(`docker exec -it ros-jazzy bash`)에서 첫 번째 앱을 실행하고 브라우저에서 `http://localhost:8080`에 접속한다.
 
 ```bash
 uv run --no-sync scripts/apps/viewpoint_studio.py --object sample
