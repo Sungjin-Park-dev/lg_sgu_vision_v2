@@ -12,7 +12,7 @@
 set -euo pipefail
 
 WS=/workspace
-TB_REF="${TOPIC_BASED_REF:-master}"   # PickNikRobotics/topic_based_ros2_control
+TB_REF="${TOPIC_BASED_REF:-main}"   # PickNikRobotics/topic_based_ros2_control (default branch = main)
 
 cd "$WS"
 
@@ -42,7 +42,9 @@ if [ ! -f "$SRC/package.xml" ]; then
   mv "$OVERLAY"/src/topic_based_ros2_control-* "$SRC"
 fi
 # BUILD_TESTING=OFF: ros_testing is not installed in the base image.
-( cd "$OVERLAY" && source /opt/ros/jazzy/setup.bash && \
+# set +u: ROS setup.bash references unset vars (AMENT_TRACE_SETUP_FILES) that
+# trip nounset.
+( set +u; cd "$OVERLAY" && source /opt/ros/jazzy/setup.bash && \
   colcon build --cmake-args -DBUILD_TESTING=OFF )
 
 echo

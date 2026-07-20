@@ -78,7 +78,7 @@ and segfaults. `Ctrl+C` the previous stack fully before starting another.
 - **GPU lost** (`nvidia-smi: Failed to initialize NVML`) → `docker restart ros-jazzy`.
   Persistent fix: set Docker cgroup driver to `cgroupfs` in `/etc/docker/daemon.json`.
 - `install_env.sh` is idempotent; re-run it after changing `pyproject.toml`/`uv.lock`.
-- Pin the source-built overlay with `TOPIC_BASED_REF=<branch>` if `master` drifts.
+- Pin the source-built overlay with `TOPIC_BASED_REF=<branch>` if `main` drifts.
 - **UR driver version**: the Isaac ROS repo now also ships UR packages at `99.2.0`,
   which apt prefers over the ROS repo's `3.8.0` (99 > 3). This machine was tested
   on the ROS `3.8.0` driver + `ur-moveit-config` `99.2.0`. `99.2.0` is NVIDIA's

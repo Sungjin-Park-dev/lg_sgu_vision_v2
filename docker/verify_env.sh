@@ -6,11 +6,12 @@ ok=0; bad=0
 check() { if eval "$2" >/dev/null 2>&1; then echo "  OK   $1"; ok=$((ok+1)); else echo "  FAIL $1"; bad=$((bad+1)); fi; }
 
 echo "=== system (apt) stack ==="
-check "cuMotion moveit plugin" "ros2 pkg prefix isaac_ros_cumotion_moveit"
-check "ur_robot_driver"        "ros2 pkg prefix ur_robot_driver"
-check "ros2controlcli"         "ros2 pkg prefix ros2controlcli"
+# ros2 pkg checks need ROS sourced; docker exec does not run the entrypoint.
+check "cuMotion moveit plugin" "bash -c 'source /opt/ros/jazzy/setup.bash; ros2 pkg prefix isaac_ros_cumotion_moveit'"
+check "ur_robot_driver"        "bash -c 'source /opt/ros/jazzy/setup.bash; ros2 pkg prefix ur_robot_driver'"
+check "ros2controlcli"         "bash -c 'source /opt/ros/jazzy/setup.bash; ros2 pkg prefix ros2controlcli'"
 check "nvcc (cuda-13)"         "test -x /usr/local/cuda-13.0/bin/nvcc || command -v nvcc"
-check "VPI libnvvpi4"          "ldconfig -p | grep -q libnvvpi"
+check "VPI libnvvpi4"          "dpkg -s libnvvpi4"
 check "uv"                     "uv --version"
 
 echo "=== per-machine (install_env.sh) stack ==="
