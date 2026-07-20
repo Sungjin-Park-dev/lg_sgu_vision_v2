@@ -264,14 +264,22 @@ class SubprocessRunner:
         self._on_line: Optional[Callable[[str], None]] = None
         self._on_exit: Optional[Callable[[int], None]] = None
         self._done = True
+        # Bumped on every start(). Queue items carry the generation that produced
+        # them; pump() drops items from a superseded process so a stale __exit__
+        # can't flip _done for a newly started one.
+        self._gen = 0
 
     @property
     def running(self) -> bool:
         return not self._done
 
     def start(self, cmd, cwd, on_line, on_exit):
+        # Supersede any in-flight process instead of raising. A prior
+        # fire-and-forget run (e.g. a quick `ros2 param set`) may not have been
+        # drained by pump() yet — this happens at startup where apply_mode and
+        # apply_pipeline_mode both set the relay before the UI loop pumps.
         if self.running:
-            raise RuntimeError("SubprocessRunner already running")
+            self.terminate()
 
         env = os.environ.copy()
         # Kit's PYTHONHOME/PATH leaks into children and confuses `uv run`.
@@ -279,26 +287,29 @@ class SubprocessRunner:
         env.pop("PYTHONPATH", None)
         env["PYTHONUNBUFFERED"] = "1"
 
+        self._gen += 1
+        gen = self._gen
         self._on_line = on_line
         self._on_exit = on_exit
         self._done = False
-        self._proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
         )
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._proc = proc
+        self._reader = threading.Thread(
+            target=self._read_loop, args=(gen, proc), daemon=True)
         self._reader.start()
 
-    def _read_loop(self):
-        assert self._proc is not None
+    def _read_loop(self, gen, proc):
         try:
-            for line in iter(self._proc.stdout.readline, ""):
-                self._queue.put(line.rstrip("\n"))
+            for line in iter(proc.stdout.readline, ""):
+                self._queue.put((gen, line.rstrip("\n")))
         finally:
-            self._proc.stdout.close()
-            rc = self._proc.wait()
-            self._queue.put(("__exit__", rc))
+            proc.stdout.close()
+            rc = proc.wait()
+            self._queue.put((gen, "__exit__", rc))
 
     def terminate(self):
         if not self.running or self._proc is None:
@@ -315,12 +326,15 @@ class SubprocessRunner:
         try:
             while True:
                 item = self._queue.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == "__exit__":
+                gen, payload = item[0], item[1:]
+                if gen != self._gen:
+                    continue  # output from a superseded process
+                if payload and payload[0] == "__exit__":
                     self._done = True
                     if self._on_exit is not None:
-                        self._on_exit(int(item[1]))
+                        self._on_exit(int(payload[1]))
                 else:
-                    self._on_line(str(item))
+                    self._on_line(str(payload[0]))
         except Empty:
             return
 
@@ -924,7 +938,9 @@ class PipelineWindow:
             self._moveit_graph.set_active(mode == "moveit")
             self._graph.set_active(False)
             if mode == "moveit":
-                self._set_relay_forwarding(True)
+                # Relay forwarding is owned by apply_mode (stays True throughout sim);
+                # re-asserting it here is redundant and, at startup, double-starts the
+                # relay runner before the UI loop has drained the first run.
                 self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
         elif mode == "moveit":
             self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
