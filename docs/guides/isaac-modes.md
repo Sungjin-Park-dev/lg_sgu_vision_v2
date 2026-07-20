@@ -21,13 +21,33 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 
 ## MoveIt × sim
 
-Isaac 앱을 먼저 Play한 뒤 별도 ROS 셸에서 MoveIt을 실행한다.
+Isaac이 로봇이고, RViz(cuMotion)로 계획·실행한다. 셸 두 개를 쓴다(`docker exec -it ros-jazzy bash`로 각각 접속).
+
+**셸1 — Isaac 앱** (venv, 시스템 ROS는 source하지 않는다). 앱이 뜨면 뷰포트에서 **▶ Play**를 눌러 `/isaac_joint_states`가 흐르게 한다.
 
 ```bash
+source /workspace/.venv/bin/activate
+OMNI_KIT_ACCEPT_EULA=YES python scripts/apps/isaac_pipeline.py \
+  --object sample --mode sim --pipeline-mode moveit
+```
+
+> MoveIt은 ROS2 브리지(`/isaac_joint_states`)가 필요하다. `uv run` 대신 `.venv`를 activate해 브리지용 `LD_LIBRARY_PATH`가 적용되게 한다.
+
+**셸2 — SIM 스택** (셸1을 Play한 뒤 실행). `topic_based` 브리지 때문에 `ros2_overlay`까지 source한다.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /workspace/ros2_overlay/install/setup.bash
 ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
 ```
 
-이 구성에는 `/workspace/ros2_overlay/install/setup.bash`가 source되어 있어야 한다.
+컨트롤러가 활성화되고 move_group·cuMotion·RViz가 뜨면 `You can start planning now!`가 출력된다.
+
+**사용**: RViz에서 목표 자세 지정 → **Plan & Execute** → Isaac UR20이 그 경로로 움직인다. 평소엔 MoveIt이 Isaac 현재 상태를 반영하고, Execute할 때만 로봇이 움직인다.
+
+**주의**
+- 셸1을 먼저 Play한 뒤 셸2를 실행한다. 순서가 바뀌면 `/isaac_joint_states`가 없어 컨트롤러가 gate에서 타임아웃된다(`Switch controller timed out`).
+- 셸2 스택은 한 번에 하나만 띄운다 — sim/real을 동시에 띄우면 `/robot_description` 충돌로 `ros2_control_node`가 segfault한다.
 
 ## Real 또는 mock
 
