@@ -20,7 +20,6 @@ mount height 는 적용하지 않는다 — cuRobo IK/충돌이 base_link 프레
 
 import contextlib
 import io
-import os
 import sys
 from pathlib import Path
 
@@ -61,37 +60,26 @@ def _quiet():
 
 
 # ── 로봇 메쉬 경로 해석 (package:// → 실제 STL/OBJ) ─────────────────────────────
-def _find_ur_description_parent() -> Path:
-    """`<parent>/ur_description/meshes/ur20/collision/base.stl` 가 있는 parent 디렉토리."""
-    candidates = [
-        Path.home() / ".cache" / "robot_descriptions",
-        PROJECT_ROOT / ".venv/lib/python3.12/site-packages/curobo/content/assets/robot",
-    ]
-    for parent in candidates:
-        if (parent / "ur_description/meshes/ur20/collision/base.stl").exists():
-            return parent
-    raise FileNotFoundError(
-        "ur_description collision meshes 를 못 찾음. 확인한 경로:\n  "
-        + "\n  ".join(str(c) for c in candidates)
-    )
+# 레포의 workcell/robot/ 이 ur_description 의 meshes/ 레이아웃을 그대로 미러링하므로
+# (ur20/collision/*.stl, ur20/visual/*.dae, camera/camera_body.obj), package:// URI 를
+# 여기로 직접 매핑한다. ~/.cache/robot_descriptions 같은 외부 캐시를 보지 않는다 —
+# 캐시는 머신마다 있고 없고가 갈리는데(컨테이너에는 홈 디렉토리가 마운트되지 않는다),
+# 레포 사본은 git 으로 코드와 함께 버전이 고정된다.
+MESH_ROOT = PROJECT_ROOT / "workcell" / "robot"
 
 
 def _make_package_handler():
-    """yourdfpy filename_handler: package://ur_description/... → 실제 파일 경로.
+    """yourdfpy filename_handler: package://ur_description/meshes/<X> → workcell/robot/<X>.
 
-    카메라 메쉬(camera_body.obj)는 robot_descriptions 캐시에 없고 workcell/robot/camera/
-    에만 있으므로 로컬로 매핑한다. (yourdfpy 는 핸들러를 handler(fname=...) 로 호출하므로
-    인자 이름이 반드시 `fname` 이어야 한다.)
+    (yourdfpy 는 핸들러를 handler(fname=...) 로 호출하므로 인자 이름이 반드시 `fname`
+    이어야 한다.)
     """
-    parent = _find_ur_description_parent()
-    local_camera = PROJECT_ROOT / "workcell" / "robot" / "camera"
 
     def handler(fname):
         if fname.startswith("package://"):
-            rel = fname[len("package://"):]
-            if "camera" in rel:
-                return str(local_camera / os.path.basename(rel))
-            return str(parent / rel)
+            # ur_description/meshes/ur20/collision/base.stl → ur20/collision/base.stl
+            rel = fname[len("package://"):].split("/meshes/", 1)[-1]
+            return str(MESH_ROOT / rel)
         return fname
 
     return handler
