@@ -5,10 +5,10 @@ Trajectory Studio에서 물체 위치를 조절하고 IK 도달성을 확인한 
 ## 실행
 
 ```bash
-uv run --no-sync scripts/apps/trajectory_studio.py --object sample
+uv run scripts/apps/trajectory_studio.py
 ```
 
-브라우저에서 `http://localhost:8081`에 접속한다. 기존 GLNS 결과는 `--result PATH`로 바로 열 수 있다.
+브라우저에서 `http://localhost:8081`에 접속한다.
 
 ## 작업 순서
 

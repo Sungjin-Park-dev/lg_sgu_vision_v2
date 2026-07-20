@@ -5,10 +5,10 @@ Viewpoint Studio에서 물체 표면의 검사 위치와 카메라 방향을 생
 ## 실행
 
 ```bash
-uv run --no-sync scripts/apps/viewpoint_studio.py --object sample
+uv run scripts/apps/viewpoint_studio.py
 ```
 
-브라우저에서 `http://localhost:8080`에 접속한다. 기존 파일을 바로 열려면 `--viewpoints PATH`를 사용한다.
+브라우저에서 `http://localhost:8080`에 접속한다.
 
 ## 작업 순서
 
