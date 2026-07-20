@@ -22,6 +22,9 @@ curobo/
 # Locally-built ROS overlay (topic_based_ros2_control from source) — build artifact
 ros2_overlay/
 
+# Julia depot (GLNS.jl packages) — JULIA_DEPOT_PATH, populated by install_env.sh
+.julia/
+
 # Local tool state
 .claude/
 CLAUDE.md

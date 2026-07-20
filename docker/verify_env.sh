@@ -13,12 +13,15 @@ check "ros2controlcli"         "bash -c 'source /opt/ros/jazzy/setup.bash; ros2 
 check "nvcc (cuda-13)"         "test -x /usr/local/cuda-13.0/bin/nvcc || command -v nvcc"
 check "VPI libnvvpi4"          "dpkg -s libnvvpi4"
 check "uv"                     "uv --version"
+check "julia 1.12.6"           "julia --version | grep -q '1\.12\.6'"
 
 echo "=== per-machine (install_env.sh) stack ==="
 check ".venv present"          "test -f /workspace/.venv/bin/activate"
 check ".venv bridge patch"     "grep -q 'isaacsim.ros2.core/jazzy/lib' /workspace/.venv/bin/activate"
 check "ros2_overlay built"     "test -f /workspace/ros2_overlay/install/setup.bash"
 check "topic_based in overlay" "test -d /workspace/ros2_overlay/install/topic_based_ros2_control"
+check "julia depot on mount"   "test -d /workspace/.julia"
+check "GLNS.jl usable"         "julia --project=/workspace/scripts/julia/glns --startup-file=no -e 'using GLNS'"
 
 echo "=== venv imports (isaac / torch cuda / curobo v0.8) ==="
 check "isaacsim import"        "bash -c 'source /workspace/.venv/bin/activate && OMNI_KIT_ACCEPT_EULA=YES python -c \"import isaacsim\"'"

@@ -9,6 +9,7 @@
 #   2. .venv patch    — LD_LIBRARY_PATH for the Isaac ROS 2 bridge
 #   3. ros2_overlay   — topic_based_ros2_control 0.3.0, source-built (ABI-matched
 #                       replacement for the segfaulting apt 99.99.1)
+#   4. .julia         — GLNS.jl depot (JULIA_DEPOT_PATH, set in the Dockerfile)
 set -euo pipefail
 
 WS=/workspace
@@ -16,11 +17,11 @@ TB_REF="${TOPIC_BASED_REF:-main}"   # PickNikRobotics/topic_based_ros2_control (
 
 cd "$WS"
 
-echo "=== [1/3] uv sync — Isaac Sim venv (this downloads ~tens of GB on a fresh machine) ==="
+echo "=== [1/4] uv sync — Isaac Sim venv (this downloads ~tens of GB on a fresh machine) ==="
 UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-600}" UV_CONCURRENT_DOWNLOADS="${UV_CONCURRENT_DOWNLOADS:-4}" \
   uv sync
 
-echo "=== [2/3] Patch .venv activate with the Isaac ROS 2 bridge LD_LIBRARY_PATH ==="
+echo "=== [2/4] Patch .venv activate with the Isaac ROS 2 bridge LD_LIBRARY_PATH ==="
 ACTIVATE="$WS/.venv/bin/activate"
 BRIDGE_LINE='export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$VIRTUAL_ENV/lib/python3.12/site-packages/isaacsim/exts/isaacsim.ros2.core/jazzy/lib"'
 if ! grep -qF 'isaacsim.ros2.core/jazzy/lib' "$ACTIVATE"; then
@@ -30,7 +31,7 @@ else
   echo "  already patched"
 fi
 
-echo "=== [3/3] Build topic_based_ros2_control overlay (ABI-matched, shadows apt 99.99.1) ==="
+echo "=== [3/4] Build topic_based_ros2_control overlay (ABI-matched, shadows apt 99.99.1) ==="
 OVERLAY="$WS/ros2_overlay"
 SRC="$OVERLAY/src/topic_based_ros2_control"
 if [ ! -f "$SRC/package.xml" ]; then
@@ -46,6 +47,17 @@ fi
 # trip nounset.
 ( set +u; cd "$OVERLAY" && source /opt/ros/jazzy/setup.bash && \
   colcon build --cmake-args -DBUILD_TESTING=OFF )
+
+echo "=== [4/4] Instantiate GLNS.jl into the Julia depot (\$JULIA_DEPOT_PATH) ==="
+# The depot lands on /workspace (JULIA_DEPOT_PATH is set in the Dockerfile), so
+# it survives container recreation like .venv. Manifest.toml pins the resolved
+# versions; instantiate reproduces them rather than re-resolving.
+JULIA_PROJECT_DIR="$WS/scripts/julia/glns"
+echo "  depot:   ${JULIA_DEPOT_PATH:-<unset — rebuild the image>}"
+julia --project="$JULIA_PROJECT_DIR" --startup-file=no \
+  -e 'using Pkg; Pkg.instantiate()'
+julia --project="$JULIA_PROJECT_DIR" --startup-file=no \
+  -e 'using GLNS; println("  GLNS.jl OK")'
 
 echo
 echo "=== done. Verify with docker/verify_env.sh, then run shells per docs/guides/isaac-modes.md ==="

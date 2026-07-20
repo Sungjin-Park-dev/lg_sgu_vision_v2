@@ -7,18 +7,19 @@
 #   - CUDA 13 toolkit + VPI (cuMotion runtime deps)
 #   - uv (for the Isaac Sim Python venv, created later)
 #   - colcon + build tools (for the topic_based_ros2_control overlay, built later)
+#   - Julia (runtime only, for the GLNS.jl GTSP solver; depot created later)
 #
-# It DOES NOT bake the repo, the Isaac Sim venv (~24 GB) or the ros2_overlay.
-# Those are created once per machine by docker/install_env.sh against the
-# bind-mounted /workspace. See docker/README.md.
+# It DOES NOT bake the repo, the Isaac Sim venv (~24 GB), the ros2_overlay or
+# the Julia depot. Those are created once per machine by docker/install_env.sh
+# against the bind-mounted /workspace. See docker/README.md.
 #
 # Build:  docker build -t lg_sgu_vision:system -f docker/Dockerfile .
 # Run:    docker compose -f docker/compose.yaml up -d   (then install_env.sh once)
 #
 # Pinned/tested versions (2026-07, this machine): cuMotion 4.4.0,
 # cuda-toolkit-13-0 13.0.3, libnvvpi4 4.0.5, ur-robot-driver 3.8.0,
-# ros2controlcli 4.45.2. The NVIDIA apt repos below only serve one release
-# line each, so metapackage names resolve to the tested line.
+# ros2controlcli 4.45.2, Julia 1.12.6. The NVIDIA apt repos below only serve one
+# release line each, so metapackage names resolve to the tested line.
 
 FROM osrf/ros:jazzy-desktop-full
 
@@ -89,11 +90,31 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
       | env UV_UNMANAGED_INSTALL=/usr/local/bin sh \
     && uv --version
 
+# ---------------------------------------------------------------------------
+# 5. Julia, for the GLNS.jl GTSP solver (scripts/julia/glns).
+#    Version is pinned to match scripts/julia/glns/Manifest.toml's
+#    julia_version — on a different minor, Julia re-resolves dependencies and
+#    the committed Manifest stops pinning anything.
+#    Only the RUNTIME lives in the image; the depot (downloaded packages, ~GB)
+#    is machine-local and goes on the /workspace mount — see JULIA_DEPOT_PATH
+#    below and install_env.sh step 4.
+# ---------------------------------------------------------------------------
+ARG JULIA_VERSION=1.12.6
+RUN curl -fsSL "https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_VERSION%.*}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz" \
+      | tar -xz -C /opt \
+    && ln -s "/opt/julia-${JULIA_VERSION}/bin/julia" /usr/local/bin/julia \
+    && julia --version
+
 # Isaac Sim pip wheels require EULA acceptance to import; large NVIDIA wheels
 # need a generous download timeout during `uv sync`.
+#
+# JULIA_DEPOT_PATH: keep the Julia depot on the bind-mounted /workspace so it
+# survives container recreation (like .venv and ros2_overlay). Set as ENV, not
+# in a shell rc — `docker exec ... bash script.sh` does not read rc files.
 ENV OMNI_KIT_ACCEPT_EULA=YES \
     UV_HTTP_TIMEOUT=600 \
-    UV_CONCURRENT_DOWNLOADS=4
+    UV_CONCURRENT_DOWNLOADS=4 \
+    JULIA_DEPOT_PATH=/workspace/.julia
 
 WORKDIR /workspace
 # The repo is bind-mounted at /workspace at run time (not COPYed in).
