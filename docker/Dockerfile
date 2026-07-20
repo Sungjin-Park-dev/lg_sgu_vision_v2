@@ -62,8 +62,13 @@ RUN install -d /usr/share/keyrings && \
 #    ros-jazzy-topic-based-ros2-control (apt 99.99.1) is pulled as a cuMotion
 #    dependency but is ABI-incompatible with ros2_control 4.45 and SEGFAULTS at
 #    runtime; install_env.sh source-builds 0.3.0 into ros2_overlay to shadow it.
+#
+#    `apt-get upgrade` first: the base image pins some ROS packages (e.g.
+#    diagnostic_updater 4.2.6) older than the ros2_control 4.45 the repo now
+#    serves. Without the upgrade, ros2_control_node dies with a symbol lookup
+#    error (undefined diagnostic_updater::Updater 8-arg ctor).
 # ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
       cuda-toolkit-13-0 \
       libnvvpi4 \
       ros-jazzy-isaac-ros-cumotion \
