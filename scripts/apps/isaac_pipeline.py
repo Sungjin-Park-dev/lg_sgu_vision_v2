@@ -2402,6 +2402,16 @@ def main():
     )
     simulation_app.update()
 
+    # Preview ghost gets its own viewport camera, named distinctly so it never
+    # collides with the real robot's InspectionCamera (ROS render product binds
+    # to that one). No render product / ROS publisher here — this is view-only,
+    # and it follows the ghost's FK poses during playback.
+    preview_cam = urctl.setup_inspection_camera(
+        root_path=GHOST_ROOT_PATH, camera_name="InspectionCameraPreview",
+    )
+    if preview_cam is not None:
+        simulation_app.update()
+
     window = PipelineWindow(
         ghost_root_prim=GHOST_ROOT_PATH,
         base_link_path=base_link,

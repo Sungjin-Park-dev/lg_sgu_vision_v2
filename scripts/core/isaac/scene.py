@@ -38,7 +38,7 @@ Module API (used by isaac_pipeline.py):
     load_target_object(object_name) -> None
     find_articulation_root() -> str
     set_start_pose(articulation_root, joint_names, positions) -> None
-    setup_inspection_camera() -> str | None
+    setup_inspection_camera(root_path, camera_name) -> str | None
     build_action_graph(articulation_root, inspection_cam) -> str   # graph path
 """
 
@@ -70,6 +70,17 @@ ACTION_GRAPH_PATH = "/ActionGraph"
 MOVEIT_GRAPH_PATH = "/MoveItGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
 CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
+INSPECTION_CAMERA_NAME = "InspectionCamera"
+
+
+def _is_under_root(path: str, root: str) -> bool:
+    """Prim path 가 root 서브트리에 속하는지 — prefix 오탐 없이 정확히 판정.
+
+    단순 ``startswith`` 는 형제 경로를 잘못 포함한다: ``/World/UR20_preview`` 는
+    ``/World/UR20`` 로 시작하지만 실제 로봇의 하위가 아니다. root 자체이거나
+    ``root + "/"`` 로 시작해야만 서브트리로 본다.
+    """
+    return path == root or path.startswith(root + "/")
 
 # 워크셀 USD에서 측정한 치수
 MOUNT_HEIGHT = 0.805
@@ -278,7 +289,7 @@ def find_articulation_root() -> str:
     stage = omni.usd.get_context().get_stage()
     for prim in stage.Traverse():
         p = str(prim.GetPath())
-        if not p.startswith(STAGE_PATH):
+        if not _is_under_root(p, STAGE_PATH):
             continue
         if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
             print(f"Articulation root: {p}")
@@ -316,12 +327,20 @@ def set_start_pose(articulation_root: str, joint_names, positions) -> None:
     print(f"Start pose set: {np.rad2deg(q).round(1).tolist()} deg")
 
 
-def setup_inspection_camera() -> str | None:
-    """Add an InspectionCamera under the camera optical frame.
+def setup_inspection_camera(
+    root_path: str = STAGE_PATH,
+    camera_name: str = INSPECTION_CAMERA_NAME,
+) -> str | None:
+    """Add an inspection camera under the camera optical frame of one robot.
 
     Prefer the local camera_optical_frame prim. Fall back to camera_mount, then
     the legacy SG8S prim so older USD files still publish camera topics while
     the asset is being migrated.
+
+    ``root_path`` 로 어느 로봇을 대상으로 할지 정한다 — 실제 로봇(``STAGE_PATH``,
+    기본)이나 preview ghost(``/World/UR20_preview``). 두 로봇의 prim 이름이 같으므로
+    (둘 다 ``camera_optical_frame``) 정확한 서브트리 스코프가 필수다. ``camera_name``
+    으로 두 카메라를 구분한다(실제=InspectionCamera, ghost=InspectionCameraPreview).
     """
     import omni.usd
     from pxr import Gf, UsdGeom
@@ -333,7 +352,7 @@ def setup_inspection_camera() -> str | None:
     legacy_sg8s_path = None
     for prim in stage.Traverse():
         p = str(prim.GetPath())
-        if not p.startswith(STAGE_PATH):
+        if not _is_under_root(p, root_path):
             continue
         if prim.GetName() == CAMERA_OPTICAL_FRAME_NAME:
             camera_frame_path = p
@@ -346,7 +365,7 @@ def setup_inspection_camera() -> str | None:
     camera_frame_path = camera_frame_path or camera_mount_path or legacy_sg8s_path
     if camera_frame_path is None:
         print(
-            f"WARNING: {CAMERA_OPTICAL_FRAME_NAME} prim not found — "
+            f"WARNING: {CAMERA_OPTICAL_FRAME_NAME} prim not found under {root_path} — "
             "skipping inspection camera setup"
         )
         return None
@@ -385,7 +404,7 @@ def setup_inspection_camera() -> str | None:
         frame_world = xcache.GetLocalToWorldTransform(stage.GetPrimAtPath(camera_frame_path))
         local = cam_world * frame_world.GetInverse()
 
-    inspection_cam_path = f"{camera_frame_path}/InspectionCamera"
+    inspection_cam_path = f"{camera_frame_path}/{camera_name}"
     cam = UsdGeom.Camera.Define(stage, inspection_cam_path)
     UsdGeom.Xformable(cam).ClearXformOpOrder()
     UsdGeom.Xformable(cam).AddTransformOp().Set(Gf.Matrix4d(local))
@@ -397,7 +416,7 @@ def setup_inspection_camera() -> str | None:
     cam.GetFocusDistanceAttr().Set(float(_config.CAMERA_WORKING_DISTANCE_MM) * 1e-3)
     cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 5.0))
 
-    print(f"Inspection camera: {inspection_cam_path}")
+    print(f"Inspection camera ({camera_name}): {inspection_cam_path}")
     return inspection_cam_path
 
 
