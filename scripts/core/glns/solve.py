@@ -298,7 +298,7 @@ def main() -> int:
     any_idx_arr = np.arange(6, dtype=int)
 
     source_path = (args.viewpoints.resolve() if args.viewpoints is not None
-                   else config.get_viewpoint_path(args.object, args.num_viewpoints).resolve())
+                   else config.resolve_viewpoint_path(args.object, args.num_viewpoints).resolve())
     print("[1/6] Validating Julia/GLNS environment...")
     julia = _check_glns_environment(args.julia, args.julia_project.resolve())
 

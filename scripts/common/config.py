@@ -354,6 +354,30 @@ def get_viewpoint_path(object_name: str, num_viewpoints: int, filename: str = "v
     return DATA_ROOT / object_name / "viewpoint" / str(num_viewpoints) / filename
 
 
+def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
+    """읽을 viewpoints h5 를 고른다 — writer 가 방법 접미사를 붙이기 때문.
+
+    생성기는 ``viewpoints_{clustering_method}.h5`` 로 저장하므로 정규 이름
+    ``viewpoints.h5`` 는 보통 존재하지 않는다. 있으면 그것을 쓰고, 없으면
+    ``viewpoints*.h5`` 중 가장 최근 것을 쓴다. 어떤 방법으로 만든 파일이든 스키마가
+    같으므로 읽는 쪽은 구분할 필요가 없다.
+
+    Raises:
+        FileNotFoundError: 후보가 하나도 없을 때 (탐색한 디렉토리를 함께 알린다).
+    """
+    directory = DATA_ROOT / object_name / "viewpoint" / str(num_viewpoints)
+    canonical = directory / "viewpoints.h5"
+    if canonical.exists():
+        return canonical
+    candidates = sorted(directory.glob("viewpoints*.h5"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No viewpoints*.h5 under {directory} — "
+            f"generate them first (scripts/core/viewpoint/cli.py --object {object_name})."
+        )
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def get_ik_path(object_name: str, num_viewpoints: int, filename: str = "ik_solutions.h5") -> Path:
     """
     IK 솔루션 파일 경로 반환

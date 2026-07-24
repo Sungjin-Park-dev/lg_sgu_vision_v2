@@ -91,7 +91,7 @@ def main():
     # [1] Load viewpoints
     print("[1/6] Loading viewpoints...")
     h5_path = Path(args.viewpoints) if args.viewpoints \
-        else config.get_viewpoint_path(args.object, args.num_viewpoints)
+        else config.resolve_viewpoint_path(args.object, args.num_viewpoints)
     viewpoint = load_viewpoints_hdf5(h5_path)
     positions = viewpoint.positions
     normals = viewpoint.normals
@@ -262,7 +262,9 @@ def main():
     # Phase 4: BatchMotionPlanner transit at reconfig points and at otherwise-small
     # joint interpolation edges that collide.  The latter used to be discovered only
     # in Phase 5 and could split the run/drop viewpoints without trying MotionGen.
-    reconfig_indices = np.where(is_reconfig)[0] if cluster_id is not None else np.array([], dtype=int)
+    # is_reconfig 는 선택된 관절각에서만 나오므로 cluster_id 유무와 무관하다 — 예전에는
+    # cluster_id 없는 파일에서 reconfig 지점 transit 이 통째로 스킵됐다.
+    reconfig_indices = np.where(is_reconfig)[0]
     scan_edge_indices = np.where(~is_reconfig)[0]
     collision_fallback_indices = find_colliding_interpolation_edges(
         selected, scan_edge_indices, robot_cfg, world_config,

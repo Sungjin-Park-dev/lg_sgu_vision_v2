@@ -16,6 +16,7 @@ from .clustering import (
     cluster_coacd_agglomerative,
     cluster_coacd_dbscan,
     cluster_dbscan,
+    cluster_delaunay_subclustered,
 )
 from .models import ViewpointGenParams, ViewpointResult
 from .ordering import (
@@ -36,7 +37,12 @@ from .sampling import (
 def cluster_and_order(label, method, *, positions, normals, camera_positions, target_mesh,
                       row_spacing_m, col_spacing_m, grid_row_index, cam_axis1, cam_axis2,
                       original_path_length_mm, **kwargs):
-    """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환."""
+    """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환.
+
+    아래 dispatch만 방법마다 다르고, 그 뒤(내부 순서 → GTSP 클러스터 순서 → 전역
+    path_order)는 임의의 ``cids``를 받는 공통 경로다. 새 클러스터링 방법은 ``cids``만
+    만들면 되고, 저장 스키마도 그대로 유지된다.
+    """
     t_total_start = time.perf_counter()
 
     coacd_parts = None
@@ -74,6 +80,28 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
             normal_weight=kwargs.get('normal_weight', 0.0),
             max_span_mm=kwargs.get('max_span_mm'),
             precomputed_coacd=kwargs.get('precomputed_coacd'),
+        )
+    elif method in ('delaunay+dbscan', 'delaunay+agglomerative'):
+        edges = kwargs.get('adjacency_edges')
+        if edges is None:
+            raise ValueError(
+                f"method={method} requires adjacency_edges "
+                "(build_local_delaunay_adjacency must run before clustering)"
+            )
+        submethod = method.split('+', 1)[1]
+        sub_kwargs = {'normal_weight': kwargs.get('normal_weight', 0.0)}
+        if submethod == 'dbscan':
+            sub_kwargs.update(
+                eps_m=kwargs.get('eps_m', 0.03),
+                min_samples=kwargs.get('min_samples', 2),
+            )
+        else:
+            sub_kwargs.update(
+                target_size=kwargs.get('target_size', 12),
+                max_span_mm=kwargs.get('max_span_mm'),
+            )
+        cids, component_ids = cluster_delaunay_subclustered(
+            edges, normals, camera_positions, submethod, **sub_kwargs,
         )
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -117,6 +145,8 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
         result['coacd_parts'] = coacd_parts
     if method in ('coacd+dbscan', 'coacd+agglomerative'):
         result['coacd_ids'] = coacd_ids
+    if method in ('delaunay+dbscan', 'delaunay+agglomerative'):
+        result['component_ids'] = component_ids
     return result
 
 
@@ -257,10 +287,17 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
         cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
         original_path_length_mm=grid['original_path_length_mm'],
         ordering_mode=params.ordering_mode,
+        adjacency_edges=adjacency['edges'] if adjacency is not None else None,
     )
 
     method = params.cluster_method
     eps_mm = params.eps_mm if params.eps_mm else config.CAMERA_FOV_WIDTH_MM
+
+    if method.startswith('delaunay+') and adjacency is None:
+        raise ValueError(
+            f"cluster_method={method} needs the Delaunay adjacency graph as its stage-1 "
+            "grouping, but build_delaunay is off (--no-delaunay)."
+        )
 
     if method == 'dbscan':
         nw_str = f", normal_weight: {params.normal_weight}" if params.normal_weight > 0 else ""
@@ -307,6 +344,26 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
             target_size=params.target_size, normal_weight=params.normal_weight,
             max_span_mm=params.max_span_mm,
         )
+    elif method == 'delaunay+dbscan':
+        nw_str = f", normal_weight: {params.normal_weight}" if params.normal_weight > 0 else ""
+        print(f"Clustering (Delaunay+DBSCAN, eps: {eps_mm:.0f} mm, "
+              f"min_samples: {params.min_samples}{nw_str})...")
+        label = f"delaunay+dbscan eps={eps_mm:.0f}mm"
+        result = cluster_and_order(
+            label, 'delaunay+dbscan', **common,
+            eps_m=eps_mm / 1000.0, min_samples=params.min_samples,
+            normal_weight=params.normal_weight,
+        )
+    elif method == 'delaunay+agglomerative':
+        knob = (f"max_span={params.max_span_mm:.0f}mm" if params.max_span_mm
+                else f"ts={params.target_size}")
+        print(f"Clustering (Delaunay+Agglomerative, {knob})...")
+        label = f"delaunay+agglomerative {knob}"
+        result = cluster_and_order(
+            label, 'delaunay+agglomerative', **common,
+            target_size=params.target_size, normal_weight=params.normal_weight,
+            max_span_mm=params.max_span_mm,
+        )
     else:
         raise ValueError(f"Unknown cluster_method: {method}")
 
@@ -341,15 +398,23 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
             cluster_meta['max_span_mm'] = params.max_span_mm
         else:
             cluster_meta['target_size'] = params.target_size
+    elif method == 'delaunay+dbscan':
+        cluster_meta['dbscan_eps_mm'] = eps_mm
+        cluster_meta['dbscan_min_samples'] = params.min_samples
+        cluster_meta['dbscan_normal_weight'] = params.normal_weight
+    elif method == 'delaunay+agglomerative':
+        cluster_meta['normal_weight'] = params.normal_weight
+        if params.max_span_mm:
+            cluster_meta['max_span_mm'] = params.max_span_mm
+        else:
+            cluster_meta['target_size'] = params.target_size
 
     return ViewpointResult(
         positions=grid['positions'], normals=grid['normals'],
         camera_positions=grid['camera_positions'],
-        path_order=result['path_order'], row_index=grid['row_index'],
+        path_order=result['path_order'],
         cluster_id=result['cluster_ids'], cluster_order=result['cluster_order'],
-        cluster_direction=result['cluster_direction'],
         coacd_parts=result.get('coacd_parts'), coacd_ids=result.get('coacd_ids'),
-        pca={'center': grid['pca_center'], 'axis1': grid['pca_axis1'], 'axis2': grid['pca_axis2']},
         row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
         original_path_length_mm=grid['original_path_length_mm'],
         clustered_path_length_mm=result['path_length_mm'],

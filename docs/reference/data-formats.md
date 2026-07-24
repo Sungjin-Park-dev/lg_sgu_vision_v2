@@ -11,12 +11,24 @@ trajectory/N/ trajectory*.csv, trajectory*.npz
 
 ## Viewpoint HDF5
 
-`viewpoints/positions`와 `viewpoints/normals`는 `(N, 3)` 필수 데이터다. 다음 항목은 생성 방식이나 legacy 파일에 따라 없을 수 있다.
+클러스터링 방법과 무관하게 항상 같은 세 계층으로 저장된다.
 
-- `path_order`, `row_index`
-- `cluster_id`, `cluster_order`, `cluster_direction`
-- `adjacency/edges`, `adjacency/component_id`
-- `metadata`의 입력 mesh와 camera working distance
+1. **기하** — `viewpoints/positions`, `viewpoints/normals` `(N, 3)` 필수.
+   `metadata/camera_spec`의 working distance와 `metadata/input_mesh`.
+2. **표면 그래프** — `viewpoints/adjacency/edges` `(E, 2)`. 기하에서만 유도되므로
+   어떤 클러스터링을 쓰든 동일하다. 연결성분은 저장하지 않고 필요할 때
+   `components_from_edges(edges, N)`로 파생한다.
+3. **그룹핑과 방문 순서** — `viewpoints/cluster_id` `(N,)`,
+   `viewpoints/cluster_order` `(K,)`, `viewpoints/path_order` `(N,)`.
+   어떤 방법이 만들었는지는 `metadata/clustering_method`에만 기록된다.
+
+legacy 파일에는 `row_index`, `cluster_direction`, `pca_*`,
+`adjacency/component_id`가 남아 있을 수 있다. 더 이상 쓰지도 읽지도 않으므로
+무시되며, 기존 파일은 그대로 열린다.
+
+파일명은 `viewpoints_{clustering_method}.h5` 형태다. 읽는 쪽은
+`config.resolve_viewpoint_path(object, N)`로 고르면 된다 — 정규 이름
+`viewpoints.h5`가 있으면 그것을, 없으면 가장 최근 `viewpoints*.h5`를 쓴다.
 
 ## GLNS 결과 HDF5
 
