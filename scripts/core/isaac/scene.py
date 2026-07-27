@@ -414,7 +414,10 @@ def setup_inspection_camera(
     cam.GetHorizontalApertureAttr().Set(float(_config.CAMERA_FOV_WIDTH_MM))
     cam.GetVerticalApertureAttr().Set(float(_config.CAMERA_FOV_HEIGHT_MM))
     cam.GetFocusDistanceAttr().Set(float(_config.CAMERA_WORKING_DISTANCE_MM) * 1e-3)
-    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 5.0))
+    # near 는 렌즈 배럴 너머로 — 카메라 원점(body_face)이 배럴 안에 있어서 그러지 않으면
+    # 화면이 자기 배럴로 가득 찬다. config 에서 기하로 유도한다.
+    cam.GetClippingRangeAttr().Set(
+        Gf.Vec2f(float(_config.CAMERA_NEAR_CLIP_M), float(_config.CAMERA_FAR_CLIP_M)))
 
     print(f"Inspection camera ({camera_name}): {inspection_cam_path}")
     return inspection_cam_path

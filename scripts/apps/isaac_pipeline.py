@@ -1760,11 +1760,17 @@ class PipelineWindow:
         prim = self._find_camera_prim(stage, key)
         if prim is None:
             return
+        from common import config as _config
         cam = UsdGeom.Camera(prim)
         cam.GetFocalLengthAttr().Set(wd_mm)
         cam.GetHorizontalApertureAttr().Set(fov_w_mm)
         cam.GetVerticalApertureAttr().Set(fov_h_mm)
         cam.GetFocusDistanceAttr().Set(wd_mm * 1e-3)
+        # 스펙을 다시 밀 때 clipping 도 같이 — 손으로 만졌거나 옛 스테이지에서 온 카메라의
+        # near(0.01) 가 남아 있으면 화면이 자기 렌즈 배럴로 가득 찬다.
+        from pxr import Gf
+        cam.GetClippingRangeAttr().Set(
+            Gf.Vec2f(float(_config.CAMERA_NEAR_CLIP_M), float(_config.CAMERA_FAR_CLIP_M)))
 
     def _poll_camera_specs(self):
         """Viewport → UI: 카메라의 살아있는 intrinsic 을 공유 스펙으로 흡수한다

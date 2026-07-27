@@ -278,6 +278,13 @@ CAMERA_MIN_WORKING_DISTANCE_MM = (
     CAMERA_LENS_FRONT_OFFSET_M - TOOL_TO_CAMERA_OPTICAL_OFFSET_M
 ) * 1000.0
 
+# 렌더 카메라 near clip (m). optical_frame 이 body_face 로 내려오면서 카메라 원점이
+# **자기 렌즈 배럴 안**에 들어갔다 — 카메라 앞 77.8mm 까지가 배럴 내부다. near 를 그 너머로
+# 두지 않으면 렌더 화면이 배럴로 가득 찬다(실제 카메라도 자기 배럴은 보지 못한다).
+# 배럴 끝에 딱 맞추면 얇은 테두리가 남을 수 있어 2mm 여유를 준다.
+CAMERA_NEAR_CLIP_M = (CAMERA_MIN_WORKING_DISTANCE_MM + 2.0) / 1000.0
+CAMERA_FAR_CLIP_M = 5.0
+
 
 def working_distance_error(wd_mm: float) -> str | None:
     """WD(mm)가 기하학적으로 불가능하면 사유 문자열, 정상이면 None.
