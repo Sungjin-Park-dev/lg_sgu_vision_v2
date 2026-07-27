@@ -376,9 +376,11 @@ class Studio:
                 "Working distance (mm)", initial_value=float(config.CAMERA_WORKING_DISTANCE_MM),
                 min=float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1),
                 max=WD_MAX_MM, step=1.0)
-            self.sl_overlap = g.add_slider(
-                "FOV overlap (%)", min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT,
-                step=1, initial_value=initial_overlap)
+            # 슬라이더가 아니라 number 로 — 끌어도 Generate 전까지 화면이 바뀌지 않아
+            # 드래그 어포던스가 지키지 못할 약속을 한다. 나머지 셋과 입력 방식도 통일된다.
+            self.nb_overlap = g.add_number(
+                "FOV overlap (%)", initial_value=initial_overlap,
+                min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1)
             self.btn_generate = g.add_button("Generate")
             self.btn_save = g.add_button("Save h5")
             self.gen_status = g.add_markdown("Idle.")
@@ -428,13 +430,13 @@ class Studio:
         self.btn_save.on_click(lambda _: self._on_save())
         self.submethod_dd.on_update(lambda _: self._apply_subcluster_visibility())
         self.stage1_dd.on_update(lambda _: self._apply_stage1_visibility())
-        for handle in (self.sl_overlap, self.nb_fov_w, self.nb_fov_h, self.nb_wd):
+        for handle in (self.nb_overlap, self.nb_fov_w, self.nb_fov_h, self.nb_wd):
             handle.on_update(lambda _: self._on_camera_spec_change())
         self._apply_subcluster_visibility()
         self._apply_stage1_visibility()
 
     def _current_overlap_pct(self) -> float:
-        return float(self.sl_overlap.value)
+        return float(self.nb_overlap.value)
 
     def _current_fov_mm(self) -> tuple[float, float]:
         return float(self.nb_fov_w.value), float(self.nb_fov_h.value)
