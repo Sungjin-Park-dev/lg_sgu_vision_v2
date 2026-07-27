@@ -62,6 +62,15 @@ MIN_APPROACH_TIME_S = 0.5
 STREAM_HZ = 100.0
 
 
+def _exit_code(exc: SystemExit) -> int:
+    """SystemExit.code 를 프로세스 종료코드로. None=정상, 문자열=실패(1)."""
+    if exc.code is None:
+        return 0
+    if isinstance(exc.code, int):
+        return exc.code
+    return 1
+
+
 def load_trajectory_csv(csv_path: str):
     """CSV에서 joint trajectory를 로드. 헤더에 prefix(예: 'ur20_')가 있어도 동작.
 
@@ -226,9 +235,19 @@ class TrajectoryPublisher(Node):
         pass
 
     def _result_cb(self, future):
+        # error_code 0 = SUCCESSFUL. 음수는 컨트롤러가 궤적을 중단했다는 뜻이므로
+        # 종료코드로 올린다 — 호출자(isaac_pipeline 등)가 실패를 성공으로 읽으면 안 된다.
         result = future.result().result
-        self.get_logger().info(f"Trajectory execution complete (error_code: {result.error_code})")
-        raise SystemExit(0)
+        code = int(result.error_code)
+        if code == 0:
+            self.get_logger().info("Trajectory execution complete (SUCCESSFUL)")
+            raise SystemExit(0)
+        self.get_logger().error(
+            f"Trajectory execution FAILED (error_code={code}) — FollowJointTrajectory: "
+            "-1 INVALID_GOAL, -2 INVALID_JOINTS, -3 OLD_HEADER_TIMESTAMP, "
+            "-4 PATH_TOLERANCE_VIOLATED, -5 GOAL_TOLERANCE_VIOLATED"
+        )
+        raise SystemExit(3)
 
 
 class IsaacStreamPublisher(Node):
@@ -343,23 +362,31 @@ def main():
         node = IsaacStreamPublisher(solutions, times=times)
         try:
             rc = node.run()
-        except (KeyboardInterrupt, SystemExit):
-            rc = 0
+        except SystemExit as exc:
+            rc = _exit_code(exc)
+        except KeyboardInterrupt:
+            rc = 130
         finally:
             node.destroy_node()
             rclpy.shutdown()
         raise SystemExit(rc)
 
     node = TrajectoryPublisher(solutions, times=times)
+    rc = 0
     try:
         print("  Spinning ROS2 node (Ctrl+C to stop)...")
         rclpy.spin(node)
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    except SystemExit as exc:
+        # 콜백(_on_startup / _goal_response_cb / _result_cb)이 결과를 여기로 올린다.
+        # 삼키면 goal 거부·컨트롤러 abort 가 종료코드 0 이 되어 호출자가 성공으로 읽는다.
+        rc = _exit_code(exc)
+    except KeyboardInterrupt:
+        rc = 130
     finally:
         node.destroy_node()
         rclpy.shutdown()
-        print("  ROS2 shutdown complete.")
+        print(f"  ROS2 shutdown complete. (exit {rc})")
+    raise SystemExit(rc)
 
 
 if __name__ == "__main__":
