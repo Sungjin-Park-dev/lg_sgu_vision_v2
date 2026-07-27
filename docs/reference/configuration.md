@@ -18,6 +18,8 @@
 | mount_offset (flange→optical_frame) | 0.141 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
 | lens_front (flange→렌즈 앞면) | 0.21877 m (CAD 실측) | `CAMERA_LENS_FRONT_OFFSET_M` |
 | overlap | 0.5 | `CAMERA_OVERLAP_RATIO` |
+| 렌더 near clip | 79.8 mm (= 렌즈 배럴 끝 + 2) | `CAMERA_NEAR_CLIP_M` |
+| 퍼블리시 해상도 | FOV 비율에서 유도 (50×50 → 880×880) | `CAMERA_PUBLISH_W/H` |
 | 렌즈 / 센서 | MFA121-U50 f=50mm / AR0820 8.08×4.55mm | — |
 
 ## 로봇과 충돌

@@ -36,9 +36,26 @@ CAMERA_RESOLUTION_W = 4096
 CAMERA_RESOLUTION_H = 3000
 CAMERA_PIXEL_SIZE_MM = 0.010
 
-# Isaac Sim 렌더/퍼블리시 해상도 — 풀해상도는 렉 걸려 다운샘플
-CAMERA_PUBLISH_W = 1024
-CAMERA_PUBLISH_H = 750
+# Isaac Sim 렌더/퍼블리시 해상도 — **FOV 종횡비에서 유도**한다.
+# USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산한다(verticalAperture 는 사실상
+# 무시). 그래서 해상도 비율이 FOV 비율과 다르면 퍼블리시된 이미지가 FOV_H 를 덮지 않는다 —
+# 50×50 FOV 를 1024×750 으로 렌더하니 세로가 36.6mm 밖에 안 나왔다.
+# 픽셀 수는 기존(1024×750)과 같게 유지한다 — 풀해상도는 렉이 걸려 다운샘플한 값이라
+# 비율을 맞추자고 렌더 부하를 늘리면 그 튜닝을 깨뜨린다. 부하 조절은 이 예산으로 한다.
+CAMERA_PUBLISH_PIXEL_BUDGET = 1024 * 750
+
+
+def _publish_resolution(fov_w_mm: float, fov_h_mm: float) -> tuple[int, int]:
+    """FOV 비율은 맞추고 픽셀 수는 예산에 맞춘 (W, H). 8의 배수로 정렬한다."""
+    aspect = float(fov_w_mm) / float(fov_h_mm)
+    width = (CAMERA_PUBLISH_PIXEL_BUDGET * aspect) ** 0.5
+    align = lambda v: max(8, int(round(v / 8.0)) * 8)
+    w = align(width)
+    return w, align(w / aspect)
+
+
+CAMERA_PUBLISH_W, CAMERA_PUBLISH_H = _publish_resolution(
+    CAMERA_FOV_WIDTH_MM, CAMERA_FOV_HEIGHT_MM)
 
 # Isaac Sim 검사 카메라 — ROS2 토픽/프레임
 INSPECTION_CAMERA_FRAME_ID = "inspection_camera"

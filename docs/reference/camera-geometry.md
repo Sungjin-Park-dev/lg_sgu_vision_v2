@@ -71,6 +71,18 @@ h5 로드(경고)에서 각각 잡는다. 구 `optical_frame`(0.346) 시절 h5 �
 1. **f(50mm) ≠ WD(물체거리)** — 초점거리와 작업거리는 완전히 다른 값. 50mm 렌즈여도 물체는 min_focus 밖에 둬야 초점이 맞는다.
 2. **FOV(결과) ≠ sensor(입력)** — FOV는 sensor + f + 거리에서 나오는 파생값. 현재 config는 FOV 50×50을 입력으로 넣는 **"footprint 트릭"**([scene.py](../../scripts/core/isaac/scene.py)의 `setup_inspection_camera`, `focalLength=WD, aperture=FOV`)으로 실제 광학이 아니다. 다만 그 50×50은 임의값이 아니라 CAD `VIEW_1` 판과 일치한다.
 
+## Isaac 렌더 카메라에서 걸리는 두 가지
+
+1. **near clip은 렌즈 배럴 너머여야 한다.** `optical_frame`(0.141)이 배럴(끝 0.21877) **안쪽**에
+   있어서, 카메라 앞 77.8mm까지가 자기 배럴이다. `CAMERA_NEAR_CLIP_M`(79.8mm)이 그걸 잘라낸다 —
+   안 그러면 화면이 배럴 내벽으로 가득 찬다. 실제 카메라도 자기 배럴은 못 본다.
+2. **렌더 해상도 비율 = FOV 비율이어야 한다.** USD 카메라는 세로 화각을 렌더 해상도 비율에서
+   다시 계산하므로 `verticalAperture`가 사실상 무시된다. 50×50 FOV를 1024×750으로 렌더하면
+   세로가 36.6mm밖에 안 나온다. `CAMERA_PUBLISH_W/H`를 FOV 비율에서 유도해 맞춘다
+   (픽셀 수는 `CAMERA_PUBLISH_PIXEL_BUDGET`으로 고정).
+   ⚠️ 렌더 프로덕트는 **부팅 시** config FOV로 만들어진다 — FOV 비율이 다른 h5를 쓰면
+   퍼블리시 이미지 비율은 따라가지 않는다(뷰포트는 창 비율을 따른다).
+
 > ~~3. 코드 WD ≠ 벤더 WD~~ — **2026-07-27 해소.** optical_frame 을 body_face 로 옮겨
 > 두 값의 기준점을 통일했다.
 
