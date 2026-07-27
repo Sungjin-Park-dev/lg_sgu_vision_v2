@@ -84,6 +84,26 @@ flange 목표 = 표면점 + 법선 × (WD + mount_offset)
 - 실제 적용 지점: [poses.py](../../scripts/core/trajectory/poses.py)
   `camera_positions = positions + normals * working_distance_m`.
 
+### WD/FOV 는 실행별 값이고, h5 가 그것을 나른다
+
+config 는 기본값이다. 실제 값은 **viewpoint 생성 시점**에 정해진다 —
+스튜디오의 "Camera spec" 폴더 또는 `viewpoint/cli.py --working-distance/--fov-width/
+--fov-height/--overlap`. 고른 값은 `ViewpointGenParams` 가 소유하고
+([models.py](../../scripts/core/viewpoint/models.py), `__post_init__` 이 미지정분을 config 로 해소),
+h5 `metadata/camera_spec` 에 저장된다.
+
+```
+ViewpointGenParams (생성 시 선택)
+   → h5 metadata/camera_spec {fov_width_mm, fov_height_mm, working_distance_mm}
+   → load_viewpoints_hdf5 → ViewpointData.working_distance_m / fov_width_m / fov_height_m
+   → IK·궤적·GLNS (build_camera_poses)  +  Isaac 카메라 intrinsic·FOV 사각형
+```
+
+**h5 값이 config 를 이긴다.** 그래서 WD 를 바꾼 h5 를 만들면 하류가 자동으로 따라온다 —
+다만 그 h5 를 실제로 새로 만들어야 한다. config 만 고치는 것으로는 기존 h5 가 바뀌지 않는다.
+불가능한 WD(검사면이 렌즈 안쪽)는 `config.working_distance_error()` 가 CLI·스튜디오·h5 로드
+세 지점에서 잡는다.
+
 ## 5. `camera_optical_frame` 을 옮길 때 동기화 체크리스트
 
 한 곳만 고치면 조용히 어긋난다. 순서대로 전부.

@@ -36,7 +36,25 @@ flange ──── sensor ──── optical_frame ──── lens_front �
 
 > **`CAMERA_WORKING_DISTANCE_MM` 은 이제 벤더가 말하는 그 WD 다.** `optical_frame` 이 카메라
 > 몸체 앞면에 놓여 있으므로 이 값을 바꾸면 물체면이 **벤더 스펙과 같은 의미로** 이동한다.
-> 단 물체면이 실제로 움직이므로 **viewpoint h5 재생성 + 도달성/충돌 재검증**이 따른다.
+
+### WD 를 실제로 조절하는 법
+
+config 값은 **기본값**일 뿐이고, 실행별 값은 viewpoint 생성 시점에 정한다:
+
+```bash
+uv run scripts/apps/viewpoint_studio.py --object sample     # Camera spec 폴더에서 조절
+uv run scripts/core/viewpoint/cli.py --object sample --working-distance 150 \
+    --fov-width 60 --fov-height 40 --overlap 0.5
+```
+
+고른 값은 h5 `metadata/camera_spec` 에 박히고, **그 h5 를 읽는 쪽이 config 보다 그 값을 우선**한다
+(IK·궤적·GLNS·Isaac 카메라 intrinsic). 물체면이 실제로 움직이므로 h5 를 새로 만든 뒤
+도달성·충돌을 다시 확인한다.
+
+**하한**: `CAMERA_MIN_WORKING_DISTANCE_MM` = 77.8 mm (= lens_front − optical_frame).
+이보다 작으면 검사면이 렌즈 배럴 안쪽이라 기하학적으로 불가능하다 —
+`config.working_distance_error()` 가 CLI(하드 실패) / 스튜디오(에러 표시) /
+h5 로드(경고)에서 각각 잡는다. 구 `optical_frame`(0.346) 시절 h5 는 WD 46mm 라 여기 걸린다.
 
 ## C. 광학 용어 — "거리"와 구분
 
@@ -101,7 +119,8 @@ uv run --no-sync scripts/setup/inspect_camera_step.py   # 아래 표를 재출�
 에셋 정의가 어느 파일에 있는지는 [robot-camera-assets.md](robot-camera-assets.md) 참고.
 
 - [workcell/robot/ur20_with_camera_curobo.urdf](../../workcell/robot/ur20_with_camera_curobo.urdf) — `camera_optical_joint` (**mount_offset 의 소유자**)
-- [scripts/common/config.py](../../scripts/common/config.py) — `CAMERA_*`, `TOOL_TO_CAMERA_OPTICAL_OFFSET_M`
+- [scripts/common/config.py](../../scripts/common/config.py) — `CAMERA_*` 기본값, `TOOL_TO_CAMERA_OPTICAL_OFFSET_M`, `CAMERA_LENS_FRONT_OFFSET_M`, `working_distance_error()`
+- [scripts/core/viewpoint/models.py](../../scripts/core/viewpoint/models.py) — `ViewpointGenParams` (실행별 카메라 스펙의 소유자), `ViewpointData` (h5 스냅샷)
 - [scripts/core/isaac/scene.py](../../scripts/core/isaac/scene.py) — `setup_inspection_camera` (InspectionCamera intrinsic)
 - [scripts/core/trajectory/poses.py](../../scripts/core/trajectory/poses.py) — `build_camera_poses` (WD 적용)
 - [scripts/setup/build_camera_mesh.py](../../scripts/setup/build_camera_mesh.py) — USD optical_frame·배럴 형상 굽기

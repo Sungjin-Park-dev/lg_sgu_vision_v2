@@ -6,11 +6,17 @@
 
 용어·기준점은 [camera-geometry.md](camera-geometry.md)를 단일 진실원으로 한다.
 
+아래 FOV·WD·overlap 은 **기본값**이다. 실행별 값은 viewpoint 생성 시 고르고(스튜디오 "Camera spec"
+폴더 또는 `viewpoint/cli.py --working-distance/--fov-width/--fov-height/--overlap`), h5
+`metadata/camera_spec` 에 저장되어 **그 h5 를 읽는 쪽이 config 보다 우선**한다.
+
 | 항목 | 값 | 코드 심볼 |
 |---|---|---|
 | FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님. CAD `VIEW_1` 과 일치) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
 | WD (optical_frame=body_face→object, 벤더공칭과 동일 기준) | 250 mm | `CAMERA_WORKING_DISTANCE_MM` |
+| WD 하한 (렌즈 간섭) | 77.8 mm | `CAMERA_MIN_WORKING_DISTANCE_MM` |
 | mount_offset (flange→optical_frame) | 0.141 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
+| lens_front (flange→렌즈 앞면) | 0.21877 m (CAD 실측) | `CAMERA_LENS_FRONT_OFFSET_M` |
 | overlap | 0.5 | `CAMERA_OVERLAP_RATIO` |
 | 렌즈 / 센서 | MFA121-U50 f=50mm / AR0820 8.08×4.55mm | — |
 
