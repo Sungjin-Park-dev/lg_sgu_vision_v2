@@ -10,6 +10,8 @@ import numpy as np
 import trimesh
 from sklearn.cluster import DBSCAN
 
+from .adjacency import components_from_edges
+
 def cluster_dbscan(
     camera_positions: np.ndarray,
     normals: np.ndarray,
@@ -162,6 +164,108 @@ def cluster_coacd(
     return cluster_ids, part_meshes
 
 
+def cluster_delaunay(edges: np.ndarray, n_points: int) -> np.ndarray:
+    """Delaunay 인접 그래프의 연결성분을 stage-1 그룹으로 쓴다.
+
+    CoACD의 convex 파트와 같은 자리를 차지하지만, 볼록 분해가 아니라 **표면 연결성**이
+    기준이다. 위상적으로 끊긴 면이 한 그룹에 섞이지 않고, CoACD의 비결정성도 없다.
+
+    성분 수는 보통 매우 적으므로(물체 하나면 1개인 경우도 흔하다) 이것만으로는 스캔
+    클러스터가 되지 않는다 — ``subcluster_within_parts``로 성분 내부를 반드시 세분화한다.
+    """
+    _, component_id = components_from_edges(edges, n_points)
+    return component_id.astype(np.int32)
+
+
+def subcluster_within_parts(
+    part_ids: np.ndarray,
+    normals: np.ndarray,
+    camera_positions: np.ndarray,
+    submethod: str,
+    *,
+    target_size: int = 12,
+    normal_weight: float = 0.0,
+    max_span_mm: Optional[float] = None,
+    eps_m: float = 0.03,
+    min_samples: int = 2,
+) -> np.ndarray:
+    """stage-1 파트 안에서만 세분화하고 전역 0-based 라벨로 이어 붙인다.
+
+    기준은 표면 positions가 아니라 **camera_positions** — 렌더·로봇 EE가 카메라 위치이고,
+    곡면에서는 표면이 가까워도 카메라는 벌어지기 때문이다.
+
+    stage-1이 CoACD 파트든 Delaunay 성분이든 이 단계는 동일하다.
+
+    Args:
+        part_ids: (N,) stage-1 그룹 할당
+        submethod: 'dbscan' | 'agglomerative'
+
+    Returns:
+        cluster_ids: (N,) 0-based 최종 클러스터 할당
+    """
+    if submethod not in ('dbscan', 'agglomerative'):
+        raise ValueError(f"Unknown sub-clustering method: {submethod}")
+
+    final_ids = np.full(len(part_ids), -1, dtype=np.int32)
+    next_cluster = 0
+
+    for part_id in np.unique(part_ids):
+        mask = part_ids == part_id
+        indices = np.where(mask)[0]
+
+        if submethod == 'dbscan':
+            if len(indices) < min_samples:
+                # 포인트가 너무 적으면 하나의 클러스터로
+                final_ids[indices] = next_cluster
+                next_cluster += 1
+                continue
+            sub_ids = cluster_dbscan(
+                camera_positions[mask], normals[mask],
+                eps_m, min_samples, normal_weight,
+            )
+        else:
+            sub_ids = cluster_agglomerative(
+                camera_positions[mask], normals[mask], target_size, normal_weight,
+                max_span_mm=max_span_mm,
+            )
+
+        for sub_id in np.unique(sub_ids):
+            final_ids[indices[sub_ids == sub_id]] = next_cluster
+            next_cluster += 1
+
+    return final_ids
+
+
+def cluster_delaunay_subclustered(
+    edges: np.ndarray,
+    normals: np.ndarray,
+    camera_positions: np.ndarray,
+    submethod: str,
+    **subcluster_kwargs,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Delaunay 성분 → sub-clustering 2단계 (CoACD 2단계 함수들과 같은 형태).
+
+    Returns: (cluster_ids, component_ids) — component_ids는 시각화·로그용 stage-1 라벨.
+    """
+    n_points = len(camera_positions)
+    t0 = time.perf_counter()
+    component_ids = cluster_delaunay(edges, n_points)
+    num_components = len(np.unique(component_ids))
+    t_components = time.perf_counter() - t0
+
+    print(f"  Delaunay+{submethod}: {num_components} surface components → sub-clustering...")
+    t0 = time.perf_counter()
+    final_ids = subcluster_within_parts(
+        component_ids, normals, camera_positions, submethod, **subcluster_kwargs,
+    )
+    t_sub = time.perf_counter() - t0
+
+    print(f"  Delaunay+{submethod}: {num_components} components → "
+          f"{len(np.unique(final_ids))} final clusters "
+          f"(components={t_components:.3f}s, {submethod}={t_sub:.3f}s)")
+    return final_ids, component_ids
+
+
 def cluster_coacd_dbscan(
     mesh: trimesh.Trimesh,
     positions: np.ndarray,
@@ -208,35 +312,13 @@ def cluster_coacd_dbscan(
 
     # 2단계: 각 CoACD 파트 내에서 camera_positions 기준 DBSCAN
     t0 = time.perf_counter()
-    final_ids = np.full(len(positions), -1, dtype=np.int32)
-    next_cluster = 0
-    total_sub_clusters = 0
-
-    for part_id in np.unique(coacd_ids):
-        mask = coacd_ids == part_id
-        part_cam = camera_positions[mask]
-        part_normals = normals[mask]
-        indices = np.where(mask)[0]
-
-        if len(part_cam) < min_samples:
-            # 포인트가 너무 적으면 하나의 클러스터로
-            final_ids[indices] = next_cluster
-            next_cluster += 1
-            total_sub_clusters += 1
-        else:
-            sub_ids = cluster_dbscan(
-                part_cam, part_normals,
-                eps_m, min_samples, normal_weight,
-            )
-            n_sub = len(np.unique(sub_ids))
-            total_sub_clusters += n_sub
-            for sub_id in np.unique(sub_ids):
-                sub_mask = sub_ids == sub_id
-                final_ids[indices[sub_mask]] = next_cluster
-                next_cluster += 1
+    final_ids = subcluster_within_parts(
+        coacd_ids, normals, camera_positions, 'dbscan',
+        eps_m=eps_m, min_samples=min_samples, normal_weight=normal_weight,
+    )
     t_dbscan = time.perf_counter() - t0
 
-    print(f"  CoACD+DBSCAN: {num_coacd_parts} parts → {next_cluster} final clusters "
+    print(f"  CoACD+DBSCAN: {num_coacd_parts} parts → {len(np.unique(final_ids))} final clusters "
           f"(coacd={t_coacd:.3f}s, dbscan={t_dbscan:.3f}s)")
     return final_ids, part_meshes, coacd_ids
 
@@ -273,22 +355,13 @@ def cluster_coacd_agglomerative(
 
     # 2단계: 각 CoACD 파트 내에서 camera_positions 기준 Agglomerative
     t0 = time.perf_counter()
-    final_ids = np.full(len(positions), -1, dtype=np.int32)
-    next_cluster = 0
-
-    for part_id in np.unique(coacd_ids):
-        mask = coacd_ids == part_id
-        indices = np.where(mask)[0]
-        sub_ids = cluster_agglomerative(
-            camera_positions[mask], normals[mask], target_size, normal_weight,
-            max_span_mm=max_span_mm,
-        )
-        for sub_id in np.unique(sub_ids):
-            sub_mask = sub_ids == sub_id
-            final_ids[indices[sub_mask]] = next_cluster
-            next_cluster += 1
+    final_ids = subcluster_within_parts(
+        coacd_ids, normals, camera_positions, 'agglomerative',
+        target_size=target_size, normal_weight=normal_weight, max_span_mm=max_span_mm,
+    )
     t_aggl = time.perf_counter() - t0
 
-    print(f"  CoACD+Agglomerative: {num_coacd_parts} parts → {next_cluster} final clusters "
+    print(f"  CoACD+Agglomerative: {num_coacd_parts} parts → "
+          f"{len(np.unique(final_ids))} final clusters "
           f"(coacd={t_coacd:.3f}s, aggl={t_aggl:.3f}s)")
     return final_ids, part_meshes, coacd_ids

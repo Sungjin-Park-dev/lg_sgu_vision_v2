@@ -56,19 +56,11 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                 f"positions {positions.shape}"
             )
         count = len(positions)
+        # 그룹핑 계층은 이 셋이 전부다. 어떤 클러스터링 방법이 만들었는지는
+        # metadata/clustering_method 에만 남는다.
         path_order = _optional_vector(group, "path_order", length=count)
-        row_index = _optional_vector(group, "row_index", length=count)
         cluster_id = _optional_vector(group, "cluster_id", length=count)
         cluster_order = _optional_vector(group, "cluster_order")
-        cluster_direction = _optional_vector(group, "cluster_direction")
-        if (
-            cluster_order is not None
-            and cluster_direction is not None
-            and cluster_order.shape != cluster_direction.shape
-        ):
-            raise ValueError(
-                "viewpoints/cluster_direction must match viewpoints/cluster_order"
-            )
 
         adjacency = None
         if "adjacency" in group:
@@ -82,9 +74,8 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                 )
             if len(edges) and (np.any(edges < 0) or np.any(edges >= count)):
                 raise ValueError("viewpoints/adjacency/edges contains out-of-range indices")
-            component_id = _optional_vector(
-                adjacency_group, "component_id", length=count,
-            )
+            # 구버전 파일에 남아 있는 component_id 데이터셋은 읽지 않는다 —
+            # 성분은 항상 edges 에서 파생한다(components_from_edges).
             attrs = adjacency_group.attrs
             stats = {
                 key: (value.item() if isinstance(value, np.generic) else value)
@@ -97,7 +88,6 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
             }
             adjacency = ViewpointAdjacency(
                 edges=edges,
-                component_id=component_id,
                 method=_decode_attr(attrs.get("method", "local_tangent_delaunay")),
                 stats=stats,
                 k_neighbors=int(attrs["k_neighbors"]) if "k_neighbors" in attrs else None,
@@ -140,10 +130,8 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
         positions=positions,
         normals=normals,
         path_order=path_order,
-        row_index=row_index,
         cluster_id=cluster_id,
         cluster_order=cluster_order,
-        cluster_direction=cluster_direction,
         adjacency=adjacency,
         input_mesh=input_mesh,
         working_distance_m=working_distance_m,
@@ -151,21 +139,18 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
 
 
 def _write_adjacency_group(viewpoints_grp, adjacency: dict, n_positions: int) -> None:
-    """Write the canonical ``viewpoints/adjacency`` group (edges + component_id + attrs).
+    """Write the canonical ``viewpoints/adjacency`` group (edges + attrs).
 
     Single source of truth for the adjacency schema — shared by ``save_viewpoints_hdf5``
     (full write) and ``write_adjacency_into_h5`` (in-place backfill into an existing file).
     The caller decides whether ``adjacency`` is present; this assumes it is.
+
+    성분 라벨은 쓰지 않는다 — edges 와 어긋날 수 있는 파생값이라, 읽는 쪽이
+    ``components_from_edges`` 로 그때그때 계산한다.
     """
     edges = np.asarray(adjacency['edges'], dtype=np.int32)
-    component_id = np.asarray(adjacency['component_id'], dtype=np.int32)
     if edges.ndim != 2 or edges.shape[1] != 2:
         raise ValueError(f"adjacency edges must have shape (E, 2), got {edges.shape}")
-    if component_id.shape != (n_positions,):
-        raise ValueError(
-            f"adjacency component_id must have shape ({n_positions},), "
-            f"got {component_id.shape}"
-        )
     if len(edges):
         if np.any(edges < 0) or np.any(edges >= n_positions):
             raise ValueError("adjacency edges contain out-of-range viewpoint indices")
@@ -175,7 +160,6 @@ def _write_adjacency_group(viewpoints_grp, adjacency: dict, n_positions: int) ->
             raise ValueError("adjacency edges contain duplicates")
     adjacency_grp = viewpoints_grp.create_group('adjacency')
     adjacency_grp.create_dataset('edges', data=edges)
-    adjacency_grp.create_dataset('component_id', data=component_id)
     adjacency_grp.attrs['method'] = adjacency.get('method', 'local_tangent_delaunay')
     adjacency_grp.attrs['k_neighbors'] = int(adjacency['k_neighbors'])
     adjacency_grp.attrs['distance_factor'] = float(adjacency['distance_factor'])
@@ -190,8 +174,8 @@ def write_adjacency_into_h5(h5_path, adjacency: dict) -> Path:
     """Backfill/refresh ``viewpoints/adjacency`` in an EXISTING viewpoints h5, in place.
 
     Preserves all other datasets (positions/normals/cluster_id/path_order/...). Replaces any
-    existing adjacency group so it is idempotent. Used by viewpoint_studio's "Build + Save
-    Delaunay" action to add the GLNS graph to older coacd-only files.
+    existing adjacency group so it is idempotent — which also strips the ``component_id``
+    dataset older files carry, since the graph is now edges-only.
     """
     h5_path = Path(h5_path)
     with h5py.File(h5_path, "a") as f:
@@ -212,25 +196,24 @@ def save_viewpoints_hdf5(
     metadata: Optional[dict] = None,
     camera_spec: Optional[dict] = None,
     path_order: Optional[np.ndarray] = None,
-    pca_data: Optional[dict] = None,
-    row_index: Optional[np.ndarray] = None,
     cluster_id: Optional[np.ndarray] = None,
     cluster_order: Optional[np.ndarray] = None,
-    cluster_direction: Optional[np.ndarray] = None,
     cluster_metadata: Optional[dict] = None,
     adjacency: Optional[dict] = None,
 ) -> Path:
     """Save viewpoints to HDF5 file
 
+    클러스터링 방법과 무관하게 항상 같은 세 계층을 쓴다: 기하(positions/normals +
+    metadata/camera_spec), 표면 그래프(adjacency/edges), 그리고 선택된 그룹핑과 방문
+    순서(cluster_id/cluster_order/path_order). 방법 이름은
+    ``cluster_metadata['clustering_method']`` 로만 남는다.
+
     Args:
-        pca_data: dict with 'center' (3,), 'axis1' (3,), 'axis2' (3,) arrays
-        row_index: (N,) int32 array — row index per viewpoint
         cluster_id: (N,) int32 array — cluster assignment per viewpoint
         cluster_order: (K,) int32 array — cluster visit order
-        cluster_direction: (K,) int32 array — 0=Forward, 1=Reverse per cluster
         cluster_metadata: dict with clustering parameters
-        adjacency: build_local_delaunay_adjacency() 결과. 기존 reader와 호환되는
-            viewpoints/adjacency 하위 그룹으로 저장한다.
+        adjacency: build_local_delaunay_adjacency() 결과. viewpoints/adjacency 하위
+            그룹으로 저장한다(edges + 파라미터/통계 attrs).
     """
     if positions.shape != normals.shape:
         raise ValueError(
@@ -253,20 +236,10 @@ def save_viewpoints_hdf5(
         if path_order is not None:
             viewpoints_grp.create_dataset('path_order', data=path_order.astype(np.int32))
 
-        if row_index is not None:
-            viewpoints_grp.create_dataset('row_index', data=row_index.astype(np.int32))
-
-        if pca_data is not None:
-            viewpoints_grp.create_dataset('pca_center', data=np.asarray(pca_data['center'], dtype=np.float32))
-            viewpoints_grp.create_dataset('pca_axis1', data=np.asarray(pca_data['axis1'], dtype=np.float32))
-            viewpoints_grp.create_dataset('pca_axis2', data=np.asarray(pca_data['axis2'], dtype=np.float32))
-
         if cluster_id is not None:
             viewpoints_grp.create_dataset('cluster_id', data=cluster_id.astype(np.int32))
         if cluster_order is not None:
             viewpoints_grp.create_dataset('cluster_order', data=cluster_order.astype(np.int32))
-        if cluster_direction is not None:
-            viewpoints_grp.create_dataset('cluster_direction', data=cluster_direction.astype(np.int32))
 
         if adjacency is not None:
             _write_adjacency_group(viewpoints_grp, adjacency, len(positions))

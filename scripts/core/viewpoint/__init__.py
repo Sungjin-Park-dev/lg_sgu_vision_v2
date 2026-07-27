@@ -1,7 +1,7 @@
 """Public viewpoint-generation and storage API."""
 
-from .adjacency import build_local_delaunay_adjacency
-from .clustering import cluster_coacd
+from .adjacency import build_local_delaunay_adjacency, components_from_edges
+from .clustering import cluster_coacd, cluster_delaunay
 from .mesh import load_meshes
 from .models import (
     DEFAULT_DELAUNAY_DISTANCE_FACTOR,
@@ -31,6 +31,8 @@ __all__ = [
     "build_local_delaunay_adjacency",
     "cluster_and_order",
     "cluster_coacd",
+    "cluster_delaunay",
+    "components_from_edges",
     "compute_path_length",
     "generate_viewpoints_core",
     "load_meshes",

@@ -70,8 +70,10 @@ Examples:
     # --- Clustering ---
     parser.add_argument('--cluster-method', type=str, default='dbscan',
                         choices=['dbscan', 'coacd', 'coacd+dbscan',
-                                 'agglomerative', 'coacd+agglomerative'],
-                        help='클러스터링 방법 (기본: dbscan). agglomerative=Ward 공간분할(균등·싱글톤 없음)')
+                                 'agglomerative', 'coacd+agglomerative',
+                                 'delaunay+dbscan', 'delaunay+agglomerative'],
+                        help='클러스터링 방법 (기본: dbscan). agglomerative=Ward 공간분할(균등·싱글톤 없음). '
+                             'delaunay+*=Delaunay 표면 연결성분을 1단계로 사용(볼록분해 없음, 결정적)')
     parser.add_argument('--eps', type=float, default=None,
                         help=f'[dbscan] 이웃 반경 mm (기본: {config.CAMERA_FOV_WIDTH_MM:.0f}mm)')
     parser.add_argument('--min-samples', type=int, default=2,
@@ -222,6 +224,7 @@ def main():
             cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
             original_path_length_mm=grid['original_path_length_mm'],
             ordering_mode=params.ordering_mode,
+            adjacency_edges=adjacency['edges'] if adjacency is not None else None,
         )
         fov_w = config.CAMERA_FOV_WIDTH_MM
         compare_results = {}
@@ -301,6 +304,33 @@ def main():
                         target_size=ts, normal_weight=args.normal_weight,
                         precomputed_coacd=cached_coacd,
                     )
+        elif method == 'delaunay+dbscan':
+            print("Comparing Delaunay+DBSCAN (eps variations)...")
+            for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
+                e_mm = fov_w * factor
+                label = f"delaunay+dbscan eps={e_mm:.0f}mm"
+                compare_results[label] = cluster_and_order(
+                    label, 'delaunay+dbscan', **common,
+                    eps_m=e_mm / 1000.0, min_samples=args.min_samples,
+                    normal_weight=args.normal_weight,
+                )
+        elif method == 'delaunay+agglomerative':
+            if args.max_span:
+                print("Comparing Delaunay+Agglomerative (max_span variations)...")
+                for ms in [40, 60, 80, 120]:
+                    label = f"delaunay+agglomerative span={ms}mm"
+                    compare_results[label] = cluster_and_order(
+                        label, 'delaunay+agglomerative', **common,
+                        max_span_mm=ms, normal_weight=args.normal_weight,
+                    )
+            else:
+                print("Comparing Delaunay+Agglomerative (target_size variations)...")
+                for ts in [8, 12, 16, 24]:
+                    label = f"delaunay+agglomerative ts={ts}"
+                    compare_results[label] = cluster_and_order(
+                        label, 'delaunay+agglomerative', **common,
+                        target_size=ts, normal_weight=args.normal_weight,
+                    )
 
         print()
 
@@ -354,15 +384,11 @@ def main():
             'col_spacing_mm': res.col_spacing_m * 1000.0,
             'total_path_length_mm': compute_path_length(res.camera_positions, res.path_order) * 1000.0,
         }
-        pca_data = {
-            'center': res.pca['center'], 'axis1': res.pca['axis1'], 'axis2': res.pca['axis2'],
-        }
         save_viewpoints_hdf5(
             res.positions, res.normals, output_path, metadata, camera_spec,
-            res.path_order, pca_data, res.row_index,
+            res.path_order,
             cluster_id=res.cluster_id,
             cluster_order=res.cluster_order,
-            cluster_direction=res.cluster_direction,
             cluster_metadata=res.cluster_meta,
             adjacency=res.adjacency,
         )
@@ -371,26 +397,8 @@ def main():
     print("Complete!")
     print("=" * 60)
 
-    # 10. Visualization
-    if not args.dry_run:
-        html_path = str(Path(output_path).with_suffix('.html'))
-        cluster_result = {
-            res.label: {
-                'cluster_ids': res.cluster_id, 'cluster_order': res.cluster_order,
-                'path_order': res.path_order, 'path_length_mm': res.clustered_path_length_mm,
-                'num_clusters': res.num_clusters,
-            }
-        }
-        if res.coacd_parts is not None:
-            cluster_result[res.label]['coacd_parts'] = res.coacd_parts
-        if res.coacd_ids is not None:
-            cluster_result[res.label]['coacd_ids'] = res.coacd_ids
-        visualize_clusters_html(
-            mesh, res.positions, res.camera_positions,
-            cluster_result, res.original_path_length_mm,
-            html_path,
-            adjacency_edges=res.adjacency['edges'] if res.adjacency is not None else None,
-        )
+    # 시각화는 viewpoint_studio(viser)가 h5 를 직접 읽어 담당한다. 생성 시 HTML 은
+    # 만들지 않는다 — 파라미터 스윕 비교가 필요하면 --compare 를 쓴다.
 
     return 0
 

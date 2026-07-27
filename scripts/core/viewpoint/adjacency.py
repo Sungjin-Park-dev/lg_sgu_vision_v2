@@ -13,7 +13,29 @@ from .models import (
     DEFAULT_DELAUNAY_NEIGHBORS,
 )
 
-def _tangent_basis(mean_normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def components_from_edges(edges: np.ndarray, n_points: int) -> tuple[int, np.ndarray]:
+    """무방향 edge 목록에서 연결성분을 구한다 — ``edges``가 유일한 진실이다.
+
+    성분 라벨은 h5에 저장하지 않고 필요할 때 여기서 파생한다(저장하면 edges와 어긋날 수
+    있다). GLNS도 도달 가능 정점만 남긴 뒤 같은 방식으로 다시 계산한다
+    (``core/glns/problem.py::induce_adjacency``).
+
+    Returns: (num_components, component_id) — component_id는 (n_points,) int32.
+    """
+    edge_array = np.asarray(edges, dtype=np.int32).reshape(-1, 2)
+    if n_points <= 0:
+        return 0, np.empty((0,), dtype=np.int32)
+    if len(edge_array) == 0:
+        # edge가 없으면 모든 점이 각자 하나의 성분.
+        return n_points, np.arange(n_points, dtype=np.int32)
+    rows = np.concatenate([edge_array[:, 0], edge_array[:, 1]])
+    cols = np.concatenate([edge_array[:, 1], edge_array[:, 0]])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n_points, n_points))
+    num_components, component_id = connected_components(graph, directed=False)
+    return int(num_components), np.asarray(component_id, dtype=np.int32)
+
+
+def _tangent_basis(mean_normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """평균 법선에 직교하는 2D 탄젠트 프레임 (u, v)를 수치 안정적으로 구성.
 
     PCA가 아니라 클러스터의 실제 평균 법선을 사용 (surface-intrinsic).
@@ -48,7 +70,7 @@ def build_local_delaunay_adjacency(
     장거리 chord를 제거한다.
 
     반환 edge는 ``(min_index, max_index)`` 형태의 정렬된 무방향 edge이며 중복이 없다.
-    ``component_id``는 향후 서로 다른 표면 성분을 잇는 명시적 bridge 후보 생성에 사용한다.
+    성분 라벨은 반환하지 않는다 — 필요하면 ``components_from_edges(edges, n)``로 파생한다.
     """
     points = np.asarray(camera_positions, dtype=np.float64)
     nrms = np.asarray(normals, dtype=np.float64)
@@ -69,7 +91,6 @@ def build_local_delaunay_adjacency(
     if n_points == 0:
         return {
             "edges": np.empty((0, 2), dtype=np.int32),
-            "component_id": np.empty((0,), dtype=np.int32),
             "method": "local_tangent_delaunay",
             "k_neighbors": int(k_neighbors),
             "distance_factor": float(distance_factor),
@@ -90,7 +111,6 @@ def build_local_delaunay_adjacency(
     if n_points == 1:
         return {
             "edges": np.empty((0, 2), dtype=np.int32),
-            "component_id": np.zeros((1,), dtype=np.int32),
             "method": "local_tangent_delaunay",
             "k_neighbors": int(k_neighbors),
             "distance_factor": float(distance_factor),
@@ -184,19 +204,14 @@ def build_local_delaunay_adjacency(
     edge_array = (np.asarray(sorted(edges), dtype=np.int32).reshape(-1, 2)
                   if edges else np.empty((0, 2), dtype=np.int32))
     degree = np.zeros(n_points, dtype=np.int32)
+    num_components, _ = components_from_edges(edge_array, n_points)
     if len(edge_array):
         np.add.at(degree, edge_array[:, 0], 1)
         np.add.at(degree, edge_array[:, 1], 1)
-        rows = np.concatenate([edge_array[:, 0], edge_array[:, 1]])
-        cols = np.concatenate([edge_array[:, 1], edge_array[:, 0]])
-        graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n_points, n_points))
-        num_components, component_id = connected_components(graph, directed=False)
         edge_lengths = np.linalg.norm(
             points[edge_array[:, 0]] - points[edge_array[:, 1]], axis=1,
         )
     else:
-        num_components = n_points
-        component_id = np.arange(n_points, dtype=np.int32)
         edge_lengths = np.empty((0,), dtype=np.float64)
 
     stats = {
@@ -211,7 +226,6 @@ def build_local_delaunay_adjacency(
     }
     return {
         "edges": edge_array,
-        "component_id": np.asarray(component_id, dtype=np.int32),
         "method": "local_tangent_delaunay",
         "k_neighbors": int(k_neighbors),
         "distance_factor": float(distance_factor),

@@ -83,7 +83,7 @@ def main() -> None:
     h5_path = (
         Path(args.viewpoints)
         if args.viewpoints
-        else config.get_viewpoint_path(args.object, args.num_viewpoints)
+        else config.resolve_viewpoint_path(args.object, args.num_viewpoints)
     )
 
     print("[1/4] Loading viewpoints...")
