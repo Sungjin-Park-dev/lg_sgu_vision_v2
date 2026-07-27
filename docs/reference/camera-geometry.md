@@ -78,10 +78,14 @@ h5 로드(경고)에서 각각 잡는다. 구 `optical_frame`(0.346) 시절 h5 �
    안 그러면 화면이 배럴 내벽으로 가득 찬다. 실제 카메라도 자기 배럴은 못 본다.
 2. **렌더 해상도 비율 = FOV 비율이어야 한다.** USD 카메라는 세로 화각을 렌더 해상도 비율에서
    다시 계산하므로 `verticalAperture`가 사실상 무시된다. 50×50 FOV를 1024×750으로 렌더하면
-   세로가 36.6mm밖에 안 나온다. `CAMERA_PUBLISH_W/H`를 FOV 비율에서 유도해 맞춘다
-   (픽셀 수는 `CAMERA_PUBLISH_PIXEL_BUDGET`으로 고정).
-   ⚠️ 렌더 프로덕트는 **부팅 시** config FOV로 만들어진다 — FOV 비율이 다른 h5를 쓰면
-   퍼블리시 이미지 비율은 따라가지 않는다(뷰포트는 창 비율을 따른다).
+   세로가 36.6mm밖에 안 나온다. `config.publish_resolution(fov_w, fov_h)`가 FOV 비율에서
+   유도한다(픽셀 수는 `CAMERA_PUBLISH_PIXEL_BUDGET`으로 고정, 8의 배수 정렬).
+   부팅 시엔 config FOV로 만들고, **h5의 FOV가 다르면 런타임에 따라간다** —
+   `isaac_pipeline._apply_render_resolution()`이 `RP.inputs:width/height`를 갱신하면
+   `IsaacCreateRenderProduct`가 다음 compute에서 `UsdRender.Product`의 resolution을 바꾼다
+   (재생성이 아니라 노드가 설계상 지원하는 경로).
+   ⚠️ **뷰포트는 창 비율을 따른다** — 눈으로 정확히 확인하려면 창을 FOV 비율에 맞추거나
+   **Show FOV** 사각형과 비교한다.
 
 > ~~3. 코드 WD ≠ 벤더 WD~~ — **2026-07-27 해소.** optical_frame 을 body_face 로 옮겨
 > 두 값의 기준점을 통일했다.

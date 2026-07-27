@@ -782,6 +782,10 @@ class PipelineWindow:
             "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
         }
         self._cam_spec_updating = False   # suppress apply/redraw on batch/poll set
+        # 그래프 생성 시 config FOV 로 만든 값 — 여기서부터 추적해 바뀔 때만 그래프를 건드린다.
+        # _graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다.
+        self._graph_path = graph_path
+        self._render_resolution = (_cfg.CAMERA_PUBLISH_W, _cfg.CAMERA_PUBLISH_H)
         for _model in self._cam_spec.values():
             _model.add_value_changed_fn(lambda *_a: self._on_camera_spec_changed())
         # 시각화(Show FOV / Show Camera Range)만 카메라별로 남는다 — 서로 다른 로봇 루트
@@ -809,7 +813,6 @@ class PipelineWindow:
         # Separate switch for the MoveIt bridge graph (/isaac_joint_commands).
         # Only one of (_graph, _moveit_graph) ticks at a time — see apply_pipeline_mode.
         self._moveit_graph = ActionGraphSwitch(moveit_graph_path, self._append_log)
-        self._graph_path = graph_path
         self._moveit_graph_path = moveit_graph_path
         self._articulation_root = articulation_root
         self._mode_applied: Optional[str] = None  # last run mode actually applied
@@ -2087,6 +2090,38 @@ class PipelineWindow:
                 self._draw_fov_rectangle(key)
             if t["range_on"]:
                 self._draw_camera_range_rays(key)
+        self._apply_render_resolution()
+
+    def _apply_render_resolution(self):
+        """ROS 렌더 프로덕트 해상도를 FOV 종횡비에 맞춘다.
+
+        USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산하므로(verticalAperture 는
+        사실상 무시), 해상도 비율이 FOV 비율과 다르면 퍼블리시 이미지가 FOV_H 를 덮지 않는다.
+
+        IsaacCreateRenderProduct 는 inputs:width/height 가 바뀌면 다음 compute 에서
+        UsdRender.Product 의 resolution 을 갱신한다 — 재생성이 아니라 노드가 설계상 지원하는
+        경로다(isaacsim.core.nodes OgnIsaacCreateRenderProduct.compute).
+        """
+        from common import config as _config
+
+        fov_w_mm = float(self._cam_spec["fov_w"].get_value_as_float())
+        fov_h_mm = float(self._cam_spec["fov_h"].get_value_as_float())
+        if fov_w_mm <= 0.0 or fov_h_mm <= 0.0:
+            return
+        wh = _config.publish_resolution(fov_w_mm, fov_h_mm)
+        if wh == self._render_resolution:
+            return                      # 스펙 편집마다 그래프를 건드리지 않는다
+        try:
+            import omni.graph.core as og
+            for name, value in (("width", wh[0]), ("height", wh[1])):
+                og.Controller.attribute(f"{self._graph_path}/RP.inputs:{name}").set(int(value))
+        except Exception as e:  # noqa: BLE001 — RP 노드가 없을 수 있다(카메라 없이 그래프 생성)
+            self._append_log(f"[cam] render product resize skipped: {e}")
+            return
+        self._render_resolution = wh
+        self._append_log(
+            f"[cam] render product -> {wh[0]}x{wh[1]} "
+            f"(FOV {fov_w_mm:.0f}x{fov_h_mm:.0f} mm)")
 
     def _set_camera_spec_mm(self, fov_w_mm, fov_h_mm, wd_mm):
         """공유 스펙 세 필드를 한 번에 설정한다(적용/재그리기는 세 번이 아니라 한 번)."""

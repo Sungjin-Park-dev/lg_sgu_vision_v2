@@ -45,7 +45,7 @@ CAMERA_PIXEL_SIZE_MM = 0.010
 CAMERA_PUBLISH_PIXEL_BUDGET = 1024 * 750
 
 
-def _publish_resolution(fov_w_mm: float, fov_h_mm: float) -> tuple[int, int]:
+def publish_resolution(fov_w_mm: float, fov_h_mm: float) -> tuple[int, int]:
     """FOV 비율은 맞추고 픽셀 수는 예산에 맞춘 (W, H). 8의 배수로 정렬한다."""
     aspect = float(fov_w_mm) / float(fov_h_mm)
     width = (CAMERA_PUBLISH_PIXEL_BUDGET * aspect) ** 0.5
@@ -54,7 +54,7 @@ def _publish_resolution(fov_w_mm: float, fov_h_mm: float) -> tuple[int, int]:
     return w, align(w / aspect)
 
 
-CAMERA_PUBLISH_W, CAMERA_PUBLISH_H = _publish_resolution(
+CAMERA_PUBLISH_W, CAMERA_PUBLISH_H = publish_resolution(
     CAMERA_FOV_WIDTH_MM, CAMERA_FOV_HEIGHT_MM)
 
 # Isaac Sim 검사 카메라 — ROS2 토픽/프레임
