@@ -65,9 +65,14 @@ EXPECT_LO = np.array([-0.001, -0.0949, -0.056])
 EXPECT_HI = np.array([0.21877, 0.05, 0.056])
 BBOX_TOL = 1e-4
 
-# camera_optical_frame stays at the *removed light box's* front face, not the mesh tip.
-# The lens never moved, so the focus plane (flange + 0.392 m) is unchanged. Do not "fix" this.
-OPTICAL_FRAME_X = 0.346
+# camera_optical_frame sits on the camera body's front face -- the datum the vendor measures
+# their 250 mm working distance from. CAD (camera_asm_wo_light.stp, flange frame, mm):
+#   flange 0 | PCB_2 122.7..124.3 | body_face 141.0 | lens barrel 157.5..218.770
+#   | VIEW_1 (50x50 inspection plane) 391.0..392.0
+# 391.0 - 141.0 = 250.0 exactly, so CAMERA_WORKING_DISTANCE_MM is now the vendor WD itself.
+# Until 2026-07-27 this was 0.346 = the front face of LIGHT_1, an illumination box that was
+# removed from the assembly; that left the frame floating 127 mm past the lens.
+OPTICAL_FRAME_X = 0.141
 
 DEFAULT_FACES = 130_000
 CREASE_ANGLE_DEG = 30.0

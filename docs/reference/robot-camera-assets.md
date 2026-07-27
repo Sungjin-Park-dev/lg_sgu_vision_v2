@@ -1,0 +1,119 @@
+# 로봇·카메라 에셋 정의 지도
+
+"UR20 로봇과 카메라는 **어느 파일에** 정의돼 있는가"에 대한 답. 같은 로봇이 YAML·URDF·USD·XRDF에
+나뉘어 있고 각각을 읽는 소비자가 달라서, 하나만 고치면 조용히 어긋난다.
+
+기하 값·용어의 정의는 [camera-geometry.md](camera-geometry.md)가 단일 진실원이다.
+이 문서는 **어디에 무엇이 있고 무엇을 같이 고쳐야 하는가**를 다룬다.
+
+## 1. IK·모션플래닝이 실제로 읽는 것
+
+```
+config.DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"        scripts/common/config.py
+        ↓  core/trajectory/settings.py: ROBOT_CONFIG
+        ↓  core/trajectory/robot.py: resolve_robot_config()
+           탐색 ① workcell/robot/<name>  ② cuRobo content/configs/robot/<name>
+           urdf_path 를 파일명만 취해 workcell/robot/ 절대경로로 재작성
+        ↓
+workcell/robot/ur20_with_camera.yml                          ← cuRobo 진입점
+        urdf_path: ur20_with_camera_curobo.urdf
+        base_link: base_link,  tool_frames: [camera_optical_frame]
+        collision_spheres / self_collision_ignore / cspace
+        ↓
+workcell/robot/ur20_with_camera_curobo.urdf                  ← 운동학의 소유자
+```
+
+`resolve_robot_config()` 를 거치는 진입점: [pipeline.py](../../scripts/core/trajectory/pipeline.py),
+[check_ik.py](../../scripts/core/trajectory/check_ik.py),
+[glns/solve.py](../../scripts/core/glns/solve.py), [glns/verify.py](../../scripts/core/glns/verify.py),
+[live_ik.py](../../scripts/core/trajectory/live_ik.py).
+`isaac_pipeline.py` 는 궤적 생성을 `uv run` 서브프로세스로 던지므로 결국 같은 경로를 탄다.
+
+## 2. 파일별 역할
+
+| 파일 | 소유하는 것 | 읽는 쪽 |
+|---|---|---|
+| `workcell/robot/ur20_with_camera.yml` | cuRobo 로봇 정의(충돌 스피어, tool_frames, cspace) | cuRobo IK·모션플래닝 전부 |
+| `workcell/robot/ur20_with_camera_curobo.urdf` | **링크·조인트 기하** (`camera_optical_joint` 포함) | cuRobo, yourdfpy(viser 렌더), isaac_pipeline 스피어 시각화 |
+| `workcell/robot/ur20_with_camera.usd` | Isaac Sim 실로봇 (물리·아티큘레이션) | `core/isaac/scene.py` |
+| `workcell/robot/ur20_with_camera_ghost.usd` | Isaac preview ghost (물리 제거) | `isaac_pipeline.py` |
+| `workcell/robot/camera/camera.usdc`, `camera_body.obj` | 카메라 몸체 메시(flange 프레임에 pre-bake) | 위 USD 2개, URDF visual/collision, MorphIt |
+| `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의 | MoveIt/cuMotion launch |
+| `scripts/common/config.py` | WD·FOV 등 **운용 파라미터** | 파이프라인 전역 |
+
+### 주의: 같은 이름의 낡은 파일
+
+- **`workcell/robot/ur20_with_camera.urdf`** (`_curobo` 없는 쪽) — cuRobo 는 **읽지 않는다.**
+  MorphIt 스피어 피팅용 원본이며 카메라 표현이 낡았다(프록시 박스 + `camera.stl`,
+  `camera_optical_joint` 도 다른 값). 운동학 수정 시 기준으로 삼지 말 것.
+- **`config.DEFAULT_URDF_PATH`** — 어디서도 참조되지 않는 죽은 상수. 컨테이너 내부 경로라
+  현재 해석 경로와 무관하다.
+
+## 3. 카메라 프레임 체인
+
+```
+wrist_3_link
+  └─(wrist_3-flange, fixed, rpy 0,-90°,-90°)→ flange
+       ├─(flange-tool0, fixed)→ tool0
+       └─(camera_mount_joint, fixed, identity)→ camera_link   ← 메시가 flange 프레임에 pre-bake
+            └─(camera_optical_joint, xyz="0.141 0 0", rpy 90°,0,90°)→ camera_optical_frame
+```
+
+- `camera_mount_joint` 가 identity 이므로 **`camera_link` 좌표계 = `flange` 좌표계**다.
+  따라서 `camera_optical_joint` 의 `0.141` 은 그대로 flange 기준 광축 거리다.
+- rpy(90°,0,90°) 가 flange **+X** 광축을 optical_frame **+Z** 광축으로 돌린다
+  (플래너·USD 카메라 공통 규약).
+- `camera_optical_frame` 은 단순 표식이 아니라 **IK 목표 프레임 자체**다
+  (`tool_frames[0]`, [ik.py](../../scripts/core/trajectory/ik.py) `solve_pose`,
+  [robot.py](../../scripts/core/trajectory/robot.py) `compute_fk`).
+  Isaac 의 `InspectionCamera` 도 이 prim 아래에 붙는다
+  ([scene.py](../../scripts/core/isaac/scene.py) `setup_inspection_camera`).
+
+## 4. 목표 자세가 계산되는 방식
+
+```
+flange 목표 = 표면점 + 법선 × (WD + mount_offset)
+                              ↑          ↑
+       CAMERA_WORKING_DISTANCE_MM   URDF camera_optical_joint (하드웨어 상수)
+              = 0.250 m                    = 0.141 m
+                              합 = 0.391 m = CAD VIEW_1 검사면
+```
+
+- **WD 만 튜닝 대상**이다. 이 값은 벤더 공칭 WD 와 같은 기준점(카메라 몸체 앞면)을 쓴다.
+- **mount_offset 은 하드웨어 사실**이다. 바꾸려면 §5 체크리스트 전체를 밟아야 한다.
+- 실제 적용 지점: [poses.py](../../scripts/core/trajectory/poses.py)
+  `camera_positions = positions + normals * working_distance_m`.
+
+## 5. `camera_optical_frame` 을 옮길 때 동기화 체크리스트
+
+한 곳만 고치면 조용히 어긋난다. 순서대로 전부.
+
+1. `workcell/robot/ur20_with_camera_curobo.urdf` — `camera_optical_joint` 의 `origin xyz`
+2. `scripts/setup/build_camera_mesh.py` — `OPTICAL_FRAME_X`
+   (안 고치면 `--verify` 가 assert 로 막는다 — 의도된 가드)
+3. `workcell/robot/ur20_with_camera.usd` 와 `..._ghost.usd` 의
+   `/Root/UR20/wrist_3_link/flange/camera_mount/camera_optical_frame` 트랜스폼
+4. `scripts/common/config.py` — `TOOL_TO_CAMERA_OPTICAL_OFFSET_M`,
+   그리고 물체면을 유지하려면 `CAMERA_WORKING_DISTANCE_MM` 을 상보적으로
+5. 문서 — [camera-geometry.md](camera-geometry.md), [configuration.md](configuration.md)
+6. **viewpoint h5 재생성** — h5 의 `metadata/camera_spec/working_distance_mm` 가
+   config 보다 우선하므로([storage.py](../../scripts/core/viewpoint/storage.py)),
+   옛 파일을 그대로 읽으면 물체면이 틀린 자리에 잡힌다. 불일치 시 경고가 출력된다.
+7. 검증 —
+   ```bash
+   uv run --no-sync scripts/setup/inspect_camera_step.py      # CAD 랜드마크가 그대로인지
+   uv run --no-sync scripts/setup/build_camera_mesh.py --verify-only --ghost   # USD 2개
+   uv run --no-sync scripts/core/trajectory/check_ik.py --object <obj> \
+       --viewpoints <새 h5> --output /tmp/ik.h5                # 도달성 회귀 확인
+   ```
+
+`ur20_with_camera.yml` 과 `.xrdf` 는 좌표를 들고 있지 않다(링크 이름과 스피어만) —
+이번 종류의 변경에서는 손댈 필요가 없다. 스피어는 `camera_link`(=flange) 기준이라
+optical_frame 이동과 무관하다.
+
+## 6. cuRobo config 재생성
+
+`ur20_with_camera.yml` 은 MorphIt 이 생성한 산출물이다. 링크 하나의 스피어만 다시 맞출 때는
+`--edit-config --refit-link` 로 해당 블록만 갈아끼운다. 자세한 절차는
+[guides/prepare-object-assets.md](../guides/prepare-object-assets.md) 와
+`scripts/setup/` 의 빌더들을 참고한다.

@@ -537,7 +537,9 @@
     <child link="camera_link" />
   </joint>
   <joint name="camera_optical_joint" type="fixed">
-    <origin xyz="0.346 0 0" rpy="1.5707963268 -0.0000000000 1.5707963268" />
+    <!-- 0.141 = 카메라 몸체 앞면(body_face), CAD 실측. 벤더 WD 250mm 의 기준점이다.
+         (구값 0.346 은 제거된 조명박스 LIGHT_1 앞면 — camera-geometry.md 참고) -->
+    <origin xyz="0.141 0 0" rpy="1.5707963268 -0.0000000000 1.5707963268" />
     <parent link="camera_link" />
     <child link="camera_optical_frame" />
   </joint>

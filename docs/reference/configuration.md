@@ -8,10 +8,9 @@
 
 | 항목 | 값 | 코드 심볼 |
 |---|---|---|
-| FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
-| frame_standoff (optical_frame→object) | 46 mm | `CAMERA_WORKING_DISTANCE_MM` |
-| WD (lens_front→object, 벤더공칭) | 250 mm (기준점 파킹) | — |
-| mount_offset (flange→optical_frame) | 0.346 m | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
+| FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님. CAD `VIEW_1` 과 일치) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
+| WD (optical_frame=body_face→object, 벤더공칭과 동일 기준) | 250 mm | `CAMERA_WORKING_DISTANCE_MM` |
+| mount_offset (flange→optical_frame) | 0.141 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
 | overlap | 0.5 | `CAMERA_OVERLAP_RATIO` |
 | 렌즈 / 센서 | MFA121-U50 f=50mm / AR0820 8.08×4.55mm | — |
 

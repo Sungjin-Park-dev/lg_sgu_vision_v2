@@ -20,11 +20,12 @@ DATA_ROOT = PROJECT_ROOT / "data"
 CAMERA_FOV_WIDTH_MM = 50.0
 CAMERA_FOV_HEIGHT_MM = 50.0
 
-# frame_standoff (mm): optical_frame → object_plane 거리. poses.py 가 이 값으로 viewpoint 를
-#   표면에서 띄운다 → 바꾸면 전체 기하 재생성. ⚠️ 이름은 "working distance"지만 광학 WD 아님.
-#   같은 배치: body_face→object=251mm ≈ 벤더 메일(2026-07) WD 250mm / lens_front→object=173mm.
-#   (WD 기준점 78mm·재생성 여부는 파킹 — camera-geometry.md §미해결)
-CAMERA_WORKING_DISTANCE_MM = 46.0
+# WD = frame_standoff (mm): optical_frame(=body_face) → object_plane 거리.
+#   optical_frame 이 카메라 몸체 앞면에 있으므로 이 값이 곧 **벤더 공칭 WD** 다 (2026-07-27 정렬).
+#   CAD(camera_asm_wo_light.stp) 실측: body_face=flange+141.0, VIEW_1(검사면)=flange+391.0
+#   → 391.0 - 141.0 = 250.0. poses.py 가 이 값으로 viewpoint 를 표면에서 띄운다.
+#   바꾸면 물체면이 실제로 이동 → viewpoint h5 재생성 + 도달성/충돌 재검증 필요.
+CAMERA_WORKING_DISTANCE_MM = 250.0
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
@@ -261,8 +262,10 @@ DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
 DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20_with_camera.urdf"
 
 # mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
-# ⚠️ optical_frame(0.346)은 실제 렌즈앞면(0.219)보다 127mm 앞 허공 — 낡은 기준(파킹).
-TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.346
+# optical_frame = 카메라 몸체 앞면(body_face). CAD 실측 flange+141.0mm.
+# ⚠️ 하드웨어 상수 — 튜닝 대상이 아니다. 실제 값은 URDF(camera_optical_joint)가 소유하고,
+#    이 상수는 문서/계산 참고용 사본이다. 바꾸려면 URDF·USD 를 함께 고쳐야 한다.
+TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.141
 
 
 # ============================================================================

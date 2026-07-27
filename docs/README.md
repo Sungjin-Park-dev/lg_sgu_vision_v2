@@ -26,6 +26,8 @@
 
 - [구조와 데이터 흐름](reference/architecture.md)
 - [주요 설정값](reference/configuration.md)
+- [로봇·카메라 에셋 정의 지도](reference/robot-camera-assets.md) — URDF/USD/YAML 이 각각 무엇을 소유하는가
+- [카메라 기하·용어 표준](reference/camera-geometry.md)
 - [데이터 형식](reference/data-formats.md)
 - [핵심 알고리즘](reference/algorithms.md)
 - [내부 CLI](reference/internal-cli.md)
