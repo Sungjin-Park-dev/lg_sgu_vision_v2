@@ -379,7 +379,6 @@ class Studio:
             self.sl_overlap = g.add_slider(
                 "FOV overlap (%)", min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT,
                 step=1, initial_value=initial_overlap)
-            self.fov_status = g.add_markdown("")
             self.btn_generate = g.add_button("Generate")
             self.btn_save = g.add_button("Save h5")
             self.gen_status = g.add_markdown("Idle.")
@@ -433,7 +432,6 @@ class Studio:
             handle.on_update(lambda _: self._on_camera_spec_change())
         self._apply_subcluster_visibility()
         self._apply_stage1_visibility()
-        self._refresh_fov_status()
 
     def _current_overlap_pct(self) -> float:
         return float(self.sl_overlap.value)
@@ -448,31 +446,15 @@ class Studio:
         fov_w, fov_h = self._current_fov_mm()
         return fov_spacing_mm(self._current_overlap_pct(), fov_w, fov_h)
 
-    def _refresh_fov_status(self) -> None:
-        row_mm, col_mm, surface_mm = self._current_spacing()
-        fov_w, fov_h = self._current_fov_mm()
-        wd_mm = self._current_wd_mm()
-        # 사용자가 WD 를 눈으로 검산할 수 있게 flange 기준 검사면 위치와 렌즈 여유를 같이 보인다.
-        object_plane_mm = config.TOOL_TO_CAMERA_OPTICAL_OFFSET_M * 1000.0 + wd_mm
-        clearance_mm = wd_mm - config.CAMERA_MIN_WORKING_DISTANCE_MM
-        geometry = (
-            f"WD `{wd_mm:.0f} mm` → object plane `flange+{object_plane_mm:.0f} mm` · "
-            f"lens clearance `{clearance_mm:.1f} mm`"
-        )
-        if clearance_mm <= 0.0:
-            geometry = f"⚠️ {geometry} — 검사면이 렌즈 안쪽이다"
-        self.fov_status.content = (
-            f"FOV `{fov_w:.0f}×{fov_h:.0f} mm` · "
-            f"overlap `{self._current_overlap_pct():.0f}%` · "
-            f"surface spacing `{surface_mm:.1f} mm` "
-            f"(row `{row_mm:.1f}`, col `{col_mm:.1f}`)\n\n{geometry}"
-        )
-
     def _on_camera_spec_change(self) -> None:
-        """FOV·overlap·WD 가 바뀌면 surface spacing과 dbscan eps 기본값을 같이 갱신한다."""
+        """FOV·overlap 이 바뀌면 dbscan eps 기본값을 따라 갱신한다.
+
+        유도값(row/col/surface spacing = FOV × (1-overlap))은 화면에 띄우지 않는다 —
+        입력칸이 바로 위에 있어 중복이고, 실제 사용된 값은 생성 시 콘솔에 찍힌다
+        (``prepare_grid`` 의 "Row/Col spacing", "Working distance").
+        """
         _, _, surface_mm = self._current_spacing()
         self.sl_eps.value = eps_default_mm(surface_mm)
-        self._refresh_fov_status()
 
     def _apply_subcluster_visibility(self) -> None:
         """Show only controls relevant to the selected sub-clustering method."""
@@ -675,28 +657,15 @@ class Studio:
                          "params": p, "n": data["n"], "input_path": input_path,
                          "adjacency": adjacency}
             red = (1 - result["path_length_mm"] / surface["original_path_length_mm"]) * 100
-            smlabel = (f"surface {p['surface_overlap_pct']:.0f}% overlap · {sp:.1f}mm · "
-                       f"FOV {p['fov_width_mm']:.0f}×{p['fov_height_mm']:.0f} "
-                       f"WD {p['working_distance_mm']:.0f}mm")
-            if p["submethod"] == "agglomerative":
-                knob = f"span={p['max_span_mm']:.0f}mm"
-            else:
-                knob = f"eps={p['eps_mm']:.0f}mm"
-            if p["stage1"] == "coacd":
-                s1knob = f"t={p['threshold']}"
-                s1count = f"{len(result.get('coacd_parts') or [])} CoACD parts"
-            else:
-                s1knob = (f"k={p['k_neighbors']} df={p['distance_factor']:.1f} "
-                          f"ang={p['max_normal_angle_deg']:.0f}°")
-                s1count = (f"{len(np.unique(result['component_ids']))} surface components")
+            # 화면에는 결과만 — 어떤 파라미터로 만들었는지는 바로 위 입력칸들이 이미 보여준다.
+            # 전체 파라미터는 콘솔과 저장된 h5 의 metadata 에 남는다.
             self._set_scene(
                 full_mesh, data, coacd_parts=result.get("coacd_parts"),
-                source=f"gen · {smlabel} · {method} · {s1knob} {knob}",
+                source=f"gen · {method}",
             )
             self.gen_status.content = (
-                f"**Done** · {smlabel} · {method} ({s1knob}, {knob}) · {data['n']} vp · "
-                f"{result['num_clusters']} clusters · {s1count} · "
-                f"path {result['path_length_mm']:.0f} mm ({red:.1f}% reduction)")
+                f"**Done** · {data['n']} vp · {result['num_clusters']} clusters · "
+                f"path {result['path_length_mm']:.0f} mm ({red:.1f}%)")
         except Exception as exc:  # noqa: BLE001
             self.gen_status.content = f"**Error:** {exc}"
             print(f"[generate] error: {exc}")
