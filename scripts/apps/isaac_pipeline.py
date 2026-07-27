@@ -79,6 +79,13 @@ COLLISION_SPHERES_SCOPE_NAME = "CuRoboCollisionSpheres"
 FOV_PLANE_SCOPE_NAME = "CameraFovPlane"
 FOV_PLANE_OUTLINE_WIDTH_M = 0.003
 FOV_PLANE_CENTERLINE_WIDTH_M = 0.002
+# Camera range: a grid of rays cast across the FOV from the optical origin,
+# drawn to where they actually hit the target object (ray-mesh intersection).
+CAMERA_RANGE_SCOPE_NAME = "CameraRangeRays"
+CAMERA_RANGE_GRID = 7  # N×N rays across the FOV
+CAMERA_RANGE_RAY_WIDTH_M = 0.0012
+CAMERA_RANGE_HIT_WIDTH_M = 0.003
+CAMERA_RANGE_UPDATE_DT = 0.05  # s between live re-casts (rays follow the camera)
 CAMERA_COLLISION_LINKS = {
     "tool0",
     "camera_cable_frame",
@@ -763,6 +770,20 @@ class PipelineWindow:
         self._csv_path_model = ui.SimpleStringModel("")
         self._h5_path_model = ui.SimpleStringModel("")
 
+        # Two independent editable camera specs (mm), one per inspection camera:
+        #   preview -> InspectionCameraPreview (ghost, Preview panel)
+        #   execute -> InspectionCamera        (real robot, Execute panel)
+        # Editing a spec drives that camera's USD intrinsics; the viewport can
+        # also drive it back (see _poll_camera_specs). Auto-set from a viewpoint
+        # h5's metadata/camera_spec snapshot when Show Viewpoints loads one.
+        self._cam_targets = {
+            "preview": self._make_cam_target("preview", "InspectionCameraPreview", GHOST_ROOT_PATH),
+            "execute": self._make_cam_target("execute", "InspectionCamera", urctl.STAGE_PATH),
+        }
+        # Camera-range live update: cached object mesh (world) + throttle accum.
+        self._range_trimesh = None
+        self._range_accum = 0.0
+
         self._gen_runner = SubprocessRunner()
         self._ik_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
@@ -1234,9 +1255,10 @@ class PipelineWindow:
                 with ui.HStack(height=28, spacing=6):
                     self._lock(ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres))
                     self._lock(ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres))
-                with ui.HStack(height=28, spacing=6):
-                    self._lock(ui.Button("Show FOV Plane", clicked_fn=self._on_show_fov_plane))
-                    self._lock(ui.Button("Clear FOV Plane", clicked_fn=self._on_clear_fov_plane))
+                # Camera spec for InspectionCameraPreview (ghost). Defaults to the
+                # viewpoint snapshot once an h5 is loaded (Show Viewpoints), else
+                # global config. Editing drives the camera view + FOV/range below.
+                self._build_camera_spec_ui("preview")
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("t", width=20)
                     self._slider_model = ui.SimpleFloatModel(0.0)
@@ -1256,6 +1278,8 @@ class PipelineWindow:
                     ui.Label("CSV path", width=80)
                     self._lock(ui.StringField(model=self._csv_path_model))
                     self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
+                # Camera spec for the real InspectionCamera (ROS render product).
+                self._build_camera_spec_ui("execute")
                 with ui.HStack(height=28, spacing=6):
                     self._btn_home_approach = self._lock(ui.Button(
                         "Move to Scan Start",
@@ -1323,6 +1347,7 @@ class PipelineWindow:
             self._append_log(f"[object] load failed: {e}")
             return
         self._current_object = obj
+        self._range_trimesh = None  # new geometry — force range re-extract
         self._append_log(
             f"[object] loaded '{obj}'. Move it with the viewport gizmo (W/E), then Generate.")
 
@@ -1454,6 +1479,8 @@ class PipelineWindow:
         except Exception as e:
             self._append_log(f"[viewpoints] load failed: {e}")
             return
+        # Adopt this viewpoint set's camera snapshot as the FOV/range default.
+        self._sync_camera_spec_from_h5(h5)
         from common import config as _config
         cfg_wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
         if abs(wd_m - cfg_wd_m) > 1e-9:
@@ -1602,61 +1629,202 @@ class PipelineWindow:
                 continue
             if f"/{FOV_PLANE_SCOPE_NAME}/" in p:
                 continue
-            if p.startswith(robot_root) and prim.GetName() == prim_name:
+            # `+ "/"` so root="/World/UR20" does not also match the sibling
+            # ghost "/World/UR20_preview".
+            if (p == robot_root or p.startswith(robot_root + "/")) and prim.GetName() == prim_name:
                 return prim
         return None
 
-    def _delete_fov_plane(self, log: bool):
+    def _make_cam_target(self, key, camera_name, root_path):
+        """Build the per-camera spec state (models + toggle flags/buttons)."""
+        ui = self._ui
+        from common import config as _cfg
+        t = {
+            "key": key,
+            "camera": camera_name,        # InspectionCamera / InspectionCameraPreview
+            "root": root_path,            # robot root the camera lives under
+            "fov_w": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_WIDTH_MM)),
+            "fov_h": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_HEIGHT_MM)),
+            "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
+            "fov_on": False,
+            "range_on": False,
+            "btn_fov": None,
+            "btn_range": None,
+            "updating": False,            # suppress apply/redraw on batch/poll set
+            "cam_prim_path": None,        # cached camera prim path
+        }
+        for fld in ("fov_w", "fov_h", "wd"):
+            t[fld].add_value_changed_fn(lambda *_a, _k=key: self._on_camera_spec_changed(_k))
+        return t
+
+    def _build_camera_spec_ui(self, key):
+        """Camera-spec fields + FOV/range toggles for one target (Preview/Execute)."""
+        ui = self._ui
+        t = self._cam_targets[key]
+        with ui.HStack(height=22, spacing=6):
+            ui.Label("FOV W", width=44)
+            self._lock(ui.FloatField(model=t["fov_w"], width=60))
+            ui.Label("FOV H", width=44)
+            self._lock(ui.FloatField(model=t["fov_h"], width=60))
+            ui.Label("WD", width=24)
+            self._lock(ui.FloatField(model=t["wd"], width=60))
+        with ui.HStack(height=28, spacing=6):
+            t["btn_fov"] = self._lock(ui.Button(
+                "Show FOV", clicked_fn=lambda k=key: self._on_toggle_fov(k)))
+            t["btn_range"] = self._lock(ui.Button(
+                "Show Camera Range", clicked_fn=lambda k=key: self._on_toggle_range(k)))
+            self._lock(ui.Button(
+                "Reset", width=64, clicked_fn=lambda k=key: self._on_reset_camera_spec(k)))
+
+    def _find_camera_prim(self, stage, key):
+        """The UsdGeom.Camera prim for this target (cached), or None."""
+        from pxr import UsdGeom
+        t = self._cam_targets[key]
+        p = t.get("cam_prim_path")
+        if p:
+            prim = stage.GetPrimAtPath(p)
+            if prim and prim.IsValid() and prim.IsA(UsdGeom.Camera):
+                return prim
+        frame = self._find_prim_by_name(stage, t["root"], urctl.CAMERA_OPTICAL_FRAME_NAME)
+        if frame is None or not frame.IsValid():
+            return None
+        cam_path = f"{frame.GetPath()}/{t['camera']}"
+        prim = stage.GetPrimAtPath(cam_path)
+        if prim and prim.IsValid() and prim.IsA(UsdGeom.Camera):
+            t["cam_prim_path"] = cam_path
+            return prim
+        return None
+
+    def _delete_fov_plane(self, key, log):
         import omni.usd
         from isaacsim.core.utils import prims
 
+        root = self._cam_targets[key]["root"]
         stage = omni.usd.get_context().get_stage()
         paths = [
             str(prim.GetPath())
             for prim in stage.Traverse()
             if prim.GetName() == FOV_PLANE_SCOPE_NAME
+            and str(prim.GetPath()).startswith(root + "/")
         ]
         for path in sorted(paths, key=len, reverse=True):
             prims.delete_prim(path)
         if log:
             self._append_log(
-                f"[fov] cleared {len(paths)} FOV plane scope(s)"
-                if paths else "[fov] nothing to clear"
+                f"[fov:{key}] cleared {len(paths)} plane(s)"
+                if paths else f"[fov:{key}] nothing to clear"
             )
 
-    def _on_show_fov_plane(self):
+    def _camera_spec_m(self, key):
+        """This target's spec (fov_w, fov_h, wd) in meters, or None if invalid."""
+        t = self._cam_targets[key]
+        fov_w_m = float(t["fov_w"].get_value_as_float()) / 1000.0
+        fov_h_m = float(t["fov_h"].get_value_as_float()) / 1000.0
+        wd_m = float(t["wd"].get_value_as_float()) / 1000.0
+        if fov_w_m <= 0.0 or fov_h_m <= 0.0 or wd_m <= 0.0:
+            self._append_log(
+                f"[cam:{key}] invalid spec: FOV={fov_w_m * 1000:.1f}x"
+                f"{fov_h_m * 1000:.1f} mm, WD={wd_m * 1000:.1f} mm"
+            )
+            return None
+        return fov_w_m, fov_h_m, wd_m
+
+    def _apply_camera_spec_to_camera(self, key):
+        """Push this target's spec to its camera so the VIEW matches the UI:
+        focalLength=WD, horizontal/verticalAperture=FOV (footprint model —
+        see scene.setup_inspection_camera). Silent (called on every edit)."""
         import omni.usd
-        from pxr import Gf, UsdGeom, Vt
-        from common import config as _config
+        from pxr import UsdGeom
+
+        t = self._cam_targets[key]
+        fov_w_mm = float(t["fov_w"].get_value_as_float())
+        fov_h_mm = float(t["fov_h"].get_value_as_float())
+        wd_mm = float(t["wd"].get_value_as_float())
+        if fov_w_mm <= 0.0 or fov_h_mm <= 0.0 or wd_mm <= 0.0:
+            return
+        stage = omni.usd.get_context().get_stage()
+        prim = self._find_camera_prim(stage, key)
+        if prim is None:
+            return
+        cam = UsdGeom.Camera(prim)
+        cam.GetFocalLengthAttr().Set(wd_mm)
+        cam.GetHorizontalApertureAttr().Set(fov_w_mm)
+        cam.GetVerticalApertureAttr().Set(fov_h_mm)
+        cam.GetFocusDistanceAttr().Set(wd_mm * 1e-3)
+
+    def _poll_camera_specs(self):
+        """Viewport → UI: read each camera's live intrinsics and reflect them in
+        its spec fields (so mouse-driven zoom updates the numbers)."""
+        import omni.usd
+        from pxr import UsdGeom
 
         stage = omni.usd.get_context().get_stage()
-        robot_root = GHOST_ROOT_PATH
-        if not stage.GetPrimAtPath(robot_root).IsValid():
-            self._append_log(f"[fov] ghost robot not found: {robot_root}")
+        if stage is None:
             return
+        for key, t in self._cam_targets.items():
+            prim = self._find_camera_prim(stage, key)
+            if prim is None:
+                continue
+            cam = UsdGeom.Camera(prim)
+            fl = cam.GetFocalLengthAttr().Get()
+            ha = cam.GetHorizontalApertureAttr().Get()
+            va = cam.GetVerticalApertureAttr().Get()
+            if fl is None or ha is None or va is None:
+                continue
+            self._maybe_set_field(t, "wd", float(fl))
+            self._maybe_set_field(t, "fov_w", float(ha))
+            self._maybe_set_field(t, "fov_h", float(va))
 
+    def _maybe_set_field(self, t, fld, val):
+        """Set a spec field from the camera without re-applying (guarded)."""
+        m = t[fld]
+        if abs(m.get_value_as_float() - val) > 1e-3:
+            t["updating"] = True
+            try:
+                m.set_value(val)
+            finally:
+                t["updating"] = False
+
+    def _tick_camera_ranges(self, dt):
+        """Throttled per-frame re-cast so the range rays follow the camera as the
+        robot moves. Uses the cached object mesh (Load Object / re-toggle to
+        refresh it after moving the object)."""
+        if not any(t["range_on"] for t in self._cam_targets.values()):
+            self._range_accum = 0.0
+            return
+        self._range_accum += dt
+        if self._range_accum < CAMERA_RANGE_UPDATE_DT:
+            return
+        self._range_accum = 0.0
+        for key, t in self._cam_targets.items():
+            if t["range_on"]:
+                self._draw_camera_range_rays(key)
+
+    def _draw_fov_rectangle(self, key) -> bool:
+        """Draw the FOV as a rectangle at the working distance under this target's
+        optical frame (footprint), from its editable spec. Returns True on draw."""
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        robot_root = self._cam_targets[key]["root"]
+        if not stage.GetPrimAtPath(robot_root).IsValid():
+            self._append_log(f"[fov:{key}] robot not found: {robot_root}")
+            return False
         camera_frame = self._find_prim_by_name(
             stage, robot_root, urctl.CAMERA_OPTICAL_FRAME_NAME,
         )
         if camera_frame is None or not camera_frame.IsValid():
             self._append_log(
-                f"[fov] {urctl.CAMERA_OPTICAL_FRAME_NAME} not found under {robot_root}"
+                f"[fov:{key}] {urctl.CAMERA_OPTICAL_FRAME_NAME} not found under {robot_root}"
             )
-            return
+            return False
+        spec = self._camera_spec_m(key)
+        if spec is None:
+            return False
+        fov_w_m, fov_h_m, wd_m = spec
 
-        fov_w_m = float(_config.CAMERA_FOV_WIDTH_MM) / 1000.0
-        fov_h_m = float(_config.CAMERA_FOV_HEIGHT_MM) / 1000.0
-        wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
-        if fov_w_m <= 0.0 or fov_h_m <= 0.0 or wd_m <= 0.0:
-            self._append_log(
-                "[fov] invalid camera spec: "
-                f"FOV={_config.CAMERA_FOV_WIDTH_MM}x{_config.CAMERA_FOV_HEIGHT_MM} mm, "
-                f"WD={_config.CAMERA_WORKING_DISTANCE_MM} mm"
-            )
-            return
-
-        self._delete_fov_plane(log=False)
-
+        self._delete_fov_plane(key, log=False)
         half_w = fov_w_m * 0.5
         half_h = fov_h_m * 0.5
         corners = [
@@ -1699,13 +1867,250 @@ class PipelineWindow:
         center_line.CreateDisplayOpacityAttr(Vt.FloatArray([0.95]))
 
         self._append_log(
-            f"[fov] displayed {_config.CAMERA_FOV_WIDTH_MM:.1f}x"
-            f"{_config.CAMERA_FOV_HEIGHT_MM:.1f} mm plane at "
-            f"WD={_config.CAMERA_WORKING_DISTANCE_MM:.1f} mm under {camera_frame.GetPath()}"
+            f"[fov:{key}] rectangle {fov_w_m * 1000:.1f}x{fov_h_m * 1000:.1f} mm "
+            f"@ WD={wd_m * 1000:.1f} mm under {camera_frame.GetPath()}"
+        )
+        return True
+
+    def _on_toggle_fov(self, key):
+        """Toggle this target's FOV rectangle on/off."""
+        t = self._cam_targets[key]
+        if t["fov_on"]:
+            self._delete_fov_plane(key, log=True)
+            t["fov_on"] = False
+            if t["btn_fov"] is not None:
+                t["btn_fov"].text = "Show FOV"
+        elif self._draw_fov_rectangle(key):
+            t["fov_on"] = True
+            if t["btn_fov"] is not None:
+                t["btn_fov"].text = "Hide FOV"
+
+    def _object_world_trimesh(self, stage):
+        """Build a trimesh of /World/target_object in WORLD coordinates (every
+        UsdGeom.Mesh under it, polygons triangulated). None if no geometry."""
+        import numpy as np
+        import trimesh
+        from pxr import Usd, UsdGeom
+
+        root = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not root or not root.IsValid():
+            return None
+        verts_all, faces_all, offset = [], [], 0
+        for prim in Usd.PrimRange(root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            mesh = UsdGeom.Mesh(prim)
+            pts = mesh.GetPointsAttr().Get()
+            counts = mesh.GetFaceVertexCountsAttr().Get()
+            idx = mesh.GetFaceVertexIndicesAttr().Get()
+            if not pts or not counts or not idx:
+                continue
+            M = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            wp = np.array([list(M.Transform(p)) for p in pts], dtype=np.float64)
+            tris, k = [], 0
+            for c in counts:
+                for t in range(1, c - 1):
+                    tris.append((idx[k], idx[k + t], idx[k + t + 1]))
+                k += c
+            if not tris:
+                continue
+            faces_all.append(np.array(tris, dtype=np.int64) + offset)
+            verts_all.append(wp)
+            offset += len(wp)
+        if not verts_all:
+            return None
+        return trimesh.Trimesh(
+            vertices=np.vstack(verts_all), faces=np.vstack(faces_all), process=False,
         )
 
-    def _on_clear_fov_plane(self):
-        self._delete_fov_plane(log=True)
+    def _delete_camera_range(self, key, log):
+        import omni.usd
+        from isaacsim.core.utils import prims
+
+        scope = f"/World/{CAMERA_RANGE_SCOPE_NAME}_{key}"
+        stage = omni.usd.get_context().get_stage()
+        if stage.GetPrimAtPath(scope).IsValid():
+            prims.delete_prim(scope)
+            if log:
+                self._append_log(f"[range:{key}] cleared")
+        elif log:
+            self._append_log(f"[range:{key}] nothing to clear")
+
+    def _draw_camera_range_rays(self, key, verbose=False) -> bool:
+        """Cast an N×N grid of rays across this camera's FOV from the optical
+        origin and draw each one to where it hits /World/target_object (ray-mesh
+        intersection), in world space under an identity /World scope. Rebuilt in
+        place by the per-frame tick so the rays follow the camera. `verbose`
+        logs (toggle only) — the tick stays silent."""
+        import numpy as np
+        import omni.usd
+        from pxr import Gf, Usd, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        robot_root = self._cam_targets[key]["root"]
+        camera_frame = self._find_prim_by_name(
+            stage, robot_root, urctl.CAMERA_OPTICAL_FRAME_NAME,
+        )
+        if camera_frame is None or not camera_frame.IsValid():
+            if verbose:
+                self._append_log(
+                    f"[range:{key}] {urctl.CAMERA_OPTICAL_FRAME_NAME} not found under {robot_root}"
+                )
+            return False
+        spec = self._camera_spec_m(key)
+        if spec is None:
+            return False
+        fov_w_m, fov_h_m, wd_m = spec
+
+        if self._range_trimesh is None:
+            self._range_trimesh = self._object_world_trimesh(stage)
+        tm = self._range_trimesh
+        if tm is None:
+            if verbose:
+                self._append_log("[range] no target object mesh — Load Object first.")
+            return False
+
+        M = UsdGeom.Xformable(camera_frame).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        origin = np.array(list(M.Transform(Gf.Vec3d(0.0, 0.0, 0.0))), dtype=np.float64)
+        gx = np.linspace(-fov_w_m * 0.5, fov_w_m * 0.5, CAMERA_RANGE_GRID)
+        gy = np.linspace(-fov_h_m * 0.5, fov_h_m * 0.5, CAMERA_RANGE_GRID)
+        dirs = []
+        for y in gy:
+            for x in gx:
+                d_world = M.TransformDir(Gf.Vec3d(float(x), float(y), float(wd_m)))
+                v = np.array([d_world[0], d_world[1], d_world[2]], dtype=np.float64)
+                nrm = np.linalg.norm(v)
+                if nrm > 1e-12:
+                    dirs.append(v / nrm)
+        dirs = np.array(dirs, dtype=np.float64)
+
+        try:
+            locs, ray_idx, _tri = tm.ray.intersects_location(
+                np.tile(origin, (len(dirs), 1)), dirs, multiple_hits=False,
+            )
+        except Exception as e:  # noqa: BLE001 — raycast backend / geometry issue
+            if verbose:
+                self._append_log(f"[range:{key}] raycast failed: {e}")
+            return False
+
+        origin_f = Gf.Vec3f(float(origin[0]), float(origin[1]), float(origin[2]))
+        seg_points, seg_counts, hit_pts = [], [], []
+        by_ray = {int(r): locs[i] for i, r in enumerate(ray_idx)}
+        for i in range(len(dirs)):
+            p = by_ray.get(i)
+            if p is None:
+                continue
+            hp = Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
+            seg_points.extend([origin_f, hp])
+            seg_counts.append(2)
+            hit_pts.append(hp)
+
+        # No delete: update the prims in place each tick so they follow the
+        # camera. If nothing hits right now, clear (leaving the toggle on).
+        if not seg_points:
+            self._delete_camera_range(key, log=False)
+            if verbose:
+                self._append_log(f"[range:{key}] no rays hit the object (check pose / FOV).")
+            return False
+
+        # Identity /World scope: the ray endpoints are already world-space, so
+        # they must NOT sit under a transformed parent (that double-transforms).
+        scope_path = f"/World/{CAMERA_RANGE_SCOPE_NAME}_{key}"
+        UsdGeom.Xform.Define(stage, scope_path)
+        rays = UsdGeom.BasisCurves.Define(stage, f"{scope_path}/Rays")
+        rays.CreateTypeAttr(UsdGeom.Tokens.linear)
+        rays.CreateCurveVertexCountsAttr(Vt.IntArray(seg_counts))
+        rays.CreatePointsAttr(Vt.Vec3fArray(seg_points))
+        rays.CreateWidthsAttr(Vt.FloatArray([CAMERA_RANGE_RAY_WIDTH_M]))
+        rays.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        rays.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.1, 1.0, 0.35)]))
+        rays.CreateDisplayOpacityAttr(Vt.FloatArray([0.9]))
+
+        hits = UsdGeom.Points.Define(stage, f"{scope_path}/Hits")
+        hits.CreatePointsAttr(Vt.Vec3fArray(hit_pts))
+        hits.CreateWidthsAttr(Vt.FloatArray([CAMERA_RANGE_HIT_WIDTH_M] * len(hit_pts)))
+        hits.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.2, 0.2)]))
+
+        if verbose:
+            self._append_log(
+                f"[range:{key}] {len(hit_pts)}/{len(dirs)} rays hit object "
+                f"(FOV {fov_w_m * 1000:.1f}x{fov_h_m * 1000:.1f} mm @ WD={wd_m * 1000:.1f} mm)"
+            )
+        return True
+
+    def _on_toggle_range(self, key):
+        """Toggle this target's camera-range rays. While on, the per-frame tick
+        re-casts so the rays follow the camera as the robot moves."""
+        t = self._cam_targets[key]
+        if t["range_on"]:
+            t["range_on"] = False
+            self._delete_camera_range(key, log=True)
+            if t["btn_range"] is not None:
+                t["btn_range"].text = "Show Camera Range"
+        else:
+            t["range_on"] = True
+            self._range_trimesh = None  # re-extract object geometry fresh
+            self._draw_camera_range_rays(key, verbose=True)
+            if t["btn_range"] is not None:
+                t["btn_range"].text = "Hide Camera Range"
+
+    def _on_camera_spec_changed(self, key):
+        """When a spec field changes: update that camera's view + any shown
+        FOV rectangle / range rays for the same target."""
+        t = self._cam_targets[key]
+        if t["updating"]:
+            return
+        self._apply_camera_spec_to_camera(key)
+        if t["fov_on"]:
+            self._draw_fov_rectangle(key)
+        if t["range_on"]:
+            self._draw_camera_range_rays(key)
+
+    def _set_camera_spec_mm(self, key, fov_w_mm, fov_h_mm, wd_mm):
+        """Set a target's three spec fields at once (one apply/redraw, not three)."""
+        t = self._cam_targets[key]
+        t["updating"] = True
+        try:
+            t["fov_w"].set_value(float(fov_w_mm))
+            t["fov_h"].set_value(float(fov_h_mm))
+            t["wd"].set_value(float(wd_mm))
+        finally:
+            t["updating"] = False
+        self._apply_camera_spec_to_camera(key)
+        if t["fov_on"]:
+            self._draw_fov_rectangle(key)
+        if t["range_on"]:
+            self._draw_camera_range_rays(key)
+
+    def _on_reset_camera_spec(self, key):
+        """Reset a target's camera-spec fields back to the global config defaults."""
+        from common import config as _config
+        self._set_camera_spec_mm(
+            key,
+            _config.CAMERA_FOV_WIDTH_MM,
+            _config.CAMERA_FOV_HEIGHT_MM,
+            _config.CAMERA_WORKING_DISTANCE_MM,
+        )
+        self._append_log(f"[cam:{key}] reset to config defaults")
+
+    def _sync_camera_spec_from_h5(self, h5_path: str):
+        """Set BOTH cameras' spec fields from a viewpoint h5's snapshot (the
+        default for that viewpoint set). Best-effort."""
+        try:
+            from core.viewpoint.storage import load_viewpoints_hdf5
+            vp = load_viewpoints_hdf5(h5_path)
+        except Exception as e:  # noqa: BLE001 — snapshot is best-effort
+            self._append_log(f"[cam] could not read camera spec from h5: {e}")
+            return
+        for key in self._cam_targets:
+            self._set_camera_spec_mm(
+                key, vp.fov_width_m * 1000.0, vp.fov_height_m * 1000.0,
+                vp.working_distance_m * 1000.0,
+            )
+        self._append_log(
+            f"[cam] spec <- snapshot {vp.fov_width_m * 1000:.1f}x"
+            f"{vp.fov_height_m * 1000:.1f} mm @ WD={vp.working_distance_m * 1000:.1f} mm"
+        )
 
     @staticmethod
     def _load_collision_spheres():
@@ -2339,6 +2744,17 @@ class PipelineWindow:
         self._ctrl_runner.pump()
         self._relay_runner.pump()
         self._sim_executor.step(dt)
+        # Viewport → UI: reflect mouse-driven camera intrinsic changes in the
+        # spec fields. Best-effort; never let it break the frame loop.
+        try:
+            self._poll_camera_specs()
+        except Exception:  # noqa: BLE001
+            pass
+        # Live camera-range rays: re-cast so they follow the moving camera.
+        try:
+            self._tick_camera_ranges(dt)
+        except Exception:  # noqa: BLE001
+            pass
         # While a trajectory is executing, lock BOTH mode combos so the user
         # can't switch pipeline mode (would deactivate the inspection controller and
         # abort the trajectory) OR run mode (sim/real) mid-execution.

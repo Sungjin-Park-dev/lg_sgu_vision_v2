@@ -112,17 +112,20 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
 
         input_mesh = None
         working_distance_m = float(config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
+        fov_width_m = float(config.CAMERA_FOV_WIDTH_MM) / 1000.0
+        fov_height_m = float(config.CAMERA_FOV_HEIGHT_MM) / 1000.0
         if "metadata" in f:
             metadata = f["metadata"]
             if "input_mesh" in metadata.attrs:
                 input_mesh = _decode_attr(metadata.attrs["input_mesh"])
-            if (
-                "camera_spec" in metadata
-                and "working_distance_mm" in metadata["camera_spec"].attrs
-            ):
-                working_distance_m = (
-                    float(metadata["camera_spec"].attrs["working_distance_mm"]) / 1000.0
-                )
+            if "camera_spec" in metadata:
+                cam_attrs = metadata["camera_spec"].attrs
+                if "working_distance_mm" in cam_attrs:
+                    working_distance_m = float(cam_attrs["working_distance_mm"]) / 1000.0
+                if "fov_width_mm" in cam_attrs:
+                    fov_width_m = float(cam_attrs["fov_width_mm"]) / 1000.0
+                if "fov_height_mm" in cam_attrs:
+                    fov_height_m = float(cam_attrs["fov_height_mm"]) / 1000.0
 
     return ViewpointData(
         source_path=source_path,
@@ -136,6 +139,8 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
         adjacency=adjacency,
         input_mesh=input_mesh,
         working_distance_m=working_distance_m,
+        fov_width_m=fov_width_m,
+        fov_height_m=fov_height_m,
     )
 
 
