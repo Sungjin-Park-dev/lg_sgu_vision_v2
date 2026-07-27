@@ -83,6 +83,12 @@ DBSCAN_MIN_SAMPLES = 2
 DBSCAN_NORMAL_WEIGHT = 0.0
 OVERLAP_MIN_PCT = 20
 OVERLAP_MAX_PCT = 90
+FOV_MIN_MM = 5.0
+FOV_MAX_MM = 500.0
+WD_MAX_MM = 800.0
+# dbscan eps 상한. FOV 가 커지면 유도 eps 가 여기서 포화해 "eps 가 spacing 을 따라간다"는
+# 약속이 조용히 깨지므로, FOV 상한에 맞춰 넉넉히 잡는다.
+EPS_MAX_MM = 300
 SUBCLUSTER_METHODS = ["agglomerative", "dbscan"]
 DEFAULT_SUBCLUSTER_METHOD = "agglomerative"
 
@@ -116,18 +122,41 @@ def default_overlap_pct() -> int:
     return int(round(_clamp(pct, OVERLAP_MIN_PCT, OVERLAP_MAX_PCT)))
 
 
-def fov_spacing_mm(overlap_pct: float) -> tuple[float, float, float]:
+def fov_spacing_mm(overlap_pct: float,
+                   fov_w_mm: float = None,
+                   fov_h_mm: float = None) -> tuple[float, float, float]:
     """Return (row, col, isotropic_surface) spacing in mm from FOV and overlap."""
+    if fov_w_mm is None:
+        fov_w_mm = config.CAMERA_FOV_WIDTH_MM
+    if fov_h_mm is None:
+        fov_h_mm = config.CAMERA_FOV_HEIGHT_MM
     overlap_ratio = _clamp(overlap_pct, OVERLAP_MIN_PCT, OVERLAP_MAX_PCT) / 100.0
-    row_mm = config.CAMERA_FOV_HEIGHT_MM * (1.0 - overlap_ratio)
-    col_mm = config.CAMERA_FOV_WIDTH_MM * (1.0 - overlap_ratio)
+    row_mm = fov_h_mm * (1.0 - overlap_ratio)
+    col_mm = fov_w_mm * (1.0 - overlap_ratio)
     return row_mm, col_mm, min(row_mm, col_mm)
 
 
 def eps_default_mm(surface_spacing_mm: float) -> int:
     eps = EPS_SPACING_FACTOR * surface_spacing_mm
-    eps = _clamp(eps, 5.0, 80.0)
+    eps = _clamp(eps, 5.0, EPS_MAX_MM)
     return int(eps + 0.5)
+
+
+def surface_key(obj: str, p: dict) -> tuple:
+    """prepare_grid 결과를 식별하는 캐시 키.
+
+    WD 가 들어가는 이유: ``camera_positions = positions + normals × WD`` 이고 클러스터링과
+    Delaunay 그래프가 전부 그 위에서 돈다. 빠뜨리면 WD 를 바꿔도 캐시 히트로 옛 결과가 나온다.
+    row/col 이 따로 들어가는 이유: surface spacing 은 ``min(row, col)`` 이라 FOV 60×40 과
+    40×60 이 같은 키가 되는데, 캐시된 dict 의 row/col_spacing_m 은 lawnmower 순서를 좌우한다.
+    """
+    return (
+        obj,
+        round(p["surface_spacing_mm"], 4),
+        round(p["row_spacing_mm"], 4),
+        round(p["col_spacing_mm"], 4),
+        round(p["working_distance_mm"], 4),
+    )
 
 
 @dataclass(frozen=True)
@@ -221,12 +250,17 @@ def load_viewpoint_h5(path: Path) -> dict:
 
     camera_positions = positions + normals * wd_m
     return _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
-                       path_order, input_mesh, wd_m, adjacency=adjacency)
+                       path_order, input_mesh, wd_m, adjacency=adjacency,
+                       fov_w_mm=viewpoint.fov_width_m * 1000.0,
+                       fov_h_mm=viewpoint.fov_height_m * 1000.0)
 
 
 def _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
-                path_order, input_mesh, wd_m, adjacency=None) -> dict:
+                path_order, input_mesh, wd_m, adjacency=None,
+                fov_w_mm=None, fov_h_mm=None) -> dict:
     return {
+        "fov_w_mm": fov_w_mm,
+        "fov_h_mm": fov_h_mm,
         "positions": positions,
         "normals": normals,
         "camera_positions": camera_positions,
@@ -328,7 +362,20 @@ class Studio:
 
         initial_overlap = default_overlap_pct()
         _, _, initial_spacing = fov_spacing_mm(initial_overlap)
-        with g.add_folder("FOV"):
+        with g.add_folder("Camera spec"):
+            # 여기 값이 곧 h5 metadata/camera_spec 으로 저장되고, 그 h5 를 읽는
+            # IK/궤적/GLNS/Isaac 이 config 대신 이 값을 쓴다.
+            self.nb_fov_w = g.add_number(
+                "FOV width (mm)", initial_value=float(config.CAMERA_FOV_WIDTH_MM),
+                min=FOV_MIN_MM, max=FOV_MAX_MM, step=1.0)
+            self.nb_fov_h = g.add_number(
+                "FOV height (mm)", initial_value=float(config.CAMERA_FOV_HEIGHT_MM),
+                min=FOV_MIN_MM, max=FOV_MAX_MM, step=1.0)
+            # 하한이 물리 제약이다 — 이보다 작으면 검사면이 렌즈 배럴 안쪽에 놓인다.
+            self.nb_wd = g.add_number(
+                "Working distance (mm)", initial_value=float(config.CAMERA_WORKING_DISTANCE_MM),
+                min=float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1),
+                max=WD_MAX_MM, step=1.0)
             self.sl_overlap = g.add_slider(
                 "FOV overlap (%)", min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT,
                 step=1, initial_value=initial_overlap)
@@ -360,7 +407,7 @@ class Studio:
             self.sl_maxspan = g.add_slider("max span (mm)", min=50, max=500, step=10, initial_value=250)
             # dbscan 노브 (eps는 FOV-derived surface spacing을 자동 추적)
             self.sl_eps = g.add_slider(
-                "eps (mm)", min=5, max=80, step=1,
+                "eps (mm)", min=5, max=EPS_MAX_MM, step=1,
                 initial_value=eps_default_mm(initial_spacing))
 
         self.playback_folder = g.add_folder("Playback")
@@ -382,7 +429,8 @@ class Studio:
         self.btn_save.on_click(lambda _: self._on_save())
         self.submethod_dd.on_update(lambda _: self._apply_subcluster_visibility())
         self.stage1_dd.on_update(lambda _: self._apply_stage1_visibility())
-        self.sl_overlap.on_update(lambda _: self._on_overlap_change())
+        for handle in (self.sl_overlap, self.nb_fov_w, self.nb_fov_h, self.nb_wd):
+            handle.on_update(lambda _: self._on_camera_spec_change())
         self._apply_subcluster_visibility()
         self._apply_stage1_visibility()
         self._refresh_fov_status()
@@ -390,20 +438,38 @@ class Studio:
     def _current_overlap_pct(self) -> float:
         return float(self.sl_overlap.value)
 
+    def _current_fov_mm(self) -> tuple[float, float]:
+        return float(self.nb_fov_w.value), float(self.nb_fov_h.value)
+
+    def _current_wd_mm(self) -> float:
+        return float(self.nb_wd.value)
+
     def _current_spacing(self) -> tuple[float, float, float]:
-        return fov_spacing_mm(self._current_overlap_pct())
+        fov_w, fov_h = self._current_fov_mm()
+        return fov_spacing_mm(self._current_overlap_pct(), fov_w, fov_h)
 
     def _refresh_fov_status(self) -> None:
         row_mm, col_mm, surface_mm = self._current_spacing()
+        fov_w, fov_h = self._current_fov_mm()
+        wd_mm = self._current_wd_mm()
+        # 사용자가 WD 를 눈으로 검산할 수 있게 flange 기준 검사면 위치와 렌즈 여유를 같이 보인다.
+        object_plane_mm = config.TOOL_TO_CAMERA_OPTICAL_OFFSET_M * 1000.0 + wd_mm
+        clearance_mm = wd_mm - config.CAMERA_MIN_WORKING_DISTANCE_MM
+        geometry = (
+            f"WD `{wd_mm:.0f} mm` → object plane `flange+{object_plane_mm:.0f} mm` · "
+            f"lens clearance `{clearance_mm:.1f} mm`"
+        )
+        if clearance_mm <= 0.0:
+            geometry = f"⚠️ {geometry} — 검사면이 렌즈 안쪽이다"
         self.fov_status.content = (
-            f"FOV `{config.CAMERA_FOV_WIDTH_MM:.0f}×{config.CAMERA_FOV_HEIGHT_MM:.0f} mm` · "
+            f"FOV `{fov_w:.0f}×{fov_h:.0f} mm` · "
             f"overlap `{self._current_overlap_pct():.0f}%` · "
             f"surface spacing `{surface_mm:.1f} mm` "
-            f"(row `{row_mm:.1f}`, col `{col_mm:.1f}`)"
+            f"(row `{row_mm:.1f}`, col `{col_mm:.1f}`)\n\n{geometry}"
         )
 
-    def _on_overlap_change(self) -> None:
-        """FOV overlap이 바뀌면 surface spacing과 dbscan eps 기본값을 같이 갱신한다."""
+    def _on_camera_spec_change(self) -> None:
+        """FOV·overlap·WD 가 바뀌면 surface spacing과 dbscan eps 기본값을 같이 갱신한다."""
         _, _, surface_mm = self._current_spacing()
         self.sl_eps.value = eps_default_mm(surface_mm)
         self._refresh_fov_status()
@@ -460,10 +526,32 @@ class Studio:
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] mesh load failed {mp}: {exc}")
         self.last = None  # loaded (not generated) → nothing to Save
+        self._adopt_camera_spec(data)
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {label}")
+
+    def _adopt_camera_spec(self, data: dict) -> None:
+        """로드한 h5 의 카메라 스펙을 입력칸에 반영한다.
+
+        isaac_pipeline 의 ``_sync_camera_spec_from_h5`` 와 같은 동작 — "기존 것 불러와
+        살짝 바꿔 재생성" 이 config 기본값이 아니라 그 파일의 스펙에서 출발하게 한다.
+        ``.value`` 대입이 ``_on_camera_spec_change`` 를 트리거하지만 eps 기본값만 다시 계산한다.
+        """
+        wd_mm = float(data.get("wd_m") or 0.0) * 1000.0
+        if wd_mm > 0.0:
+            self.nb_wd.value = _clamp(
+                wd_mm, float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1), WD_MAX_MM)
+        for handle, key in ((self.nb_fov_w, "fov_w_mm"), (self.nb_fov_h, "fov_h_mm")):
+            value = data.get(key)
+            if value:
+                handle.value = _clamp(float(value), FOV_MIN_MM, FOV_MAX_MM)
 
     def _on_generate(self) -> None:
         if self.generating:
+            return
+        # 입력칸 하한만 믿지 않는다 — add_number 는 타이핑 입력도 받는다.
+        problem = config.working_distance_error(self._current_wd_mm())
+        if problem:
+            self.gen_status.content = f"**Error:** {problem}"
             return
         self.generating = True
         try:
@@ -476,6 +564,7 @@ class Studio:
             submethod = DEFAULT_SUBCLUSTER_METHOD
         stage1 = self._stage1_key()               # 'delaunay' | 'coacd'
         row_spacing_mm, col_spacing_mm, surface_spacing_mm = self._current_spacing()
+        fov_w_mm, fov_h_mm = self._current_fov_mm()
         p = {
             "obj": self.object_dd.value,
             "sampling_mode": "surface",
@@ -484,6 +573,9 @@ class Studio:
             "surface_spacing_mm": surface_spacing_mm,
             "row_spacing_mm": row_spacing_mm,
             "col_spacing_mm": col_spacing_mm,
+            "fov_width_mm": fov_w_mm,
+            "fov_height_mm": fov_h_mm,
+            "working_distance_mm": self._current_wd_mm(),
             "stage1": stage1,
             "submethod": submethod,
             "method": f"{stage1}+{submethod}",
@@ -507,7 +599,7 @@ class Studio:
             full_mesh, target_mesh, input_path = self.mesh_cache[obj]
 
             sp = p["surface_spacing_mm"]
-            gkey = (obj, round(sp, 4))
+            gkey = surface_key(obj, p)
             if gkey not in self.surface_cache:
                 fi = config.OBJECT_FILTER_INTERIOR.get(obj)  # hollow 물체만 opt-in
                 self.surface_cache[gkey] = prepare_viewpoints(
@@ -518,6 +610,9 @@ class Studio:
                         surface_spacing_mm=sp,
                         row_spacing_mm=p["row_spacing_mm"],
                         col_spacing_mm=p["col_spacing_mm"],
+                        working_distance_mm=p["working_distance_mm"],
+                        fov_width_mm=p["fov_width_mm"],
+                        fov_height_mm=p["fov_height_mm"],
                         filter_interior=fi is not None,
                         interior_hull_align_min=(fi or {}).get("hull_align_min", 0.3),
                     ),
@@ -526,8 +621,9 @@ class Studio:
 
             # adjacency 는 클러스터링보다 먼저 — stage1=delaunay 의 입력이기도 하고,
             # 어느 방법이든 파일에 항상 같은 형태로 들어가는 그래프이기 때문이다.
-            akey = (obj, round(sp, 4), p["k_neighbors"],
-                    round(p["distance_factor"], 4), round(p["max_normal_angle_deg"], 4))
+            # 키가 gkey 를 포함해야 한다 — 그래프는 camera_positions(=WD 의존) 위에서 만든다.
+            akey = gkey + (p["k_neighbors"],
+                           round(p["distance_factor"], 4), round(p["max_normal_angle_deg"], 4))
             if akey not in self.adjacency_cache:
                 self.adjacency_cache[akey] = build_local_delaunay_adjacency(
                     surface["camera_positions"], surface["normals"],
@@ -549,8 +645,10 @@ class Studio:
                 adjacency_edges=adjacency["edges"],
             )
             if p["stage1"] == "coacd":
-                # CoACD 만 stage1 이 비싸다 — (object, spacing, threshold) 로 캐싱.
-                ckey = (obj, round(sp, 4), round(p["threshold"], 4))
+                # CoACD 만 stage1 이 비싸다 — gkey + threshold 로 캐싱. CoACD 자체는 표면
+                # positions 만 쓰므로 엄밀히는 WD 독립이지만, "gkey 중 위치에 영향을 주는
+                # 부분집합" 이라는 어디에도 안 적힌 불변식을 만드느니 ~2s 과잉 무효화를 받는다.
+                ckey = gkey + (round(p["threshold"], 4),)
                 if ckey not in self.coacd_cache:
                     self.coacd_cache[ckey] = cluster_coacd(
                         target_mesh, surface["positions"], p["threshold"])
@@ -569,14 +667,17 @@ class Studio:
             data = _scene_dict(
                 surface["positions"], surface["normals"], surface["camera_positions"],
                 result["cluster_ids"], result["cluster_order"], result["path_order"],
-                str(input_path), config.CAMERA_WORKING_DISTANCE_MM / 1000.0,
+                str(input_path), p["working_distance_mm"] / 1000.0,
                 adjacency=adjacency,
+                fov_w_mm=p["fov_width_mm"], fov_h_mm=p["fov_height_mm"],
             )
             self.last = {"obj": obj, "surface": surface, "result": result,
                          "params": p, "n": data["n"], "input_path": input_path,
                          "adjacency": adjacency}
             red = (1 - result["path_length_mm"] / surface["original_path_length_mm"]) * 100
-            smlabel = f"surface {p['surface_overlap_pct']:.0f}% overlap · {sp:.1f}mm"
+            smlabel = (f"surface {p['surface_overlap_pct']:.0f}% overlap · {sp:.1f}mm · "
+                       f"FOV {p['fov_width_mm']:.0f}×{p['fov_height_mm']:.0f} "
+                       f"WD {p['working_distance_mm']:.0f}mm")
             if p["submethod"] == "agglomerative":
                 knob = f"span={p['max_span_mm']:.0f}mm"
             else:
@@ -614,10 +715,12 @@ class Studio:
         obj, surface, result, p = L["obj"], L["surface"], L["result"], L["params"]
         clmethod = p.get("method", "delaunay+agglomerative")
         out = str(config.get_viewpoint_path(obj, L["n"], filename=f"viewpoints_{clmethod}.h5"))
+        # config 가 아니라 생성에 실제로 쓴 값에서 — 안 그러면 WD 120 으로 만든 h5 가 250 이라고
+        # 주장하고, 그걸 읽는 IK/궤적/GLNS/Isaac 이 전부 250 으로 계획한다.
         camera_spec = {
-            "fov_width_mm": config.CAMERA_FOV_WIDTH_MM,
-            "fov_height_mm": config.CAMERA_FOV_HEIGHT_MM,
-            "working_distance_mm": config.CAMERA_WORKING_DISTANCE_MM,
+            "fov_width_mm": p["fov_width_mm"],
+            "fov_height_mm": p["fov_height_mm"],
+            "working_distance_mm": p["working_distance_mm"],
         }
         sm = p.get("sampling_mode", "surface")
         om = p.get("ordering_mode", "lawnmower")
@@ -822,7 +925,9 @@ class Studio:
             f"**Color by:** `{self.colorby_dd.value}`",
             f"**Viewpoints:** `{data['n']}`",
             f"**Clusters:** `{len(data['cluster_order'])}`",
-            f"**Working dist:** `{data['wd_m'] * 1000:.0f} mm`",
+            f"**Camera:** `WD {data['wd_m'] * 1000:.0f} mm`"
+            + (f" · `FOV {data['fov_w_mm']:.0f}×{data['fov_h_mm']:.0f} mm`"
+               if data.get("fov_w_mm") else ""),
         ]
         if adjacency_info:
             lines.append(adjacency_info)
@@ -869,6 +974,7 @@ class Studio:
         mp = resolve_mesh_path(data, object_name)
         full = load_as_trimesh(mp) if mp is not None else None
         self.last = None
+        self._adopt_camera_spec(data)
         self._set_scene(full, data, coacd_parts=None, source=f"h5: {path.name}")
 
 

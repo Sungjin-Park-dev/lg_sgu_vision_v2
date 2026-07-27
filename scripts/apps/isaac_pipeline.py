@@ -1480,14 +1480,10 @@ class PipelineWindow:
             self._append_log(f"[viewpoints] load failed: {e}")
             return
         # Adopt this viewpoint set's camera snapshot as the FOV/range default.
+        # config 와 달라도 경고하지 않는다 — WD/FOV 는 viewpoint 생성 시 고르는 값이고
+        # (viewpoint_studio / viewpoint cli), 스펙칸이 방금 그 값으로 맞춰졌다. 기하학적으로
+        # 불가능한 WD 만 load_viewpoints_hdf5 가 잡는다(config.working_distance_error).
         self._sync_camera_spec_from_h5(h5)
-        from common import config as _config
-        cfg_wd_m = float(_config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
-        if abs(wd_m - cfg_wd_m) > 1e-9:
-            self._append_log(
-                f"[viewpoints] WARNING: h5 working distance={wd_m * 1000:.1f} mm, "
-                f"current config={cfg_wd_m * 1000:.1f} mm; using h5 metadata."
-            )
 
         self._draw_camera_viewpoint_points(points_local)
 
