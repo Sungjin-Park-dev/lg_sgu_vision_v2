@@ -116,12 +116,13 @@ config 를 없앨 수는 없다 — 첫 h5 를 만들 때 FOV/WD 가 어디선�
 
 - **h5 에 `camera_spec` 이 없으면 경고**한다(`storage.py`). 빠진 키를 이름으로 찍는다 —
   옛 파일이 조용히 config 값을 집어가는 유일한 경로였다.
-- **Isaac 카메라 스펙칸 아래에 출처를 표시**한다 — `source: h5 · <파일명>` /
-  `config default` / `manual edit` / `viewport`. 카메라는 h5 를 고르기 전에 config 로
-  만들어지므로, 부팅~h5 로드 사이 구간이 여기서 드러난다.
 - **trajectory_studio 는 아예 읽기 전용**으로 표시만 한다(`— from h5`). 그 앱에서 WD 는
   IK 대상 자세를 바꾸는데 생성 서브프로세스는 h5 를 읽으므로, 편집을 허용하면 화면과
   결과가 갈린다.
+
+isaac_pipeline 의 카메라는 h5 를 고르기 전에 config 기본값으로 만들어지고,
+h5 를 고르면(Browse 또는 Show Viewpoints) `_sync_camera_spec_from_h5` 가 그 값으로 맞춘다.
+로그에 `[cam] spec <- snapshot ...` 로 남는다.
 
 ## 5. `camera_optical_frame` 을 옮길 때 동기화 체크리스트
 

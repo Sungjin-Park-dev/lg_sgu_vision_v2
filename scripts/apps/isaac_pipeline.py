@@ -782,7 +782,6 @@ class PipelineWindow:
             "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
         }
         self._cam_spec_updating = False   # suppress apply/redraw on batch/poll set
-        self._cam_spec_source = "source: config default (viewpoint h5 미선택)"
         for _model in self._cam_spec.values():
             _model.add_value_changed_fn(lambda *_a: self._on_camera_spec_changed())
         # 시각화(Show FOV / Show Camera Range)만 카메라별로 남는다 — 서로 다른 로봇 루트
@@ -1680,16 +1679,6 @@ class PipelineWindow:
             self._lock(ui.FloatField(model=self._cam_spec["wd"], width=60))
             self._lock(ui.Button(
                 "Reset", width=64, clicked_fn=lambda: self._on_reset_camera_spec()))
-        # config 는 h5 를 고르기 전의 출발값, h5 는 고른 뒤의 진실 — 지금 어느 쪽이 적용
-        # 중인지 화면에 못박는다. 이게 없으면 부팅~h5 로드 사이 구간이 조용히 헷갈린다.
-        self._cam_spec_src_label = ui.Label(
-            self._cam_spec_source, height=16, word_wrap=True)
-
-    def _set_camera_spec_source(self, text: str):
-        self._cam_spec_source = text
-        label = getattr(self, "_cam_spec_src_label", None)
-        if label is not None:
-            label.text = text
 
     def _build_camera_view_ui(self, key):
         """카메라별 시각화 토글. 스펙은 공유지만 그리는 위치(로봇 루트)가 달라 각자 필요하다."""
@@ -1804,7 +1793,6 @@ class PipelineWindow:
                     or abs(self._cam_spec["fov_w"].get_value_as_float() - float(ha)) > 1e-3
                     or abs(self._cam_spec["fov_h"].get_value_as_float() - float(va)) > 1e-3):
                 self._set_camera_spec_mm(float(ha), float(va), float(fl))
-                self._set_camera_spec_source("source: viewport (카메라에서 되읽음)")
                 return  # 적용이 나머지 카메라도 맞춰준다 — 이번 틱은 여기서 끝
 
     def _tick_camera_ranges(self, dt):
@@ -2079,12 +2067,11 @@ class PipelineWindow:
     def _on_camera_spec_changed(self):
         """공유 스펙이 바뀌면 두 카메라의 intrinsic 과 켜져 있는 시각화를 모두 갱신한다.
 
-        _cam_spec_updating 가 켜져 있으면 프로그램이 넣은 값(h5 동기화/뷰포트 폴링/Reset)이라
-        여기로 오지 않는다. 즉 여기 도달했다는 건 **사람이 직접 고친 것**이다.
+        _cam_spec_updating 가드는 프로그램이 넣은 값(h5 동기화/뷰포트 폴링/Reset)을 걸러낸다 —
+        그쪽은 이미 _set_camera_spec_mm 이 한 번에 적용하므로 여기서 또 돌면 중복이다.
         """
         if self._cam_spec_updating:
             return
-        self._set_camera_spec_source("source: manual edit (h5 스냅샷 아님)")
         self._apply_camera_spec_to_all()
 
     def _apply_camera_spec_to_all(self):
@@ -2114,7 +2101,6 @@ class PipelineWindow:
             _config.CAMERA_FOV_HEIGHT_MM,
             _config.CAMERA_WORKING_DISTANCE_MM,
         )
-        self._set_camera_spec_source("source: config default (Reset)")
         self._append_log("[cam] reset to config defaults")
 
     def _sync_camera_spec_from_h5(self, h5_path: str):
@@ -2129,7 +2115,6 @@ class PipelineWindow:
             vp.fov_width_m * 1000.0, vp.fov_height_m * 1000.0,
             vp.working_distance_m * 1000.0,
         )
-        self._set_camera_spec_source(f"source: h5 · {os.path.basename(str(h5_path))}")
         self._append_log(
             f"[cam] spec <- snapshot {vp.fov_width_m * 1000:.1f}x"
             f"{vp.fov_height_m * 1000:.1f} mm @ WD={vp.working_distance_m * 1000:.1f} mm"
