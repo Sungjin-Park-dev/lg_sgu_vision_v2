@@ -267,6 +267,41 @@ DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20
 #    이 상수는 문서/계산 참고용 사본이다. 바꾸려면 URDF·USD 를 함께 고쳐야 한다.
 TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.141
 
+# flange → 렌즈 배럴 끝 (CAD 실측, docs/reference/camera-geometry.md §A).
+# 같은 값이 build_camera_mesh.EXPECT_HI[0] 와 inspect_camera_step.EXPECT 에도 있는데,
+# 그 둘은 CAD 를 검증하는 독립 assert 라 검증 대상을 import 하면 의미를 잃는다 — 의도된 중복.
+CAMERA_LENS_FRONT_OFFSET_M = 0.21877
+
+# WD 하한 (mm): 이보다 작으면 검사면(= mount_offset + WD)이 렌즈 앞면보다 뒤 —
+# 기하학적으로 불가능하다. 77.77mm = 배럴 길이. viewpoint 생성/로드에서 이 값으로 검증한다.
+CAMERA_MIN_WORKING_DISTANCE_MM = (
+    CAMERA_LENS_FRONT_OFFSET_M - TOOL_TO_CAMERA_OPTICAL_OFFSET_M
+) * 1000.0
+
+
+def working_distance_error(wd_mm: float) -> str | None:
+    """WD(mm)가 기하학적으로 불가능하면 사유 문자열, 정상이면 None.
+
+    검사면은 flange 기준 ``mount_offset + WD`` 에 놓인다. 그게 렌즈 앞면보다 뒤라면 물체가
+    렌즈 배럴 안에 있다는 뜻이라 어떤 배치로도 성립하지 않는다.
+
+    "config 값과 다른가"를 보지 않는 이유: WD 는 카메라 스펙에 따라 조절하는 값이라
+    기본값과 다른 것 자체는 결함이 아니다. 대신 물리적으로 불가능한 값만 잡는다
+    (구 optical_frame 0.346 시절의 h5 는 WD 46mm 라 여기 걸린다).
+
+    반환 문자열은 채널을 정하지 않는다 — 읽는 쪽이 print / parser.error / GUI 로 각자 쓴다.
+    """
+    if wd_mm > CAMERA_MIN_WORKING_DISTANCE_MM:
+        return None
+    object_plane_mm = (TOOL_TO_CAMERA_OPTICAL_OFFSET_M * 1000.0) + wd_mm
+    return (
+        f"working distance {wd_mm:.1f}mm 는 불가능하다 — 검사면이 flange+{object_plane_mm:.1f}mm 로 "
+        f"렌즈 앞면(flange+{CAMERA_LENS_FRONT_OFFSET_M * 1000.0:.1f}mm)보다 뒤에 있다. "
+        f"최소 {CAMERA_MIN_WORKING_DISTANCE_MM:.1f}mm. "
+        f"optical_frame 이전(2026-07-27) 전에 만든 파일이면 재생성할 것 "
+        f"(docs/reference/camera-geometry.md)."
+    )
+
 
 # ============================================================================
 # GTSP 최적화 기본값

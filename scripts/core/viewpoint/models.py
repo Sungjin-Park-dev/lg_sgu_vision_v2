@@ -49,6 +49,11 @@ class ViewpointData:
     adjacency: ViewpointAdjacency | None
     input_mesh: str | None
     working_distance_m: float
+    # Camera-spec snapshot captured at generation time (metadata/camera_spec),
+    # so preview/execute can default the FOV visualization to what the
+    # viewpoints were actually planned with. Fall back to config when absent.
+    fov_width_m: float
+    fov_height_m: float
 
     @property
     def count(self) -> int:

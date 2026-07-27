@@ -102,28 +102,24 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
 
         input_mesh = None
         working_distance_m = float(config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
+        fov_width_m = float(config.CAMERA_FOV_WIDTH_MM) / 1000.0
+        fov_height_m = float(config.CAMERA_FOV_HEIGHT_MM) / 1000.0
         if "metadata" in f:
             metadata = f["metadata"]
             if "input_mesh" in metadata.attrs:
                 input_mesh = _decode_attr(metadata.attrs["input_mesh"])
-            if (
-                "camera_spec" in metadata
-                and "working_distance_mm" in metadata["camera_spec"].attrs
-            ):
-                stored_wd_mm = float(metadata["camera_spec"].attrs["working_distance_mm"])
-                working_distance_m = stored_wd_mm / 1000.0
-                # h5 값이 config 를 이긴다. optical_frame 이 옮겨진 뒤(2026-07-27, 0.346→0.141)
-                # 옛 h5(WD 46mm)를 그대로 읽으면 물체면이 141+46=187mm 로 잡혀 카메라가
-                # 물체를 파고든다 — 조용히 틀리는 대신 크게 경고한다.
-                if abs(stored_wd_mm - config.CAMERA_WORKING_DISTANCE_MM) > 1.0:
-                    print(
-                        f"WARNING: {Path(source_path).name} 의 working_distance_mm="
-                        f"{stored_wd_mm:.1f} 가 현재 설정 "
-                        f"{config.CAMERA_WORKING_DISTANCE_MM:.1f} 와 다르다. "
-                        f"이 파일의 값({stored_wd_mm:.1f}mm)을 사용한다 — "
-                        f"optical_frame 변경 전에 만든 h5 라면 재생성할 것 "
-                        f"(docs/reference/camera-geometry.md)."
-                    )
+            if "camera_spec" in metadata:
+                cam_attrs = metadata["camera_spec"].attrs
+                if "working_distance_mm" in cam_attrs:
+                    working_distance_m = float(cam_attrs["working_distance_mm"]) / 1000.0
+                    # h5 값이 config 를 이긴다 — 조용히 틀린 기하로 계획하는 대신 경고한다.
+                    problem = config.working_distance_error(working_distance_m * 1000.0)
+                    if problem:
+                        print(f"WARNING: {source_path.name}: {problem}")
+                if "fov_width_mm" in cam_attrs:
+                    fov_width_m = float(cam_attrs["fov_width_mm"]) / 1000.0
+                if "fov_height_mm" in cam_attrs:
+                    fov_height_m = float(cam_attrs["fov_height_mm"]) / 1000.0
 
     return ViewpointData(
         source_path=source_path,
@@ -135,6 +131,8 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
         adjacency=adjacency,
         input_mesh=input_mesh,
         working_distance_m=working_distance_m,
+        fov_width_m=fov_width_m,
+        fov_height_m=fov_height_m,
     )
 
 
