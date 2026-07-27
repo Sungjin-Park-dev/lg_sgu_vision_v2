@@ -16,7 +16,8 @@ HOME↔스캔시작 버튼이 계획 없이 직선으로 움직이던 이유다.
 `trajectory/pipeline.py` 와 `glns/solve.py` 가 쓰는 것과 같은 관례다(호출자가 살아있는
 기즈모 pose 를 넘긴다).
 
-Exit: 0 = 충돌-free CSV 생성, 2 = 경로 없음 또는 충돌 게이트 실패.
+Exit: 0 = 충돌-free CSV 생성, 2 = 경로 없음 / 충돌 게이트 실패 / 인자 오류(argparse).
+시작과 목표가 같으면 실패가 아니다 — 이동 없는 2행 CSV 를 내고 0 을 반환한다.
 
 Usage:
     uv run --no-sync python scripts/core/trajectory/plan_move.py \\
@@ -46,23 +47,29 @@ from core import trajectory as PT  # noqa: E402
 MOVE_PLANNER_BATCH = 1
 
 
-def _parse_joints(text: str, flag: str) -> np.ndarray:
+def _joints(text: str) -> np.ndarray:
+    """argparse ``type=`` — "q0,...,q5" → (6,) ndarray.
+
+    argparse 가 옵션 이름을 붙여 rc=2 로 죽여주므로 여기서 직접 SystemExit 하지 않는다.
+    """
     values = [v for v in text.replace(",", " ").split() if v]
     try:
         q = np.array([float(v) for v in values], dtype=np.float64)
     except ValueError as exc:
-        raise SystemExit(f"{flag}: 숫자로 못 읽음 ({exc})")
+        raise argparse.ArgumentTypeError(f"숫자로 못 읽음 ({exc})")
     if q.shape != (6,):
-        raise SystemExit(f"{flag}: 관절값 6개가 필요하다 (받은 값 {len(values)}개)")
+        raise argparse.ArgumentTypeError(f"관절값 6개가 필요하다 (받은 값 {len(values)}개)")
     return q
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--from-joints", required=True,
+    # 첫 값이 음수면 '-1.5,...' 로 시작해 argparse 가 옵션으로 오인한다 — 호출자는
+    # --from-joints=<v> 형태(공백 아님)로 넘길 것.
+    p.add_argument("--from-joints", required=True, type=_joints,
                    help='시작 관절값 "q0,...,q5" [rad]')
-    p.add_argument("--to-joints", required=True,
+    p.add_argument("--to-joints", required=True, type=_joints,
                    help='목표 관절값 "q0,...,q5" [rad]')
     p.add_argument("--object", required=True, help="충돌 세계에 놓을 물체 이름")
     p.add_argument("--object-position", type=float, nargs=3, metavar=("X", "Y", "Z"),
@@ -81,8 +88,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    q_from = _parse_joints(args.from_joints, "--from-joints")
-    q_to = _parse_joints(args.to_joints, "--to-joints")
+    q_from, q_to = args.from_joints, args.to_joints
 
     print("=" * 60)
     print("PLAN MOVE (collision-free joint-to-joint)")
@@ -90,10 +96,6 @@ def main() -> int:
     print(f"  object : {args.object}")
     print(f"  from   : {np.round(np.rad2deg(q_from), 1).tolist()} deg")
     print(f"  to     : {np.round(np.rad2deg(q_to), 1).tolist()} deg")
-
-    if np.max(np.abs(q_to - q_from)) < 1e-6:
-        print("  이미 목표 자세다 — 계획할 이동이 없다.")
-        return 2
 
     # 물체 배치: 기본값 → CLI override. build_collision_world 가 호출 시점에 읽으므로
     # 여기서 config 를 덮어쓰면 그대로 반영된다(pipeline.py / solve.py 와 같은 관례).
@@ -110,28 +112,36 @@ def main() -> int:
 
     # 엣지 1개짜리 batch — plan_seams_batched(core/glns/joining.py)의 1-pair 형태다.
     selected = np.stack([q_from, q_to])
-    planner = PT.build_reconfig_motion_planner(
-        robot_cfg, world_config, batch_size=MOVE_PLANNER_BATCH)
-    segments, stats = PT.plan_reconfig_transits(
-        selected, np.array([0], dtype=np.int64), robot_cfg, world_config,
-        wd_m=args.wd_m, enable_via_ladder=not args.no_via,
-        lock_wrist3=False, motion_planner=planner,
-    )
-    waypoints = segments.get(0)
-    route = next((s.get("route") for s in stats if s.get("success")), None)
-    if waypoints is None:
-        print("  ✗ 충돌-free 경로를 찾지 못했다 (direct/via 전부 실패).")
-        return 2
-    print(f"  ✓ planned via '{route}' — {len(waypoints)} raw waypoints")
 
-    # 이동 전체가 transit 이므로 마스크는 all-True. (2행 입력의 첫 노드를 scan 으로
-    # 타이핑하는 interpolate_and_resample 의 기본 동작을 덮는다 — resample_seam 과 동일.)
-    traj, _is_transit, _dropped, _runs = PT.interpolate_and_resample(
-        selected, {0: waypoints}, robot_cfg,
-        mode=PT.RESAMPLE_MODE, spacing=args.spacing,
-        reconfig_threshold_rad=np.deg2rad(PT.RECONFIG_THRESHOLD_DEG),
-        world_scene=world_config,
-    )
+    if np.max(np.abs(q_to - q_from)) < 1e-6:
+        # 이미 목표 자세다. 실패가 아니므로 출력 계약(항상 CSV)을 지킨다 — 호출자가
+        # "경로 없음" 과 "이동 없음" 을 분기할 필요가 없다. 플래너는 건너뛰지만 아래
+        # 충돌 게이트는 그대로 지난다: 지금 자세가 이미 충돌 중이면 정직하게 실패한다.
+        print("  이미 목표 자세다 — 이동 없는 2행 궤적을 낸다.")
+        traj = selected
+    else:
+        planner = PT.build_reconfig_motion_planner(
+            robot_cfg, world_config, batch_size=MOVE_PLANNER_BATCH)
+        segments, stats = PT.plan_reconfig_transits(
+            selected, np.array([0], dtype=np.int64), robot_cfg, world_config,
+            wd_m=args.wd_m, enable_via_ladder=not args.no_via,
+            lock_wrist3=False, motion_planner=planner,
+        )
+        waypoints = segments.get(0)
+        route = next((s.get("route") for s in stats if s.get("success")), None)
+        if waypoints is None:
+            print("  ✗ 충돌-free 경로를 찾지 못했다 (direct/via 전부 실패).")
+            return 2
+        print(f"  ✓ planned via '{route}' — {len(waypoints)} raw waypoints")
+
+        # 이동 전체가 transit 이므로 마스크는 all-True. (2행 입력의 첫 노드를 scan 으로
+        # 타이핑하는 interpolate_and_resample 의 기본 동작을 덮는다 — resample_seam 과 동일.)
+        traj, _is_transit, _dropped, _runs = PT.interpolate_and_resample(
+            selected, {0: waypoints}, robot_cfg,
+            mode=PT.RESAMPLE_MODE, spacing=args.spacing,
+            reconfig_threshold_rad=np.deg2rad(PT.RECONFIG_THRESHOLD_DEG),
+            world_scene=world_config,
+        )
     is_transit = np.ones(len(traj), dtype=bool)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

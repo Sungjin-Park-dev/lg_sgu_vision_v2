@@ -83,12 +83,6 @@ FOV_PLANE_CENTERLINE_WIDTH_M = 0.002
 # drawn to where they actually hit the target object (ray-mesh intersection).
 CAMERA_RANGE_SCOPE_NAME = "CameraRangeRays"
 CAMERA_RANGE_GRID = 7  # N×N rays across the FOV
-
-# Execute 패널의 HOME 이동. 각 leg 는 현재 자세 → 목표를 plan_move.py 로 계획해 실행한다.
-HOME_TRANSITIONS = {
-    "approach": "move to scan start",
-    "return": "return to HOME",
-}
 CAMERA_RANGE_RAY_WIDTH_M = 0.0012
 CAMERA_RANGE_HIT_WIDTH_M = 0.003
 CAMERA_RANGE_UPDATE_DT = 0.05  # s between live re-casts (rays follow the camera)
@@ -98,6 +92,12 @@ CAMERA_COLLISION_LINKS = {
     "camera_frame_1",
     "camera_frame_2",
     "camera_link",
+}
+
+# Execute 패널의 HOME 이동. 각 leg 는 현재 자세 → 목표를 plan_move.py 로 계획해 실행한다.
+HOME_TRANSITIONS = {
+    "approach": "move to scan start",
+    "return": "return to HOME",
 }
 
 
@@ -1734,7 +1734,9 @@ class PipelineWindow:
         focalLength=WD, horizontal/verticalAperture=FOV (footprint model —
         see scene.setup_inspection_camera). Silent (called on every edit)."""
         import omni.usd
-        from pxr import UsdGeom
+        from pxr import Gf, UsdGeom
+
+        from common import config as _config
 
         t = self._cam_targets[key]
         fov_w_mm = float(t["fov_w"].get_value_as_float())
@@ -1746,7 +1748,6 @@ class PipelineWindow:
         prim = self._find_camera_prim(stage, key)
         if prim is None:
             return
-        from common import config as _config
         cam = UsdGeom.Camera(prim)
         cam.GetFocalLengthAttr().Set(wd_mm)
         cam.GetHorizontalApertureAttr().Set(fov_w_mm)
@@ -1754,7 +1755,6 @@ class PipelineWindow:
         cam.GetFocusDistanceAttr().Set(wd_mm * 1e-3)
         # 스펙을 다시 밀 때 clipping 도 같이 — 손으로 만졌거나 옛 스테이지에서 온 카메라의
         # near(0.01) 가 남아 있으면 화면이 자기 렌즈 배럴로 가득 찬다.
-        from pxr import Gf
         cam.GetClippingRangeAttr().Set(
             Gf.Vec2f(float(_config.CAMERA_NEAR_CLIP_M), float(_config.CAMERA_FAR_CLIP_M)))
 
@@ -2081,9 +2081,8 @@ class PipelineWindow:
         USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산하므로(verticalAperture 는
         사실상 무시), 해상도 비율이 FOV 비율과 다르면 퍼블리시 이미지가 FOV_H 를 덮지 않는다.
 
-        IsaacCreateRenderProduct 는 inputs:width/height 가 바뀌면 다음 compute 에서
-        UsdRender.Product 의 resolution 을 갱신한다 — 재생성이 아니라 노드가 설계상 지원하는
-        경로다(isaacsim.core.nodes OgnIsaacCreateRenderProduct.compute).
+        해상도를 어떻게 미는지(그래프 노드 이름 포함)는 그래프를 만든 쪽이 안다 —
+        여기서는 urctl.set_render_resolution 에 맡긴다.
         """
         from common import config as _config
 
@@ -2095,9 +2094,7 @@ class PipelineWindow:
         if wh == self._render_resolution:
             return                      # 스펙 편집마다 그래프를 건드리지 않는다
         try:
-            import omni.graph.core as og
-            for name, value in (("width", wh[0]), ("height", wh[1])):
-                og.Controller.attribute(f"{self._graph_path}/RP.inputs:{name}").set(int(value))
+            urctl.set_render_resolution(self._graph_path, wh[0], wh[1])
         except Exception as e:  # noqa: BLE001 — RP 노드가 없을 수 있다(카메라 없이 그래프 생성)
             self._append_log(f"[cam] render product resize skipped: {e}")
             return
@@ -2136,12 +2133,10 @@ class PipelineWindow:
             self._append_log(f"[cam] could not read camera spec from h5: {e}")
             return
         self._set_camera_spec_mm(
-            vp.fov_width_m * 1000.0, vp.fov_height_m * 1000.0,
-            vp.working_distance_m * 1000.0,
-        )
+            vp.fov_width_mm, vp.fov_height_mm, vp.working_distance_mm)
         self._append_log(
-            f"[cam] spec <- snapshot {vp.fov_width_m * 1000:.1f}x"
-            f"{vp.fov_height_m * 1000:.1f} mm @ WD={vp.working_distance_m * 1000:.1f} mm"
+            f"[cam] spec <- snapshot {vp.fov_width_mm:.1f}x"
+            f"{vp.fov_height_mm:.1f} mm @ WD={vp.working_distance_mm:.1f} mm"
         )
 
     @staticmethod
@@ -2464,12 +2459,14 @@ class PipelineWindow:
             if button is not None:
                 button.enabled = home_enabled
 
-    def _home_move_target(self, transition: str):
+    def _home_move_target(self, transition: str, obj: str):
         """(목표 관절값, 라벨, 출력 CSV 경로) — 실패 시 None.
 
         목표는 오늘과 같은 곳에서 읽는다: approach = Execute CSV 첫 행, return = HOME.
         GLNS 결과 h5 에 기대지 않으므로 DP 궤적 CSV 에서도 그대로 동작한다.
         """
+        from common import config as _config
+
         label = HOME_TRANSITIONS[transition]
         csv = self._csv_path_model.get_value_as_string().strip()
         if transition == "approach":
@@ -2483,13 +2480,18 @@ class PipelineWindow:
                 self._append_log(f"[home] scan CSV load failed: {exc}")
                 return None
         else:
-            from common import config as _config
             target_q = np.asarray(_config.ROBOT_START_STATE, dtype=np.float64)
 
-        # 계획 산출물은 스캔 궤적 옆에 둔다. 스캔 CSV 를 아직 안 골랐으면(return 만 가능)
-        # 그 CSV 의 디렉토리를 알 수 없으므로 마지막 수단으로 프로젝트 임시 경로를 쓴다.
-        out_dir = Path(csv).parent if csv and Path(csv).parent.is_dir() else PROJECT_ROOT / "data"
-        return target_q, label, out_dir / f"home_move_{transition}.csv"
+        # 계획 산출물은 자기가 브래킷하는 스캔 궤적 옆에 둔다. 스캔 CSV 가 없으면(return 만
+        # 가능) h5 경로에서 물체/viewpoint 수를 읽어 같은 레이아웃 자리를 만들고, 그것도
+        # 없으면 물체 폴더까지만. 어느 경우든 data/{object}/ 밖으로 나가지 않는다.
+        name = f"home_move_{transition}.csv"
+        if csv and Path(csv).parent.is_dir():
+            return target_q, label, Path(csv).parent / name
+        _, n_vp = self._parse_h5_meta(self._h5_path_model.get_value_as_string().strip())
+        if n_vp is not None:
+            return target_q, label, _config.get_trajectory_path(obj, n_vp, filename=name)
+        return target_q, label, _config.DATA_ROOT / obj / "trajectory" / name
 
     def _on_plan_home_transition(self, transition: str):
         """HOME↔스캔시작을 **충돌-free 로 계획한 뒤** 실행한다.
@@ -2509,7 +2511,18 @@ class PipelineWindow:
             self._append_log("[home] a plan or move is already running")
             return
 
-        target = self._home_move_target(transition)
+        # 충돌 세계는 스테이지의 살아있는 물체 pose 로 만든다(_on_generate 와 같은 관례).
+        # 물체를 먼저 확정한다 — 계획의 입력이자 산출물이 놓일 자리를 정한다.
+        obj = (self._current_object or "").strip()
+        pose = self._read_object_world_pose()
+        if not obj or pose is None:
+            self._append_log(
+                "[home] no target object on stage — 충돌 세계를 만들 수 없다. "
+                "Object 를 Load 한 뒤 다시 시도할 것.")
+            return
+        pos_robot, quat_wxyz = pose
+
+        target = self._home_move_target(transition, obj)
         if target is None:
             return
         target_q, label, out_csv = target
@@ -2519,16 +2532,6 @@ class PipelineWindow:
         except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
             self._append_log(f"[home] 현재 관절값을 읽지 못했다: {exc}")
             return
-
-        # 충돌 세계는 스테이지의 살아있는 물체 pose 로 만든다(_on_generate 와 같은 관례).
-        obj = (self._current_object or "").strip()
-        pose = self._read_object_world_pose()
-        if not obj or pose is None:
-            self._append_log(
-                "[home] no target object on stage — 충돌 세계를 만들 수 없다. "
-                "Object 를 Load 한 뒤 다시 시도할 것.")
-            return
-        pos_robot, quat_wxyz = pose
 
         if self._preview.loaded:
             self._preview.stop()
@@ -2553,13 +2556,18 @@ class PipelineWindow:
             if not self._start_csv_execution(str(out_csv), tag="home", on_done=finished):
                 re_enable()
 
+        # NB: --from/to-joints 는 =<v> (공백 아님). 관절 문자열은 첫 값이 음수면 '-1.5,...'
+        # 로 시작하는데, argparse 의 음수 휴리스틱은 순수 숫자 하나("-1.5")만 값으로 봐주고
+        # 쉼표가 붙으면 옵션으로 오인해 "expected one argument" 로 죽는다. 현재 자세는 임의
+        # 값이라 언제든 걸린다. publish.py --joint-target 도 같은 이유로 = 형태다.
+        # (--object-position/quat 은 값이 하나씩 떨어져 있어 휴리스틱에 걸린다 — 공백 유지.)
         shell = (
             f"{self._uv} run --no-sync scripts/core/trajectory/plan_move.py "
             f"--object {obj!r} "
             f"--object-position {' '.join(f'{v:.6f}' for v in pos_robot)} "
             f"--object-quat {' '.join(f'{v:.6f}' for v in quat_wxyz)} "
-            f"--from-joints {','.join(f'{v:.6f}' for v in current_q)!r} "
-            f"--to-joints {','.join(f'{v:.6f}' for v in target_q)!r} "
+            f"--from-joints={','.join(f'{v:.6f}' for v in current_q)!r} "
+            f"--to-joints={','.join(f'{v:.6f}' for v in target_q)!r} "
             f"--output {str(out_csv)!r}"
         )
         self._append_log(f"[home] {label}: 현재 자세에서 충돌-free 경로 계획 중…")
