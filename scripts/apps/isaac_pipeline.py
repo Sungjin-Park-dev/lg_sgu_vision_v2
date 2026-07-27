@@ -770,12 +770,24 @@ class PipelineWindow:
         self._csv_path_model = ui.SimpleStringModel("")
         self._h5_path_model = ui.SimpleStringModel("")
 
-        # Two independent editable camera specs (mm), one per inspection camera:
+        # ONE editable camera spec (mm) shared by both inspection cameras. 프리뷰 고스트와
+        # 실 로봇은 같은 물리 카메라의 두 표현이라, 스펙이 갈리면 프리뷰가 실제와 다른 화각을
+        # 보여주는 거짓말이 된다. 편집하면 두 카메라의 USD intrinsic 에 같이 적용되고,
+        # 뷰포트가 되밀어오면 그것도 공유 스펙으로 흡수한다(_poll_camera_specs).
+        # viewpoint h5 의 metadata/camera_spec 스냅샷이 로드되면 그 값으로 맞춰진다.
+        from common import config as _cfg
+        self._cam_spec = {
+            "fov_w": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_WIDTH_MM)),
+            "fov_h": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_HEIGHT_MM)),
+            "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
+        }
+        self._cam_spec_updating = False   # suppress apply/redraw on batch/poll set
+        for _model in self._cam_spec.values():
+            _model.add_value_changed_fn(lambda *_a: self._on_camera_spec_changed())
+        # 시각화(Show FOV / Show Camera Range)만 카메라별로 남는다 — 서로 다른 로봇 루트
+        # 아래에 그리기 때문이다.
         #   preview -> InspectionCameraPreview (ghost, Preview panel)
         #   execute -> InspectionCamera        (real robot, Execute panel)
-        # Editing a spec drives that camera's USD intrinsics; the viewport can
-        # also drive it back (see _poll_camera_specs). Auto-set from a viewpoint
-        # h5's metadata/camera_spec snapshot when Show Viewpoints loads one.
         self._cam_targets = {
             "preview": self._make_cam_target("preview", "InspectionCameraPreview", GHOST_ROOT_PATH),
             "execute": self._make_cam_target("execute", "InspectionCamera", urctl.STAGE_PATH),
@@ -1176,8 +1188,15 @@ class PipelineWindow:
                 button.enabled = home_enabled
 
     def _build_panel_object(self):
+        """검사 대상 정의 — 물체, 그 물체의 viewpoint h5, 그리고 카메라 스펙.
+
+        셋은 같은 것에 대한 설명이다: viewpoint h5 는 data/{object}/viewpoint/ 아래 살고,
+        Show Viewpoints 는 그 물체 위에 점을 그리며(물체가 먼저 로드돼 있어야 한다),
+        카메라 스펙은 그 h5 가 어떤 카메라로 계획됐는지를 말한다. 예전에는 h5 가 Generate 에,
+        카메라 스펙이 Preview/Execute 에 흩어져 있어 이 선후관계가 UI 에 안 드러났다.
+        """
         ui = self._ui
-        frame = ui.CollapsableFrame("Load Object", height=0)
+        frame = ui.CollapsableFrame("Load Object & Viewpoints", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
@@ -1188,9 +1207,15 @@ class PipelineWindow:
                     self._object_combo = self._lock(ui.ComboBox(default_idx, *self._objects))
                     self._lock(ui.Button("Load Object", width=110, clicked_fn=self._on_load_object))
                     self._lock(ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose))
-                # ui.Label("Pick an object and Load it, then move/rotate it with the viewport "
-                #          "gizmo (W = move, E = rotate). Its live pose is read at Generate time.",
-                #          height=28, word_wrap=True)
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Viewpoints (h5)", width=110)
+                    self._lock(ui.StringField(model=self._h5_path_model))
+                    self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5))
+                with ui.HStack(height=28, spacing=6):
+                    self._lock(ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints))
+                    self._lock(ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints))
+                # 두 카메라가 공유하는 스펙. Show Viewpoints 가 h5 스냅샷으로 채워준다.
+                self._build_camera_spec_fields()
 
     def _build_panel_generate(self):
         ui = self._ui
@@ -1202,13 +1227,8 @@ class PipelineWindow:
                 #          "count are read from the h5 path; the object's live pose comes from the "
                 #          "scene — load & place it in panel A first.",
                 #          height=40, word_wrap=True)
-                with ui.HStack(height=22, spacing=6):
-                    ui.Label("Viewpoints (h5)", width=110)
-                    self._lock(ui.StringField(model=self._h5_path_model))
-                    self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_h5))
-                with ui.HStack(height=28, spacing=6):
-                    self._lock(ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints))
-                    self._lock(ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints))
+                # viewpoint h5 선택은 위 "Load Object & Viewpoints" 로 옮겼다 —
+                # 여기서는 그 h5(_h5_path_model)를 입력으로 쓰기만 한다.
                 with ui.HStack(height=28, spacing=6):
                     self._btn_check_ik = self._lock(ui.Button(
                         "Check IK Reachability",
@@ -1255,10 +1275,9 @@ class PipelineWindow:
                 with ui.HStack(height=28, spacing=6):
                     self._lock(ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres))
                     self._lock(ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres))
-                # Camera spec for InspectionCameraPreview (ghost). Defaults to the
-                # viewpoint snapshot once an h5 is loaded (Show Viewpoints), else
-                # global config. Editing drives the camera view + FOV/range below.
-                self._build_camera_spec_ui("preview")
+                # 고스트(InspectionCameraPreview) 시각화. 스펙 값 자체는 위
+                # "Load Object & Viewpoints" 에서 두 카메라가 공유한다.
+                self._build_camera_view_ui("preview")
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("t", width=20)
                     self._slider_model = ui.SimpleFloatModel(0.0)
@@ -1278,8 +1297,8 @@ class PipelineWindow:
                     ui.Label("CSV path", width=80)
                     self._lock(ui.StringField(model=self._csv_path_model))
                     self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
-                # Camera spec for the real InspectionCamera (ROS render product).
-                self._build_camera_spec_ui("execute")
+                # 실 카메라(InspectionCamera, ROS render product) 시각화. 스펙은 공유.
+                self._build_camera_view_ui("execute")
                 with ui.HStack(height=28, spacing=6):
                     self._btn_home_approach = self._lock(ui.Button(
                         "Move to Scan Start",
@@ -1632,45 +1651,44 @@ class PipelineWindow:
         return None
 
     def _make_cam_target(self, key, camera_name, root_path):
-        """Build the per-camera spec state (models + toggle flags/buttons)."""
-        ui = self._ui
-        from common import config as _cfg
-        t = {
+        """Per-camera visualization state. 스펙 모델(fov_w/fov_h/wd)은 self._cam_spec 을
+        공유 참조한다 — 두 카메라는 같은 물리 카메라의 두 표현이라 스펙이 갈릴 이유가 없다."""
+        return {
             "key": key,
             "camera": camera_name,        # InspectionCamera / InspectionCameraPreview
             "root": root_path,            # robot root the camera lives under
-            "fov_w": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_WIDTH_MM)),
-            "fov_h": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_HEIGHT_MM)),
-            "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
+            "fov_w": self._cam_spec["fov_w"],
+            "fov_h": self._cam_spec["fov_h"],
+            "wd": self._cam_spec["wd"],
             "fov_on": False,
             "range_on": False,
             "btn_fov": None,
             "btn_range": None,
-            "updating": False,            # suppress apply/redraw on batch/poll set
             "cam_prim_path": None,        # cached camera prim path
         }
-        for fld in ("fov_w", "fov_h", "wd"):
-            t[fld].add_value_changed_fn(lambda *_a, _k=key: self._on_camera_spec_changed(_k))
-        return t
 
-    def _build_camera_spec_ui(self, key):
-        """Camera-spec fields + FOV/range toggles for one target (Preview/Execute)."""
+    def _build_camera_spec_fields(self):
+        """공유 카메라 스펙 입력칸. 두 카메라가 같은 값을 쓰므로 한 번만 만든다."""
         ui = self._ui
-        t = self._cam_targets[key]
         with ui.HStack(height=22, spacing=6):
             ui.Label("FOV W", width=44)
-            self._lock(ui.FloatField(model=t["fov_w"], width=60))
+            self._lock(ui.FloatField(model=self._cam_spec["fov_w"], width=60))
             ui.Label("FOV H", width=44)
-            self._lock(ui.FloatField(model=t["fov_h"], width=60))
+            self._lock(ui.FloatField(model=self._cam_spec["fov_h"], width=60))
             ui.Label("WD", width=24)
-            self._lock(ui.FloatField(model=t["wd"], width=60))
+            self._lock(ui.FloatField(model=self._cam_spec["wd"], width=60))
+            self._lock(ui.Button(
+                "Reset", width=64, clicked_fn=lambda: self._on_reset_camera_spec()))
+
+    def _build_camera_view_ui(self, key):
+        """카메라별 시각화 토글. 스펙은 공유지만 그리는 위치(로봇 루트)가 달라 각자 필요하다."""
+        ui = self._ui
+        t = self._cam_targets[key]
         with ui.HStack(height=28, spacing=6):
             t["btn_fov"] = self._lock(ui.Button(
                 "Show FOV", clicked_fn=lambda k=key: self._on_toggle_fov(k)))
             t["btn_range"] = self._lock(ui.Button(
                 "Show Camera Range", clicked_fn=lambda k=key: self._on_toggle_range(k)))
-            self._lock(ui.Button(
-                "Reset", width=64, clicked_fn=lambda k=key: self._on_reset_camera_spec(k)))
 
     def _find_camera_prim(self, stage, key):
         """The UsdGeom.Camera prim for this target (cached), or None."""
@@ -1749,15 +1767,19 @@ class PipelineWindow:
         cam.GetFocusDistanceAttr().Set(wd_mm * 1e-3)
 
     def _poll_camera_specs(self):
-        """Viewport → UI: read each camera's live intrinsics and reflect them in
-        its spec fields (so mouse-driven zoom updates the numbers)."""
+        """Viewport → UI: 카메라의 살아있는 intrinsic 을 공유 스펙으로 흡수한다
+        (마우스 줌이 숫자에 반영되도록).
+
+        스펙이 하나뿐이므로, 벌어진 값을 발견하면 그걸 공유 스펙으로 채택하고 **두 카메라에
+        도로 적용**한다. 그러면 다음 프레임엔 둘이 다시 같아져 서로 밀치며 깜빡이지 않는다.
+        """
         import omni.usd
         from pxr import UsdGeom
 
         stage = omni.usd.get_context().get_stage()
         if stage is None:
             return
-        for key, t in self._cam_targets.items():
+        for key in self._cam_targets:
             prim = self._find_camera_prim(stage, key)
             if prim is None:
                 continue
@@ -1767,19 +1789,11 @@ class PipelineWindow:
             va = cam.GetVerticalApertureAttr().Get()
             if fl is None or ha is None or va is None:
                 continue
-            self._maybe_set_field(t, "wd", float(fl))
-            self._maybe_set_field(t, "fov_w", float(ha))
-            self._maybe_set_field(t, "fov_h", float(va))
-
-    def _maybe_set_field(self, t, fld, val):
-        """Set a spec field from the camera without re-applying (guarded)."""
-        m = t[fld]
-        if abs(m.get_value_as_float() - val) > 1e-3:
-            t["updating"] = True
-            try:
-                m.set_value(val)
-            finally:
-                t["updating"] = False
+            if (abs(self._cam_spec["wd"].get_value_as_float() - float(fl)) > 1e-3
+                    or abs(self._cam_spec["fov_w"].get_value_as_float() - float(ha)) > 1e-3
+                    or abs(self._cam_spec["fov_h"].get_value_as_float() - float(va)) > 1e-3):
+                self._set_camera_spec_mm(float(ha), float(va), float(fl))
+                return  # 적용이 나머지 카메라도 맞춰준다 — 이번 틱은 여기서 끝
 
     def _tick_camera_ranges(self, dt):
         """Throttled per-frame re-cast so the range rays follow the camera as the
@@ -2050,59 +2064,53 @@ class PipelineWindow:
             if t["btn_range"] is not None:
                 t["btn_range"].text = "Hide Camera Range"
 
-    def _on_camera_spec_changed(self, key):
-        """When a spec field changes: update that camera's view + any shown
-        FOV rectangle / range rays for the same target."""
-        t = self._cam_targets[key]
-        if t["updating"]:
+    def _on_camera_spec_changed(self):
+        """공유 스펙이 바뀌면 두 카메라의 intrinsic 과 켜져 있는 시각화를 모두 갱신한다."""
+        if self._cam_spec_updating:
             return
-        self._apply_camera_spec_to_camera(key)
-        if t["fov_on"]:
-            self._draw_fov_rectangle(key)
-        if t["range_on"]:
-            self._draw_camera_range_rays(key)
+        self._apply_camera_spec_to_all()
 
-    def _set_camera_spec_mm(self, key, fov_w_mm, fov_h_mm, wd_mm):
-        """Set a target's three spec fields at once (one apply/redraw, not three)."""
-        t = self._cam_targets[key]
-        t["updating"] = True
+    def _apply_camera_spec_to_all(self):
+        for key, t in self._cam_targets.items():
+            self._apply_camera_spec_to_camera(key)
+            if t["fov_on"]:
+                self._draw_fov_rectangle(key)
+            if t["range_on"]:
+                self._draw_camera_range_rays(key)
+
+    def _set_camera_spec_mm(self, fov_w_mm, fov_h_mm, wd_mm):
+        """공유 스펙 세 필드를 한 번에 설정한다(적용/재그리기는 세 번이 아니라 한 번)."""
+        self._cam_spec_updating = True
         try:
-            t["fov_w"].set_value(float(fov_w_mm))
-            t["fov_h"].set_value(float(fov_h_mm))
-            t["wd"].set_value(float(wd_mm))
+            self._cam_spec["fov_w"].set_value(float(fov_w_mm))
+            self._cam_spec["fov_h"].set_value(float(fov_h_mm))
+            self._cam_spec["wd"].set_value(float(wd_mm))
         finally:
-            t["updating"] = False
-        self._apply_camera_spec_to_camera(key)
-        if t["fov_on"]:
-            self._draw_fov_rectangle(key)
-        if t["range_on"]:
-            self._draw_camera_range_rays(key)
+            self._cam_spec_updating = False
+        self._apply_camera_spec_to_all()
 
-    def _on_reset_camera_spec(self, key):
-        """Reset a target's camera-spec fields back to the global config defaults."""
+    def _on_reset_camera_spec(self):
+        """공유 카메라 스펙을 config 기본값으로 되돌린다."""
         from common import config as _config
         self._set_camera_spec_mm(
-            key,
             _config.CAMERA_FOV_WIDTH_MM,
             _config.CAMERA_FOV_HEIGHT_MM,
             _config.CAMERA_WORKING_DISTANCE_MM,
         )
-        self._append_log(f"[cam:{key}] reset to config defaults")
+        self._append_log("[cam] reset to config defaults")
 
     def _sync_camera_spec_from_h5(self, h5_path: str):
-        """Set BOTH cameras' spec fields from a viewpoint h5's snapshot (the
-        default for that viewpoint set). Best-effort."""
+        """공유 스펙을 viewpoint h5 의 스냅샷으로 맞춘다(그 viewpoint 세트의 기본값). Best-effort."""
         try:
             from core.viewpoint.storage import load_viewpoints_hdf5
             vp = load_viewpoints_hdf5(h5_path)
         except Exception as e:  # noqa: BLE001 — snapshot is best-effort
             self._append_log(f"[cam] could not read camera spec from h5: {e}")
             return
-        for key in self._cam_targets:
-            self._set_camera_spec_mm(
-                key, vp.fov_width_m * 1000.0, vp.fov_height_m * 1000.0,
-                vp.working_distance_m * 1000.0,
-            )
+        self._set_camera_spec_mm(
+            vp.fov_width_m * 1000.0, vp.fov_height_m * 1000.0,
+            vp.working_distance_m * 1000.0,
+        )
         self._append_log(
             f"[cam] spec <- snapshot {vp.fov_width_m * 1000:.1f}x"
             f"{vp.fov_height_m * 1000:.1f} mm @ WD={vp.working_distance_m * 1000:.1f} mm"
@@ -2511,12 +2519,22 @@ class PipelineWindow:
     # ------------------------------------------------------------------
     # File picker (shared by panels B and C)
     # ------------------------------------------------------------------
-    def _open_file_picker(self, title: str, model, item_label: str, ext: str, start_dir: str):
-        """Open the Omni file picker filtered to `ext`, writing the pick into `model`."""
+    def _open_file_picker(self, title: str, model, item_label: str, ext: str, start_dir: str,
+                          on_selected=None):
+        """Open the Omni file picker filtered to `ext`, writing the pick into `model`.
+
+        ``on_selected(full_path)`` 는 선택이 확정된 뒤에만 불린다 — 필드는 손으로도 편집할 수
+        있어서 ``model.add_value_changed_fn`` 을 쓰면 타자 한 글자마다 불려버린다.
+        """
         def _on_apply(filename: str, dirname: str):
             full = os.path.join(dirname, filename) if filename else dirname
             model.set_value(full)
             self._append_log(f"[browse] selected: {full}")
+            if on_selected is not None:
+                try:
+                    on_selected(full)
+                except Exception as e:  # noqa: BLE001 — 부가 동작이 선택을 막지 않게
+                    self._append_log(f"[browse] post-select hook failed: {e}")
             try:
                 dialog.hide()
             except Exception:
@@ -2568,8 +2586,11 @@ class PipelineWindow:
     def _on_browse_h5(self):
         """Open Omni file picker pre-rooted at data/{object}/viewpoint/."""
         start_dir = self._start_dir_for(self._h5_path_model, "viewpoint")
+        # 고른 즉시 카메라 스펙을 그 h5 스냅샷으로 맞춘다 — 스펙 입력칸이 바로 아래 있어서
+        # 파일을 고르면 따라 바뀔 거라고 기대하게 된다(Show Viewpoints 를 눌러야만 바뀌면 놀란다).
         self._open_file_picker("Select viewpoints .h5", self._h5_path_model,
-                               "HDF5 (*.h5)", ".h5", start_dir)
+                               "HDF5 (*.h5)", ".h5", start_dir,
+                               on_selected=self._sync_camera_spec_from_h5)
 
     # ------------------------------------------------------------------
     # Preview panel callbacks
