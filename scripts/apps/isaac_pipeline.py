@@ -83,6 +83,12 @@ FOV_PLANE_CENTERLINE_WIDTH_M = 0.002
 # drawn to where they actually hit the target object (ray-mesh intersection).
 CAMERA_RANGE_SCOPE_NAME = "CameraRangeRays"
 CAMERA_RANGE_GRID = 7  # N×N rays across the FOV
+
+# Execute 패널의 HOME 이동. 각 leg 는 현재 자세 → 목표를 plan_move.py 로 계획해 실행한다.
+HOME_TRANSITIONS = {
+    "approach": "move to scan start",
+    "return": "return to HOME",
+}
 CAMERA_RANGE_RAY_WIDTH_M = 0.0012
 CAMERA_RANGE_HIT_WIDTH_M = 0.003
 CAMERA_RANGE_UPDATE_DT = 0.05  # s between live re-casts (rays follow the camera)
@@ -423,14 +429,8 @@ class IsaacArticulationExecutor:
 
     def start(self, csv_path: str, on_done: Optional[Callable[[int], None]] = None) -> bool:
         try:
-            self._initialize()
             solutions, csv_times = load_trajectory_csv(csv_path)
-            current = np.asarray(
-                self._articulation.get_joint_positions(joint_indices=self._indices),
-                dtype=np.float64,
-            )
-            if current.shape != (len(self._joint_names),) or not np.all(np.isfinite(current)):
-                raise RuntimeError(f"invalid current UR20 joint state: {current}")
+            current = self.current_joints()
 
             relative_times = csv_times - csv_times[0]
             start_diff = float(np.max(np.abs(solutions[0] - current)))
@@ -468,39 +468,21 @@ class IsaacArticulationExecutor:
             joint_indices=self._indices,
         ))
 
-    def start_joint_target(self, target_q, *, label: str,
-                           on_done: Optional[Callable[[int], None]] = None) -> bool:
-        """Move from the current Isaac joint state to one target without ROS."""
-        try:
-            self._initialize()
-            current = np.asarray(
-                self._articulation.get_joint_positions(joint_indices=self._indices),
-                dtype=np.float64,
-            )
-            target = np.asarray(target_q, dtype=np.float64)
-            if current.shape != target.shape or target.shape != (len(self._joint_names),):
-                raise RuntimeError(
-                    f"joint target shape mismatch: current={current.shape}, target={target.shape}")
-            if not np.all(np.isfinite(current)) or not np.all(np.isfinite(target)):
-                raise RuntimeError("joint target contains non-finite values")
-            max_delta = float(np.max(np.abs(target - current)))
-            duration = max(
-                max_delta / self.APPROACH_MAX_JOINT_VEL_RAD_S,
-                self.MIN_APPROACH_TIME_S,
-            )
-            self._positions = np.vstack([current, target])
-            self._times = np.array([0.0, duration], dtype=np.float64)
-            self._elapsed = 0.0
-            self._running = True
-            self._on_done = on_done
-            self._apply_target(current)
-            self._log(f"[execute] Isaac {label}: duration={duration:.2f}s")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            self._log(f"[execute] Isaac joint move failed: {exc}")
-            self._running = False
-            self._on_done = None
-            return False
+    def current_joints(self) -> np.ndarray:
+        """UR20 의 현재 관절값 (rad).
+
+        **두 run-mode 모두 여기서 읽는다.** sim 은 Isaac 이 곧 로봇이고, real 은
+        /ActionGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
+        (apply_mode 참고) — 그래서 별도 ROS 구독 없이 실제 자세를 얻는다.
+        """
+        self._initialize()
+        q = np.asarray(
+            self._articulation.get_joint_positions(joint_indices=self._indices),
+            dtype=np.float64,
+        )
+        if q.shape != (len(self._joint_names),) or not np.all(np.isfinite(q)):
+            raise RuntimeError(f"invalid current UR20 joint state: {q}")
+        return q
 
     def step(self, dt: float):
         if not self._running:
@@ -1182,9 +1164,10 @@ class PipelineWindow:
             self._btn_home_approach.text = "Move to Scan Start"
         if self._btn_home_return is not None:
             self._btn_home_return.text = "Return to HOME"
+        # _pub_runner 항이 빠져 있어 real 이동 중에 버튼이 되살아났다(기존 버그).
         home_enabled = (
             self._pipeline_mode == "inspection" and not self._gen_runner.running
-            and not self._sim_executor.running
+            and not self._sim_executor.running and not self._pub_runner.running
         )
         for button in (self._btn_home_approach, self._btn_home_return):
             if button is not None:
@@ -2481,37 +2464,71 @@ class PipelineWindow:
             if button is not None:
                 button.enabled = home_enabled
 
-    def _on_plan_home_transition(self, transition: str):
-        """Move HOME↔scan-start straight to the joint target (no planning yet).
+    def _home_move_target(self, transition: str):
+        """(목표 관절값, 라벨, 출력 CSV 경로) — 실패 시 None.
 
-        sim drives the Isaac articulation in-process (visualisation); real
-        publishes the same target to the inspection controller for a direct,
-        velocity-limited joint move. Collision-aware planning comes later.
+        목표는 오늘과 같은 곳에서 읽는다: approach = Execute CSV 첫 행, return = HOME.
+        GLNS 결과 h5 에 기대지 않으므로 DP 궤적 CSV 에서도 그대로 동작한다.
         """
-        if transition not in {"approach", "return"}:
-            raise ValueError(f"unknown HOME transition: {transition}")
-        if (self._gen_runner.running or self._sim_executor.running
-                or self._pub_runner.running):
-            self._append_log("[home] a move is already running")
-            return
-
-        # Joint target is identical for sim and real.
+        label = HOME_TRANSITIONS[transition]
+        csv = self._csv_path_model.get_value_as_string().strip()
         if transition == "approach":
-            csv = self._csv_path_model.get_value_as_string().strip()
             if not csv or not Path(csv).exists():
                 self._append_log(f"[home] scan CSV not found: {csv!r}")
-                return
+                return None
             try:
                 solutions, _times = load_trajectory_csv(csv)
                 target_q = np.asarray(solutions[0], dtype=np.float64)
             except Exception as exc:  # noqa: BLE001
                 self._append_log(f"[home] scan CSV load failed: {exc}")
-                return
-            label = "move to scan start"
+                return None
         else:
-            from common import config as robot_config
-            target_q = np.asarray(robot_config.ROBOT_START_STATE, dtype=np.float64)
-            label = "return to HOME"
+            from common import config as _config
+            target_q = np.asarray(_config.ROBOT_START_STATE, dtype=np.float64)
+
+        # 계획 산출물은 스캔 궤적 옆에 둔다. 스캔 CSV 를 아직 안 골랐으면(return 만 가능)
+        # 그 CSV 의 디렉토리를 알 수 없으므로 마지막 수단으로 프로젝트 임시 경로를 쓴다.
+        out_dir = Path(csv).parent if csv and Path(csv).parent.is_dir() else PROJECT_ROOT / "data"
+        return target_q, label, out_dir / f"home_move_{transition}.csv"
+
+    def _on_plan_home_transition(self, transition: str):
+        """HOME↔스캔시작을 **충돌-free 로 계획한 뒤** 실행한다.
+
+        현재 자세에서 계획하는 게 핵심이다. 고정된 자세(HOME/스캔끝)에서 시작하는 궤적을
+        실행하면, 두 실행기 모두 현재 자세→CSV 첫 행 사이에 **계획되지 않은 직선**을 덧붙인다
+        (IsaacArticulationExecutor.start / publish.build_interpolated_points). 시작점이 곧
+        현재 자세면 그 구간이 아예 생기지 않아 전 구간이 계획된 이동이 된다.
+
+        2단계 체인이다: plan_move.py(_gen_runner) → 성공 시 _start_csv_execution.
+        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel(Generate) 이 그대로 적용된다.
+        """
+        if transition not in HOME_TRANSITIONS:
+            raise ValueError(f"unknown HOME transition: {transition}")
+        if (self._gen_runner.running or self._sim_executor.running
+                or self._pub_runner.running):
+            self._append_log("[home] a plan or move is already running")
+            return
+
+        target = self._home_move_target(transition)
+        if target is None:
+            return
+        target_q, label, out_csv = target
+
+        try:
+            current_q = self._sim_executor.current_joints()
+        except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
+            self._append_log(f"[home] 현재 관절값을 읽지 못했다: {exc}")
+            return
+
+        # 충돌 세계는 스테이지의 살아있는 물체 pose 로 만든다(_on_generate 와 같은 관례).
+        obj = (self._current_object or "").strip()
+        pose = self._read_object_world_pose()
+        if not obj or pose is None:
+            self._append_log(
+                "[home] no target object on stage — 충돌 세계를 만들 수 없다. "
+                "Object 를 Load 한 뒤 다시 시도할 것.")
+            return
+        pos_robot, quat_wxyz = pose
 
         if self._preview.loaded:
             self._preview.stop()
@@ -2522,39 +2539,33 @@ class PipelineWindow:
             self._set_trajectory_buttons_enabled(True)
             self._btn_publish.enabled = True
 
-        if self._mode == "sim":
-            def on_sim_done(rc: int):
-                self._append_log(f"[home] {label} exit code = {rc}")
-                re_enable()
-
-            if not self._sim_executor.start_joint_target(
-                target_q, label=label, on_done=on_sim_done,
-            ):
-                re_enable()
-            return
-
-        # real: send the joint target straight to the inspection controller —
-        # a direct current→target move (velocity-limited in publish_trajectory).
-        # Activate the inspection controller first (see helper) so the send lands
-        # on an ACTIVE controller. NB: --joint-target=<v> (not a space) so argparse
-        # takes a leading-'-' negative value as the argument, not an option.
-        q_str = ",".join(f"{v:.6f}" for v in target_q)
-        shell_cmd = (
-            "source /opt/ros/jazzy/setup.bash && "
-            f"{self._ensure_inspection_controller_cmd()} && "
-            f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
-            f"--joint-target={q_str!r} --target controller"
-        )
-        self._append_log(f"[home] {label} → real robot (direct joint target)")
-        self._append_log("[home] $ " + shell_cmd)
-
-        def on_exit(rc: int):
+        def finished(rc: int):
             self._append_log(f"[home] {label} exit code = {rc}")
             re_enable()
 
-        self._pub_runner.start(
-            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
-            on_line=self._append_log, on_exit=on_exit)
+        def on_planned(rc: int):
+            self._append_log(f"[home] plan exit code = {rc}")
+            if rc != 0 or not out_csv.exists():
+                self._append_log(f"[home] {label}: 충돌-free 경로가 없어 움직이지 않는다.")
+                re_enable()
+                return
+            self._append_log(f"[home] executing planned {label}: {out_csv}")
+            if not self._start_csv_execution(str(out_csv), tag="home", on_done=finished):
+                re_enable()
+
+        shell = (
+            f"{self._uv} run --no-sync scripts/core/trajectory/plan_move.py "
+            f"--object {obj!r} "
+            f"--object-position {' '.join(f'{v:.6f}' for v in pos_robot)} "
+            f"--object-quat {' '.join(f'{v:.6f}' for v in quat_wxyz)} "
+            f"--from-joints {','.join(f'{v:.6f}' for v in current_q)!r} "
+            f"--to-joints {','.join(f'{v:.6f}' for v in target_q)!r} "
+            f"--output {str(out_csv)!r}"
+        )
+        self._append_log(f"[home] {label}: 현재 자세에서 충돌-free 경로 계획 중…")
+        self._append_log("[home] $ " + shell)
+        self._gen_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
+                               on_line=self._append_log, on_exit=on_planned)
 
     def _on_cancel_generate(self):
         if self._gen_runner.running:
@@ -2734,42 +2745,44 @@ class PipelineWindow:
         if self._preview.loaded:
             self._preview.stop()
 
+        self._btn_publish.enabled = False
+        self._set_trajectory_buttons_enabled(False)
+
+        def on_done(rc: int):
+            self._append_log(f"[execute] exit code = {rc}")
+            self._btn_publish.enabled = True
+            self._set_trajectory_buttons_enabled(True)
+
+        if not self._start_csv_execution(csv, tag="execute", on_done=on_done):
+            self._btn_publish.enabled = True
+            self._set_trajectory_buttons_enabled(True)
+
+    def _start_csv_execution(self, csv: str, *, tag: str,
+                             on_done: Callable[[int], None]) -> bool:
+        """CSV 하나를 현재 대상 로봇에서 실행한다.
+
+        sim → in-process articulation, real → publish.py 를 통한 FollowJointTrajectory.
+        Execute 버튼과 HOME 이동이 공유하므로 `publish.py --csv` 셸 문자열과
+        컨트롤러 활성화가 한 곳에만 존재한다.
+
+        Returns: 시작에 동기적으로 실패하면 False (그때 on_done 은 불리지 않는다).
+        """
         if self._mode == "sim":
-            self._btn_publish.enabled = False
-            self._set_trajectory_buttons_enabled(False)
+            return self._sim_executor.start(csv, on_done=on_done)
 
-            def on_sim_done(rc: int):
-                self._append_log(f"[execute] exit code = {rc}")
-                self._btn_publish.enabled = True
-                self._set_trajectory_buttons_enabled(True)
-
-            if not self._sim_executor.start(csv, on_done=on_sim_done):
-                self._btn_publish.enabled = True
-                self._set_trajectory_buttons_enabled(True)
-            return
-
-        # REAL execution remains on the ROS2 trajectory controller path. Make sure
-        # the inspection controller is active first (see helper).
+        # REAL 은 ROS2 trajectory controller 경로. 보내기 전에 inspection 컨트롤러를
+        # 활성화한다(헬퍼 주석 참고 — run-mode 전환이 이 스위치를 놓칠 수 있다).
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
             f"{self._ensure_inspection_controller_cmd()} && "
             f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
             f"--csv {csv!r} --target controller"
         )
-        cmd = ["bash", "-c", shell_cmd]
-
-        self._btn_publish.enabled = False
-        self._append_log("[execute] target=real robot")
-        self._append_log("[execute] $ " + shell_cmd)
-
-        def on_line(line: str):
-            self._append_log(line)
-
-        def on_exit(rc: int):
-            self._append_log(f"[execute] exit code = {rc}")
-            self._btn_publish.enabled = True
-
-        self._pub_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
+        self._append_log(f"[{tag}] target=real robot")
+        self._append_log(f"[{tag}] $ " + shell_cmd)
+        self._pub_runner.start(["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
+                               on_line=self._append_log, on_exit=on_done)
+        return True
 
     def _on_cancel_execute(self):
         if self._sim_executor.running:
