@@ -31,8 +31,14 @@ from .settings import (
     VIA_ROLL_MAX_REPS,
 )
 
-def build_reconfig_motion_planner(robot_cfg, world_scene):
-    """Build and warm one BatchMotionPlanner reusable across transit calls."""
+def build_reconfig_motion_planner(robot_cfg, world_scene, *, batch_size=None):
+    """Build and warm one BatchMotionPlanner reusable across transit calls.
+
+    ``batch_size`` 는 warmup 이 잡는 trajopt 버퍼 크기를 정한다 — 배치 슬롯당 ~375MB 라
+    기본 TRANSIT_BATCH_SIZE(24) 는 ~9GB 다. 엣지가 한두 개뿐인 호출자(단발 q→q 이동)는
+    작은 값을 줘서 Isaac Sim 과 같은 GPU 를 훨씬 여유롭게 나눠 쓴다.
+    """
+    bs = int(TRANSIT_BATCH_SIZE if batch_size is None else max(1, batch_size))
     cache = {
         "obb": max(1, len(world_scene.cuboid)),
         "mesh": max(1, len(world_scene.mesh)),
@@ -42,12 +48,12 @@ def build_reconfig_motion_planner(robot_cfg, world_scene):
         robot=robot_cfg,
         collision_cache=cache,
         use_cuda_graph=False,
-        max_batch_size=TRANSIT_BATCH_SIZE,
+        max_batch_size=bs,
     )
     planner = BatchMotionPlanner(cfg)
     planner.update_world(world_scene)
     graph_on = TRANSIT_ENABLE_GRAPH_ATTEMPT <= TRANSIT_MAX_ATTEMPTS
-    print(f"    Warming up BatchMotionPlanner (batch={TRANSIT_BATCH_SIZE}, "
+    print(f"    Warming up BatchMotionPlanner (batch={bs}, "
           f"graph={'on' if graph_on else 'off'})...")
     planner.warmup(enable_graph=graph_on, num_warmup_iterations=2)
     _tick("transit_build_warmup", _t_build)

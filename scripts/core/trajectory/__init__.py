@@ -1,5 +1,6 @@
 """Public trajectory planning API shared by apps and GLNS."""
 
+from .gating import collision_gate_and_save
 from .ik import cluster_ik_solutions, normalize_joints, solve_ik_multi_seed
 from .motion import (
     build_reconfig_motion_planner,

@@ -8,54 +8,10 @@ from pathlib import Path
 import numpy as np
 
 from core import trajectory as PT
+from core.trajectory import collision_gate_and_save
 
 class SeamFailure(RuntimeError):
     """An inter-component / HOME-bracket seam could not be bridged (incl. via-home)."""
-
-
-def collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_config,
-                             out_csv):
-    """densify 충돌게이트 → 충돌-free 면 FK/시간/CSV/npz 저장(per-component·joined 공용)."""
-    collision_traj = PT.densify_for_collision_check(final_traj)
-    _, n_collisions = PT.batch_collision_check(collision_traj, robot_cfg, world_config)
-    collision_free = n_collisions == 0
-
-    total_time = transit_time = float("nan")
-    if collision_free:
-        ee_positions, ee_quaternions = PT.compute_fk(final_traj, robot_cfg)
-        traj_times, time_stats = PT.compute_trajectory_times(
-            final_traj, ee_positions, ee_quaternions,
-            ee_speed_m_s=PT.EE_SPEED_MM_S / 1000.0,
-            ee_angular_speed_rad_s=np.deg2rad(PT.EE_ANGULAR_SPEED_DEG_S),
-            max_joint_vel_rad_s=PT.MAX_JOINT_VEL_RAD_S,
-            min_segment_dt=PT.MIN_SEGMENT_DT_S,
-            corner_angle_threshold_rad=np.deg2rad(PT.CORNER_ANGLE_THRESHOLD_DEG),
-            corner_max_slowdown=PT.CORNER_MAX_SLOWDOWN,
-            is_transit=final_is_transit,
-        )
-        total_time = float(time_stats["total_time"])
-        transit_time = float(time_stats["transit_time"])
-        PT.save_trajectory_csv(
-            final_traj, ee_positions, ee_quaternions, str(out_csv), times=traj_times,
-        )
-        # trajectory_studio.py 의 dense 재생용 sidecar: CSV 에 없는 is_transit 마스크와
-        # FK EE 위치를 함께 저장(실행용 CSV 스키마는 건드리지 않는다).
-        np.savez(
-            out_csv.with_suffix(".npz"),
-            joints=np.asarray(final_traj, dtype=np.float64),
-            ee_positions=np.asarray(ee_positions, dtype=np.float64),
-            is_transit=np.asarray(final_is_transit, dtype=bool),
-            times=np.asarray(traj_times, dtype=np.float64),
-        )
-
-    return {
-        "n_collisions": int(n_collisions),
-        "collision_free": collision_free,
-        "total_time": total_time,
-        "transit_time": transit_time,
-        "n_waypoints": len(final_traj),
-        "csv": str(out_csv) if collision_free else None,
-    }
 
 
 def _linf(a, b) -> float:
