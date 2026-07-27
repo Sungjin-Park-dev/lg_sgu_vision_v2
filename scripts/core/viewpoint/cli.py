@@ -59,9 +59,22 @@ Examples:
     parser.add_argument('--color-tolerance', type=float, default=5.0,
                         help='RGB color matching tolerance (default: 5.0)')
     parser.add_argument('--row-spacing', type=float, default=None,
-                        help='Row spacing in mm (default: CAMERA_FOV_HEIGHT_MM * (1-overlap))')
+                        help='Row spacing in mm (default: FOV height * (1-overlap))')
     parser.add_argument('--col-spacing', type=float, default=None,
-                        help='Column spacing in mm (default: CAMERA_FOV_WIDTH_MM * (1-overlap))')
+                        help='Column spacing in mm (default: FOV width * (1-overlap))')
+
+    # --- Camera spec (h5 metadata/camera_spec 로 저장 → IK/궤적/GLNS/Isaac 이 이 값을 쓴다) ---
+    parser.add_argument('--fov-width', type=float, default=None,
+                        help=f'FOV width in mm (default: {config.CAMERA_FOV_WIDTH_MM:.0f})')
+    parser.add_argument('--fov-height', type=float, default=None,
+                        help=f'FOV height in mm (default: {config.CAMERA_FOV_HEIGHT_MM:.0f})')
+    parser.add_argument('--overlap', type=float, default=None,
+                        help='FOV overlap ratio 0~1 '
+                             f'(default: {config.CAMERA_OVERLAP_RATIO}). --row/col-spacing 이 우선')
+    parser.add_argument('--working-distance', type=float, default=None,
+                        help='Working distance in mm — 카메라 몸체 앞면에서 검사면까지 '
+                             f'(default: {config.CAMERA_WORKING_DISTANCE_MM:.0f}, '
+                             f'최소 {config.CAMERA_MIN_WORKING_DISTANCE_MM:.1f})')
     parser.add_argument('--no-filter-bottom', action='store_true', default=False,
                         help='Disable bottom-face filtering')
     parser.add_argument('--bottom-angle', type=float, default=80.0,
@@ -142,6 +155,16 @@ Examples:
     if not 0.0 < args.delaunay_max_normal_angle <= 180.0:
         parser.error("--delaunay-max-normal-angle must be in (0, 180]")
 
+    for flag, value in (("--fov-width", args.fov_width), ("--fov-height", args.fov_height)):
+        if value is not None and value <= 0.0:
+            parser.error(f"{flag} must be > 0")
+    if args.overlap is not None and not 0.0 <= args.overlap < 1.0:
+        parser.error("--overlap must be in [0, 1)")
+    if args.working_distance is not None:
+        problem = config.working_distance_error(args.working_distance)
+        if problem:
+            parser.error(f"--working-distance: {problem}")
+
     return args
 
 def main():
@@ -180,6 +203,10 @@ def main():
         color_tolerance=args.color_tolerance,
         row_spacing_mm=args.row_spacing,
         col_spacing_mm=args.col_spacing,
+        working_distance_mm=args.working_distance,
+        fov_width_mm=args.fov_width,
+        fov_height_mm=args.fov_height,
+        overlap_ratio=args.overlap,
         filter_bottom=not args.no_filter_bottom,
         bottom_angle=args.bottom_angle,
         filter_interior=_fi is not None,
@@ -201,7 +228,7 @@ def main():
     )
 
     method = args.cluster_method
-    eps_mm = args.eps if args.eps else config.CAMERA_FOV_WIDTH_MM
+    eps_mm = args.eps if args.eps else params.fov_width_mm
 
     # ------------------------------------------------------------------
     # Compare mode: 파라미터 스윕 → 드롭다운 HTML
@@ -226,7 +253,7 @@ def main():
             ordering_mode=params.ordering_mode,
             adjacency_edges=adjacency['edges'] if adjacency is not None else None,
         )
-        fov_w = config.CAMERA_FOV_WIDTH_MM
+        fov_w = params.fov_width_mm
         compare_results = {}
 
         if method == 'dbscan':
@@ -367,11 +394,9 @@ def main():
         print(f"Output: {output_path}")
 
         print("Saving to HDF5...")
-        camera_spec = {
-            'fov_width_mm': config.CAMERA_FOV_WIDTH_MM,
-            'fov_height_mm': config.CAMERA_FOV_HEIGHT_MM,
-            'working_distance_mm': config.CAMERA_WORKING_DISTANCE_MM,
-        }
+        # config 가 아니라 params 에서 — 안 그러면 --working-distance 120 으로 만든 h5 가
+        # 250 이라고 주장하고, 그걸 읽는 IK/궤적/Isaac 이 전부 250 으로 계획한다.
+        camera_spec = params.camera_spec
         metadata = {
             'timestamp': datetime.now().isoformat(),
             'input_mesh': str(input_path),

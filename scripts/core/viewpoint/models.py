@@ -8,6 +8,8 @@ from typing import Optional
 
 import numpy as np
 
+from common import config
+
 
 DEFAULT_DELAUNAY_NEIGHBORS = 12
 DEFAULT_DELAUNAY_DISTANCE_FACTOR = 2.5
@@ -69,12 +71,24 @@ class ViewpointData:
 
 @dataclass
 class ViewpointGenParams:
-    """Parameters for the importable viewpoint generation pipeline."""
+    """Parameters for the importable viewpoint generation pipeline.
+
+    카메라 스펙(FOV·WD·overlap)은 ``None`` 이면 ``__post_init__`` 에서 config 기본값으로
+    해소된다 — config 는 기본값이고, **이 객체가 그 실행의 진실**이다. 덕분에 하류는
+    ``params.working_distance_mm`` 를 무조건 float 로 읽을 수 있고, 생성기는 config 전역을
+    다시 들여다볼 필요가 없다.
+    """
 
     material_rgb: Optional[str] = None
     color_tolerance: float = 5.0
     row_spacing_mm: Optional[float] = None
     col_spacing_mm: Optional[float] = None
+    # 카메라 스펙 — 저장 시 metadata/camera_spec 으로 h5 에 박히고, 그 h5 를 읽는
+    # IK/궤적/GLNS/Isaac 이 config 대신 그 값을 쓴다(docs/reference/camera-geometry.md).
+    working_distance_mm: Optional[float] = None
+    fov_width_mm: Optional[float] = None
+    fov_height_mm: Optional[float] = None
+    overlap_ratio: Optional[float] = None
     filter_bottom: bool = True
     bottom_angle: float = 80.0
     filter_interior: bool = False
@@ -93,6 +107,31 @@ class ViewpointGenParams:
     delaunay_neighbors: int = DEFAULT_DELAUNAY_NEIGHBORS
     delaunay_distance_factor: float = DEFAULT_DELAUNAY_DISTANCE_FACTOR
     delaunay_max_normal_angle_deg: float = DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG
+
+    def __post_init__(self):
+        """카메라 스펙 미지정분을 config 기본값으로 해소한다(생성 시점 1회).
+
+        항상 float 로 통일한다 — GUI/CLI 에서 int 가 들어오면 h5 attr 이 int64 로 박혀
+        같은 스펙인데 파일마다 dtype 이 갈린다.
+        """
+        self.working_distance_mm = float(
+            config.CAMERA_WORKING_DISTANCE_MM if self.working_distance_mm is None
+            else self.working_distance_mm)
+        self.fov_width_mm = float(
+            config.CAMERA_FOV_WIDTH_MM if self.fov_width_mm is None else self.fov_width_mm)
+        self.fov_height_mm = float(
+            config.CAMERA_FOV_HEIGHT_MM if self.fov_height_mm is None else self.fov_height_mm)
+        self.overlap_ratio = float(
+            config.CAMERA_OVERLAP_RATIO if self.overlap_ratio is None else self.overlap_ratio)
+
+    @property
+    def camera_spec(self) -> dict:
+        """h5 ``metadata/camera_spec`` 에 그대로 들어가는 dict (storage 의 읽기 키와 일치)."""
+        return {
+            "fov_width_mm": self.fov_width_mm,
+            "fov_height_mm": self.fov_height_mm,
+            "working_distance_mm": self.working_distance_mm,
+        }
 
 
 @dataclass

@@ -157,21 +157,25 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
         grid_row_index, cam_axis1, cam_axis2, row_spacing_m, col_spacing_m,
         original_path_length_mm, pca_center, pca_axis1, pca_axis2
     """
-    # 3. spacing
+    # 3. spacing — row/col 을 직접 준 게 없으면 FOV×(1-overlap) 로 유도한다.
+    #    FOV·overlap·WD 는 params 가 소유한다(__post_init__ 이 config 로 해소).
     if params.row_spacing_mm:
         row_spacing_m = params.row_spacing_mm / 1000.0
     else:
-        row_spacing_m = config.CAMERA_FOV_HEIGHT_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
+        row_spacing_m = params.fov_height_mm / 1000.0 * (1.0 - params.overlap_ratio)
     if params.col_spacing_mm:
         col_spacing_m = params.col_spacing_mm / 1000.0
     else:
-        col_spacing_m = config.CAMERA_FOV_WIDTH_MM / 1000.0 * (1.0 - config.CAMERA_OVERLAP_RATIO)
+        col_spacing_m = params.fov_width_mm / 1000.0 * (1.0 - params.overlap_ratio)
 
     print(f"  Row spacing (axis1): {row_spacing_m * 1000:.1f} mm")
     print(f"  Col spacing (axis2): {col_spacing_m * 1000:.1f} mm")
+    print(f"  Working distance:    {params.working_distance_mm:.1f} mm "
+          f"(FOV {params.fov_width_mm:.0f}×{params.fov_height_mm:.0f} mm)")
     print()
 
-    wd_m = config.CAMERA_WORKING_DISTANCE_MM / 1000.0
+    # 이 한 줄이 곧 h5 → IK/궤적/GLNS 로 흘러가는 값이다(camera_positions 기준).
+    wd_m = params.working_distance_mm / 1000.0
 
     if params.sampling_mode == 'surface':
         # 4'. 표면 직접 균일 샘플링 (FPS) — 곡면 커버리지
@@ -291,7 +295,7 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
     )
 
     method = params.cluster_method
-    eps_mm = params.eps_mm if params.eps_mm else config.CAMERA_FOV_WIDTH_MM
+    eps_mm = params.eps_mm if params.eps_mm else params.fov_width_mm
 
     if method.startswith('delaunay+') and adjacency is None:
         raise ValueError(
