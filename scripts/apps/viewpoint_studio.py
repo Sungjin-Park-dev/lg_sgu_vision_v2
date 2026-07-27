@@ -86,6 +86,10 @@ OVERLAP_MAX_PCT = 90
 FOV_MIN_MM = 5.0
 FOV_MAX_MM = 500.0
 WD_MAX_MM = 800.0
+# WD 하한은 물리 제약(검사면이 렌즈 배럴보다 앞에 있어야 한다)에서 온다. config 의 값은
+# 경계 자체(그 값이면 렌즈 앞면과 정확히 겹침)라 입력칸 하한은 1mm 안쪽으로 올린다 —
+# working_distance_error 가 경계를 실패로 보므로 하한이 곧 유효한 최솟값이 된다.
+WD_MIN_MM = float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1)
 # dbscan eps 상한. FOV 가 커지면 유도 eps 가 여기서 포화해 "eps 가 spacing 을 따라간다"는
 # 약속이 조용히 깨지므로, FOV 상한에 맞춰 넉넉히 잡는다.
 EPS_MAX_MM = 300
@@ -251,8 +255,8 @@ def load_viewpoint_h5(path: Path) -> dict:
     camera_positions = positions + normals * wd_m
     return _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
                        path_order, input_mesh, wd_m, adjacency=adjacency,
-                       fov_w_mm=viewpoint.fov_width_m * 1000.0,
-                       fov_h_mm=viewpoint.fov_height_m * 1000.0)
+                       fov_w_mm=viewpoint.fov_width_mm,
+                       fov_h_mm=viewpoint.fov_height_mm)
 
 
 def _scene_dict(positions, normals, camera_positions, cluster_id, cluster_order,
@@ -362,9 +366,10 @@ class Studio:
 
         initial_overlap = default_overlap_pct()
         _, _, initial_spacing = fov_spacing_mm(initial_overlap)
+        # 카메라의 물리 스펙만 — 이 셋이 h5 metadata/camera_spec 으로 저장되고, 그 h5 를 읽는
+        # IK/궤적/GLNS/Isaac 이 config 대신 이 값을 쓴다. h5 를 로드하면 그 파일 값으로
+        # 맞춰진다(_adopt_camera_spec).
         with g.add_folder("Camera spec"):
-            # 여기 값이 곧 h5 metadata/camera_spec 으로 저장되고, 그 h5 를 읽는
-            # IK/궤적/GLNS/Isaac 이 config 대신 이 값을 쓴다.
             self.nb_fov_w = g.add_number(
                 "FOV width (mm)", initial_value=float(config.CAMERA_FOV_WIDTH_MM),
                 min=FOV_MIN_MM, max=FOV_MAX_MM, step=1.0)
@@ -374,19 +379,18 @@ class Studio:
             # 하한이 물리 제약이다 — 이보다 작으면 검사면이 렌즈 배럴 안쪽에 놓인다.
             self.nb_wd = g.add_number(
                 "Working distance (mm)", initial_value=float(config.CAMERA_WORKING_DISTANCE_MM),
-                min=float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1),
-                max=WD_MAX_MM, step=1.0)
-            # 슬라이더가 아니라 number 로 — 끌어도 Generate 전까지 화면이 바뀌지 않아
-            # 드래그 어포던스가 지키지 못할 약속을 한다. 나머지 셋과 입력 방식도 통일된다.
-            self.nb_overlap = g.add_number(
-                "FOV overlap (%)", initial_value=initial_overlap,
-                min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1)
-            self.btn_generate = g.add_button("Generate")
-            self.btn_save = g.add_button("Save h5")
-            self.gen_status = g.add_markdown("Idle.")
+                min=WD_MIN_MM, max=WD_MAX_MM, step=1.0)
 
         self.generate_folder = g.add_folder("Generate (surface + stage1 + sub-cluster)")
         with self.generate_folder:
+            # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**다 — FOV×(1-overlap) 로
+            # 표면 간격을 정할 뿐이라 h5 camera_spec 에 들어가지 않는다. 그래서 스펙칸이
+            # 아니라 여기 있다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
+            # 슬라이더가 아니라 number 로 — 끌어도 Generate 전까지 화면이 바뀌지 않아
+            # 드래그 어포던스가 지키지 못할 약속을 한다. 나머지 입력과 방식도 통일된다.
+            self.nb_overlap = g.add_number(
+                "FOV overlap (%)", initial_value=initial_overlap,
+                min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1)
             self.stage1_dd = g.add_dropdown(
                 "Stage 1", options=STAGE1_OPTIONS, initial_value=DEFAULT_STAGE1)
             # stage1=CoACD 노브
@@ -410,6 +414,10 @@ class Studio:
             self.sl_eps = g.add_slider(
                 "eps (mm)", min=5, max=EPS_MAX_MM, step=1,
                 initial_value=eps_default_mm(initial_spacing))
+            # 실행과 상태는 자기가 쓰는 노브 바로 아래에 둔다.
+            self.btn_generate = g.add_button("Generate")
+            self.btn_save = g.add_button("Save h5")
+            self.gen_status = g.add_markdown("Idle.")
 
         self.playback_folder = g.add_folder("Playback")
         with self.playback_folder:
@@ -519,11 +527,12 @@ class Studio:
         isaac_pipeline 의 ``_sync_camera_spec_from_h5`` 와 같은 동작 — "기존 것 불러와
         살짝 바꿔 재생성" 이 config 기본값이 아니라 그 파일의 스펙에서 출발하게 한다.
         ``.value`` 대입이 ``_on_camera_spec_change`` 를 트리거하지만 eps 기본값만 다시 계산한다.
+
+        overlap 은 여기서 건드리지 않는다 — h5 camera_spec 에 없는 샘플링 파라미터다.
         """
         wd_mm = float(data.get("wd_m") or 0.0) * 1000.0
         if wd_mm > 0.0:
-            self.nb_wd.value = _clamp(
-                wd_mm, float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1), WD_MAX_MM)
+            self.nb_wd.value = _clamp(wd_mm, WD_MIN_MM, WD_MAX_MM)
         for handle, key in ((self.nb_fov_w, "fov_w_mm"), (self.nb_fov_h, "fov_h_mm")):
             value = data.get(key)
             if value:
@@ -704,11 +713,13 @@ class Studio:
             "ordering_mode": om,
             "row_spacing_mm": surface["row_spacing_m"] * 1000.0,
             "col_spacing_mm": surface["col_spacing_m"] * 1000.0,
+            # 0~1 비율로 — config·ViewpointGenParams·cli.py 가 쓰는 단위와 같게 둔다
+            # (%는 GUI 표기일 뿐이다).
+            "overlap_ratio": p["surface_overlap_pct"] / 100.0,
             "total_path_length_mm": result["path_length_mm"],
         }
         if sp is not None:
             metadata["surface_spacing_mm"] = sp
-            metadata["surface_overlap_pct"] = p.get("surface_overlap_pct")
         cluster_meta = {
             "clustering_method": clmethod,
             "num_clusters": result["num_clusters"],

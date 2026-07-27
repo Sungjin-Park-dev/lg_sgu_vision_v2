@@ -407,6 +407,9 @@ def main():
                 else min(res.row_spacing_m, res.col_spacing_m) * 1000.0,
             'row_spacing_mm': res.row_spacing_m * 1000.0,
             'col_spacing_mm': res.col_spacing_m * 1000.0,
+            # overlap 은 카메라 스펙이 아니라 샘플링 파라미터라 camera_spec 이 아닌 여기 —
+            # viewpoint_studio 의 저장 경로와 같은 키/단위(0~1)를 쓴다.
+            'overlap_ratio': params.overlap_ratio,
             'total_path_length_mm': compute_path_length(res.camera_positions, res.path_order) * 1000.0,
         }
         save_viewpoints_hdf5(
