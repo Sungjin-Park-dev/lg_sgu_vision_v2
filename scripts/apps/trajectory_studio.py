@@ -62,6 +62,7 @@ from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 DATA_ROOT = PROJECT_ROOT / "data"
 OBJ_NODE = "/studio/object"          # 물체 이동 gizmo (mesh 는 자식 → 드래그하면 따라온다)
 LOG_MAX_LINES = 300                  # generate 로그 유지 줄 수 (패널 스크롤로 히스토리 열람)
+CAMERA_MD_EMPTY = "**Camera** — (load viewpoints)"
 
 COLOR_OBJECT = (90, 200, 255)
 COLOR_OBSTACLE = (120, 120, 130)
@@ -223,18 +224,23 @@ class TrajectoryStudio:
     # ── GUI ────────────────────────────────────────────────────────────────
     def _build_gui(self, initial_result):
         gui = self.server.gui
-        with gui.add_folder("Scene"):
+        # isaac_pipeline.py 의 "Load Object & Viewpoints" 와 같은 흐름 — 물체와 그 물체의
+        # viewpoint h5, 그리고 그 h5 가 어떤 카메라로 계획됐는지를 한 자리에서 본다.
+        self.folder_vp = gui.add_folder("Load Object & Viewpoints")
+        with self.folder_vp:
             self.dd_object = gui.add_dropdown(
                 "Object", options=self.objects, initial_value=self.object_name,
             )
-        self.folder_vp = gui.add_folder("Viewpoints")
-        with self.folder_vp:
             vps = discover_viewpoints(DATA_ROOT, self.object_name)
             self.dd_vp = gui.add_dropdown(
-                "h5", options=list(vps.keys()) or ["(none)"],
+                "Viewpoints (h5)", options=list(vps.keys()) or ["(none)"],
                 initial_value=next(iter(vps), "(none)"),
             )
             self.btn_load_vp = gui.add_button("Load viewpoints")
+            # 읽기 전용 — 카메라 스펙은 h5 의 속성이다. 여기서 편집하면 화면의 도달성과
+            # 실제 생성 결과가 갈린다(생성 서브프로세스는 h5 의 값을 읽는다).
+            # 바꾸려면 viewpoint_studio 에서 그 WD/FOV 로 재생성한다.
+            self.camera_md = gui.add_markdown(CAMERA_MD_EMPTY)
         self._make_vp_slider(1)
         with gui.add_folder("Move object + live IK"):
             self.move_object = gui.add_checkbox("Show object gizmo", initial_value=True)
@@ -244,7 +250,7 @@ class TrajectoryStudio:
                 "Solution k", min=0, max=MAX_REP_SLIDER, step=1, initial_value=0,
             )
             self.reach_md = gui.add_markdown("reachability: (Apply pose)")
-        with gui.add_folder("Generate (DP | GLNS)"):
+        with gui.add_folder("Generate Trajectory"):
             self.backend_dd = gui.add_dropdown(
                 "Backend",
                 options=["GLNS (solve + verify --join)", "DP (plan_trajectory)"],
@@ -276,15 +282,16 @@ class TrajectoryStudio:
             # 자체 폴더로 분리 → 길어진 로그를 접을 수 있고, 펼치면 패널 스크롤로 위-아래 열람.
             with gui.add_folder("Generation log"):
                 self.gen_log = gui.add_markdown("")
-        with gui.add_folder("GLNS result (load existing)"):
+        # 결과 로드와 재생은 한 섹션 — isaac_pipeline 의 "Preview in Simulation" 에 대응한다
+        # (여기엔 preview/execute 구분이 없어 재생이 하나뿐이다).
+        self.component_folder = gui.add_folder("Result / Playback")
+        with self.component_folder:
             opts = list(self.result_paths) or ["(none)"]
             init_r = initial_result if initial_result in self.result_paths else opts[0]
             self.result_dropdown = gui.add_dropdown(
-                "GLNS HDF5", options=opts, initial_value=init_r,
+                "GLNS HDF5 (load existing)", options=opts, initial_value=init_r,
             )
             self.load_button = gui.add_button("Load result")
-        self.component_folder = gui.add_folder("Result / Playback")
-        with self.component_folder:
             self.component_dropdown = gui.add_dropdown(
                 "Run", options=["(none)"], initial_value="(none)",
             )
@@ -351,6 +358,21 @@ class TrajectoryStudio:
         for name, checkbox in mapping.items():
             for handle in self.layers[name]:
                 handle.visible = checkbox.value
+
+    def _refresh_camera_md(self, viewpoint=None, wd_m=None):
+        """로드한 h5 의 카메라 스펙을 보여준다 — 읽기 전용(h5 가 진실).
+
+        ``wd_m`` 을 따로 받는 것은 GLNS 결과 경로 때문이다: 그쪽은 solve 당시의 WD 가
+        result metadata 에 박혀 있고, 그게 실제로 쓰인 값이다.
+        """
+        if viewpoint is None:
+            self.camera_md.content = CAMERA_MD_EMPTY
+            return
+        wd_mm = (viewpoint.working_distance_m if wd_m is None else wd_m) * 1000.0
+        self.camera_md.content = (
+            f"**Camera** `FOV {viewpoint.fov_width_m * 1000:.0f}×"
+            f"{viewpoint.fov_height_m * 1000:.0f} mm` · `WD {wd_mm:.0f} mm` — from h5"
+        )
 
     def _log(self, line: str):
         self._log_lines.append(line)
@@ -478,6 +500,7 @@ class TrajectoryStudio:
         self._vp_raw = None
         self._vp_path = None
         self._reach = None
+        self._refresh_camera_md(None)
         for handle in self.layers["points"]:
             handle.remove()
         self.layers["points"].clear()
@@ -523,6 +546,7 @@ class TrajectoryStudio:
         self._vp_raw = (positions, normals, wd_m)
         self.world_poses = PT.build_camera_poses(positions, normals, wd_m)
         self._reach = None
+        self._refresh_camera_md(viewpoint)
         self._draw_plain_viewpoints()
         self._make_vp_slider(len(self.world_poses))
         self.status.content = (f"{len(self.world_poses)} viewpoints 로드 "
@@ -857,6 +881,8 @@ class TrajectoryStudio:
         self.world_poses = PT.build_camera_poses(positions, normals, wd_m)
         self._vp_raw = (positions, normals, wd_m)
         self._vp_path = source_path
+        # FOV 는 원본 h5, WD 는 solve 당시 metadata(실제로 쓰인 값).
+        self._refresh_camera_md(viewpoint, wd_m=wd_m)
         self.dense_dir = self._glns_trajectory_dir(legacy_dir=path.parent)
         self._reach = None
         self.result = result
