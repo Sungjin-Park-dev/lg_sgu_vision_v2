@@ -100,19 +100,24 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                 ),
             )
 
+        # 카메라 스펙의 출처 규칙: **config 는 새 h5 를 만들 때의 출발값, h5 는 만들어진 뒤의
+        # 진실**이다. 여기서 config 로 되돌아가는 건 camera_spec 이 아예 없는 옛 파일뿐이고,
+        # 그건 조용히 넘어가면 안 되므로 어느 키가 빠졌는지 찍어준다.
         input_mesh = None
         working_distance_m = float(config.CAMERA_WORKING_DISTANCE_MM) / 1000.0
         fov_width_m = float(config.CAMERA_FOV_WIDTH_MM) / 1000.0
         fov_height_m = float(config.CAMERA_FOV_HEIGHT_MM) / 1000.0
+        missing = ["working_distance_mm", "fov_width_mm", "fov_height_mm"]
         if "metadata" in f:
             metadata = f["metadata"]
             if "input_mesh" in metadata.attrs:
                 input_mesh = _decode_attr(metadata.attrs["input_mesh"])
             if "camera_spec" in metadata:
                 cam_attrs = metadata["camera_spec"].attrs
+                missing = [k for k in missing if k not in cam_attrs]
                 if "working_distance_mm" in cam_attrs:
                     working_distance_m = float(cam_attrs["working_distance_mm"]) / 1000.0
-                    # h5 값이 config 를 이긴다 — 조용히 틀린 기하로 계획하는 대신 경고한다.
+                    # 기하학적으로 불가능한 WD 는 조용히 계획에 흘려보내지 않는다.
                     problem = config.working_distance_error(working_distance_m * 1000.0)
                     if problem:
                         print(f"WARNING: {source_path.name}: {problem}")
@@ -120,6 +125,13 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                     fov_width_m = float(cam_attrs["fov_width_mm"]) / 1000.0
                 if "fov_height_mm" in cam_attrs:
                     fov_height_m = float(cam_attrs["fov_height_mm"]) / 1000.0
+        if missing:
+            print(
+                f"WARNING: {source_path.name} 에 camera_spec {', '.join(missing)} 가 없다 — "
+                f"config 기본값(FOV {config.CAMERA_FOV_WIDTH_MM:.0f}×"
+                f"{config.CAMERA_FOV_HEIGHT_MM:.0f}mm, WD {config.CAMERA_WORKING_DISTANCE_MM:.0f}mm)"
+                f"을 대신 쓴다. 그 스펙으로 만든 파일이 아니라면 재생성할 것."
+            )
 
     return ViewpointData(
         source_path=source_path,

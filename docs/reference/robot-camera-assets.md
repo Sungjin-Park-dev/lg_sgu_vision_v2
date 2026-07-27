@@ -104,6 +104,25 @@ ViewpointGenParams (생성 시 선택)
 불가능한 WD(검사면이 렌즈 안쪽)는 `config.working_distance_error()` 가 CLI·스튜디오·h5 로드
 세 지점에서 잡는다.
 
+### 한 줄 규칙: config 는 출발값, h5 는 진실
+
+> **config = 새 h5 를 만들 때의 출발값. h5 = 만들어진 뒤의 진실.**
+
+config 를 없앨 수는 없다 — 첫 h5 를 만들 때 FOV/WD 가 어디선가는 와야 하는데 h5 는 그 결과물이라
+닭-달걀이고, [inspect_camera_step.py](../../scripts/setup/inspect_camera_step.py) 가
+`object_plane == body_face + CAMERA_WORKING_DISTANCE_MM` 로 기본값을 CAD 에 고정한다.
+
+대신 "지금 어느 쪽이 적용 중인가"를 알 수 없는 구간을 없앴다:
+
+- **h5 에 `camera_spec` 이 없으면 경고**한다(`storage.py`). 빠진 키를 이름으로 찍는다 —
+  옛 파일이 조용히 config 값을 집어가는 유일한 경로였다.
+- **Isaac 카메라 스펙칸 아래에 출처를 표시**한다 — `source: h5 · <파일명>` /
+  `config default` / `manual edit` / `viewport`. 카메라는 h5 를 고르기 전에 config 로
+  만들어지므로, 부팅~h5 로드 사이 구간이 여기서 드러난다.
+- **trajectory_studio 는 아예 읽기 전용**으로 표시만 한다(`— from h5`). 그 앱에서 WD 는
+  IK 대상 자세를 바꾸는데 생성 서브프로세스는 h5 를 읽으므로, 편집을 허용하면 화면과
+  결과가 갈린다.
+
 ## 5. `camera_optical_frame` 을 옮길 때 동기화 체크리스트
 
 한 곳만 고치면 조용히 어긋난다. 순서대로 전부.
