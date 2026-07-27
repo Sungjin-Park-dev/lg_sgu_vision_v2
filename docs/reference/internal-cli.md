@@ -7,6 +7,7 @@
 | viewpoint 배치 생성 | `scripts/core/viewpoint/cli.py` |
 | DP 궤적 생성 | `scripts/core/trajectory/cli.py` |
 | viewpoint IK 검사 | `scripts/core/trajectory/check_ik.py` |
+| 두 자세 사이 충돌-free 이동 계획 | `scripts/core/trajectory/plan_move.py` |
 | ROS2/Isaac 궤적 전송 | `scripts/core/trajectory/publish.py` |
 | GLNS solve | `scripts/core/glns/solve.py` |
 | GLNS motion 검증·연결 | `scripts/core/glns/verify.py` |
