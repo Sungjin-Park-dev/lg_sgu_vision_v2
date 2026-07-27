@@ -116,11 +116,12 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                 cam_attrs = metadata["camera_spec"].attrs
                 missing = [k for k in missing if k not in cam_attrs]
                 if "working_distance_mm" in cam_attrs:
-                    working_distance_m = float(cam_attrs["working_distance_mm"]) / 1000.0
+                    wd_mm = float(cam_attrs["working_distance_mm"])
                     # 기하학적으로 불가능한 WD 는 조용히 계획에 흘려보내지 않는다.
-                    problem = config.working_distance_error(working_distance_m * 1000.0)
+                    problem = config.working_distance_error(wd_mm)
                     if problem:
                         print(f"WARNING: {source_path.name}: {problem}")
+                    working_distance_m = wd_mm / 1000.0
                 if "fov_width_mm" in cam_attrs:
                     fov_width_m = float(cam_attrs["fov_width_mm"]) / 1000.0
                 if "fov_height_mm" in cam_attrs:

@@ -71,6 +71,10 @@ MOVEIT_GRAPH_PATH = "/MoveItGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
 CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 INSPECTION_CAMERA_NAME = "InspectionCamera"
+# 렌더 프로덕트 노드의 그래프 내 이름. build_action_graph 의 노드 키와 반드시 같아야 한다
+# (같은 파일이라 rename 은 이 파일 grep 하나로 끝난다). 바깥에서 해상도를 바꿀 때는 이 이름을
+# 직접 쓰지 말고 set_render_resolution() 을 부른다 — 그래프 스키마는 이 모듈이 소유한다.
+RENDER_PRODUCT_NODE = "RP"
 
 
 def _is_under_root(path: str, root: str) -> bool:
@@ -456,6 +460,7 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
 
     if inspection_cam is not None:
         create_nodes += [
+            # 노드 이름은 RENDER_PRODUCT_NODE 로도 내보낸다 — set_render_resolution() 참고.
             ("RP", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
             ("RGB", "isaacsim.ros2.bridge.ROS2CameraHelper"),
             ("Depth", "isaacsim.ros2.bridge.ROS2CameraHelper"),
@@ -500,6 +505,23 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
         print(e)
 
     return ACTION_GRAPH_PATH
+
+
+def set_render_resolution(graph_path: str, width: int, height: int) -> None:
+    """살아있는 그래프의 렌더 프로덕트 해상도를 바꾼다.
+
+    ``IsaacCreateRenderProduct`` 는 ``inputs:width/height`` 가 바뀌면 다음 compute 에서
+    ``UsdRender.Product`` 의 resolution 을 갱신한다 — 노드가 설계상 지원하는 경로라
+    그래프를 다시 만들 필요가 없다(isaacsim.core.nodes OgnIsaacCreateRenderProduct.compute).
+
+    호출자(앱)가 노드 이름을 알 필요는 없다. RP 노드가 없으면(카메라 없이 만든 그래프)
+    ``og.Controller.attribute`` 가 던지므로 호출자가 잡아서 로그한다.
+    """
+    import omni.graph.core as og
+
+    for name, value in (("width", int(width)), ("height", int(height))):
+        og.Controller.attribute(
+            f"{graph_path}/{RENDER_PRODUCT_NODE}.inputs:{name}").set(int(value))
 
 
 def build_moveit_graph(articulation_root: str) -> str:

@@ -280,8 +280,11 @@ DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20
 
 # mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
 # optical_frame = 카메라 몸체 앞면(body_face). CAD 실측 flange+141.0mm.
-# ⚠️ 하드웨어 상수 — 튜닝 대상이 아니다. 실제 값은 URDF(camera_optical_joint)가 소유하고,
-#    이 상수는 문서/계산 참고용 사본이다. 바꾸려면 URDF·USD 를 함께 고쳐야 한다.
+# ⚠️ 하드웨어 상수 — 튜닝 대상이 아니다. 기하를 실제로 만드는 것은 URDF(camera_optical_joint)와
+#    USD 지만, 이 상수는 **참고용 사본이 아니다**: 바로 아래 CAMERA_MIN_WORKING_DISTANCE_MM
+#    (WD 검증 하한)과 CAMERA_NEAR_CLIP_M(렌더 near clip)이 여기서 파생된다. 셋이 어긋나면
+#    검증과 렌더가 로봇과 다른 카메라를 가정하게 된다.
+#    바꿀 때는 URDF·USD·이 상수를 함께 — 체크리스트는 docs/reference/robot-camera-assets.md.
 TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.141
 
 # flange → 렌즈 배럴 끝 (CAD 실측, docs/reference/camera-geometry.md §A).

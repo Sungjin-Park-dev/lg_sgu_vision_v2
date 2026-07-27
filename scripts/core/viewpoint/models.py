@@ -61,6 +61,30 @@ class ViewpointData:
     def count(self) -> int:
         return int(len(self.positions))
 
+    # 저장은 m, 카메라 스펙의 표기 단위는 mm(h5 metadata/camera_spec, GUI 입력칸, config
+    # 상수가 전부 mm)다. 그 경계를 여기 세 property 로 모아 둔다 — 없으면 읽는 쪽마다
+    # ``* 1000.0`` 이 붙는다.
+    @property
+    def working_distance_mm(self) -> float:
+        return self.working_distance_m * 1000.0
+
+    @property
+    def fov_width_mm(self) -> float:
+        return self.fov_width_m * 1000.0
+
+    @property
+    def fov_height_mm(self) -> float:
+        return self.fov_height_m * 1000.0
+
+    @property
+    def camera_spec(self) -> dict:
+        """h5 ``metadata/camera_spec`` 과 같은 모양 — ``ViewpointGenParams.camera_spec`` 의 읽기 짝."""
+        return {
+            "fov_width_mm": self.fov_width_mm,
+            "fov_height_mm": self.fov_height_mm,
+            "working_distance_mm": self.working_distance_mm,
+        }
+
     @property
     def visit_indices(self) -> np.ndarray:
         """Indices in stored visit order; legacy files fall back to HDF5 order."""

@@ -368,10 +368,10 @@ class TrajectoryStudio:
         if viewpoint is None:
             self.camera_md.content = CAMERA_MD_EMPTY
             return
-        wd_mm = (viewpoint.working_distance_m if wd_m is None else wd_m) * 1000.0
+        wd_mm = viewpoint.working_distance_mm if wd_m is None else wd_m * 1000.0
         self.camera_md.content = (
-            f"**Camera** `FOV {viewpoint.fov_width_m * 1000:.0f}×"
-            f"{viewpoint.fov_height_m * 1000:.0f} mm` · `WD {wd_mm:.0f} mm` — from h5"
+            f"**Camera** `FOV {viewpoint.fov_width_mm:.0f}×"
+            f"{viewpoint.fov_height_mm:.0f} mm` · `WD {wd_mm:.0f} mm` — from h5"
         )
 
     def _log(self, line: str):
