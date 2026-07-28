@@ -755,25 +755,21 @@ class PipelineWindow:
         # ONE editable camera spec (mm) shared by both inspection cameras. 프리뷰 고스트와
         # 실 로봇은 같은 물리 카메라의 두 표현이라, 스펙이 갈리면 프리뷰가 실제와 다른 화각을
         # 보여주는 거짓말이 된다. 편집하면 두 카메라의 USD intrinsic 에 같이 적용되고,
-        # 뷰포트가 되밀어오면 그것도 공유 스펙으로 흡수한다(_poll_camera_specs).
-        # viewpoint h5 의 metadata/camera_spec 스냅샷이 로드되면 그 값으로 맞춰진다.
+        # 공유 default = 로드된 뷰포인트를 만들 때 쓴 카메라 스펙(초기값 + Reset 대상). config
+        # 기본에서 시작해 Show Viewpoints 가 h5 스냅샷으로 갱신한다. UI 입력값 자체는 카메라별로
+        # 분리(테스트용) — preview/execute 에 서로 다른 값을 넣을 수 있다.
         from common import config as _cfg
-        self._cam_spec = {
-            "fov_w": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_WIDTH_MM)),
-            "fov_h": ui.SimpleFloatModel(float(_cfg.CAMERA_FOV_HEIGHT_MM)),
-            "wd": ui.SimpleFloatModel(float(_cfg.CAMERA_WORKING_DISTANCE_MM)),
+        self._cam_spec_default = {
+            "fov_w": float(_cfg.CAMERA_FOV_WIDTH_MM),
+            "fov_h": float(_cfg.CAMERA_FOV_HEIGHT_MM),
+            "wd": float(_cfg.CAMERA_WORKING_DISTANCE_MM),
         }
-        self._cam_spec_updating = False   # suppress apply/redraw on batch/poll set
-        # 그래프 생성 시 config FOV 로 만든 값 — 여기서부터 추적해 바뀔 때만 그래프를 건드린다.
         # _graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다.
         self._graph_path = graph_path
         self._render_resolution = (_cfg.CAMERA_PUBLISH_W, _cfg.CAMERA_PUBLISH_H)
-        for _model in self._cam_spec.values():
-            _model.add_value_changed_fn(lambda *_a: self._on_camera_spec_changed())
-        # 시각화(Show FOV / Show Camera Range)만 카메라별로 남는다 — 서로 다른 로봇 루트
-        # 아래에 그리기 때문이다.
         #   preview -> InspectionCameraPreview (ghost, Preview panel)
         #   execute -> InspectionCamera        (real robot, Execute panel)
+        # 각 타깃은 자기만의 스펙 모델을 갖는다(_make_cam_target).
         self._cam_targets = {
             "preview": self._make_cam_target("preview", "InspectionCameraPreview", GHOST_ROOT_PATH),
             "execute": self._make_cam_target("execute", "InspectionCamera", urctl.STAGE_PATH),
@@ -1200,8 +1196,8 @@ class PipelineWindow:
                 with ui.HStack(height=28, spacing=6):
                     self._lock(ui.Button("Show Viewpoints", clicked_fn=self._on_show_viewpoints))
                     self._lock(ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints))
-                # 두 카메라가 공유하는 스펙. Show Viewpoints 가 h5 스냅샷으로 채워준다.
-                self._build_camera_spec_fields()
+                # 카메라 스펙 입력은 Preview / Execute 패널로 옮겼다. Show Viewpoints 는
+                # 여전히 h5 스냅샷으로 그 공유 스펙을 채워준다(_sync_camera_spec_from_h5).
 
     def _build_panel_generate(self):
         ui = self._ui
@@ -1637,39 +1633,42 @@ class PipelineWindow:
         return None
 
     def _make_cam_target(self, key, camera_name, root_path):
-        """Per-camera visualization state. 스펙 모델(fov_w/fov_h/wd)은 self._cam_spec 을
-        공유 참조한다 — 두 카메라는 같은 물리 카메라의 두 표현이라 스펙이 갈릴 이유가 없다."""
-        return {
+        """Per-camera state incl. its OWN spec models (UI 입력값은 카메라별 분리; 기본값만
+        공유 default 에서 시작). 편집하면 이 카메라만 갱신한다(_on_camera_spec_changed(key))."""
+        ui = self._ui
+        d = self._cam_spec_default
+        t = {
             "key": key,
             "camera": camera_name,        # InspectionCamera / InspectionCameraPreview
             "root": root_path,            # robot root the camera lives under
-            "fov_w": self._cam_spec["fov_w"],
-            "fov_h": self._cam_spec["fov_h"],
-            "wd": self._cam_spec["wd"],
+            "fov_w": ui.SimpleFloatModel(float(d["fov_w"])),
+            "fov_h": ui.SimpleFloatModel(float(d["fov_h"])),
+            "wd": ui.SimpleFloatModel(float(d["wd"])),
             "fov_on": False,
             "range_on": False,
             "btn_fov": None,
             "btn_range": None,
             "cam_prim_path": None,        # cached camera prim path
+            "updating": False,            # suppress apply/redraw on batch set
         }
-
-    def _build_camera_spec_fields(self):
-        """공유 카메라 스펙 입력칸. 두 카메라가 같은 값을 쓰므로 한 번만 만든다."""
-        ui = self._ui
-        with ui.HStack(height=22, spacing=6):
-            ui.Label("FOV W", width=44)
-            self._lock(ui.FloatField(model=self._cam_spec["fov_w"], width=60))
-            ui.Label("FOV H", width=44)
-            self._lock(ui.FloatField(model=self._cam_spec["fov_h"], width=60))
-            ui.Label("WD", width=24)
-            self._lock(ui.FloatField(model=self._cam_spec["wd"], width=60))
-            self._lock(ui.Button(
-                "Reset", width=64, clicked_fn=lambda: self._on_reset_camera_spec()))
+        for fld in ("fov_w", "fov_h", "wd"):
+            t[fld].add_value_changed_fn(lambda *_a, _k=key: self._on_camera_spec_changed(_k))
+        return t
 
     def _build_camera_view_ui(self, key):
-        """카메라별 시각화 토글. 스펙은 공유지만 그리는 위치(로봇 루트)가 달라 각자 필요하다."""
+        """카메라별 스펙 입력 + 시각화 토글. 입력값은 이 카메라만의 모델(분리, 테스트용),
+        Reset 은 공유 default(로드된 뷰포인트 값)로 되돌린다."""
         ui = self._ui
         t = self._cam_targets[key]
+        with ui.HStack(height=22, spacing=6):
+            ui.Label("FOV W", width=44)
+            self._lock(ui.FloatField(model=t["fov_w"], width=60))
+            ui.Label("FOV H", width=44)
+            self._lock(ui.FloatField(model=t["fov_h"], width=60))
+            ui.Label("WD", width=24)
+            self._lock(ui.FloatField(model=t["wd"], width=60))
+            self._lock(ui.Button(
+                "Reset", width=64, clicked_fn=lambda k=key: self._on_reset_camera_spec(k)))
         with ui.HStack(height=28, spacing=6):
             t["btn_fov"] = self._lock(ui.Button(
                 "Show FOV", clicked_fn=lambda k=key: self._on_toggle_fov(k)))
@@ -1694,6 +1693,79 @@ class PipelineWindow:
             t["cam_prim_path"] = cam_path
             return prim
         return None
+
+    @staticmethod
+    def _lock_camera_prim(prim):
+        """Prevent viewport (mouse) navigation from moving this camera — control
+        is UI-only. Omniverse honours the bool attr omni:kit:cameraLock."""
+        from pxr import Sdf
+        try:
+            a = prim.GetAttribute("omni:kit:cameraLock")
+            if not a or not a.IsValid():
+                a = prim.CreateAttribute("omni:kit:cameraLock", Sdf.ValueTypeNames.Bool)
+            if a.Get() is not True:
+                a.Set(True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _lock_camera_prims(self):
+        """Keep both inspection cameras mouse-locked every frame (idempotent)."""
+        import omni.usd
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+        for key in self._cam_targets:
+            prim = self._find_camera_prim(stage, key)
+            if prim is not None:
+                self._lock_camera_prim(prim)
+
+    @staticmethod
+    def _get_viewport_windows():
+        """All viewport windows, trying both module homes across Kit versions."""
+        import importlib
+        for mod in ("omni.kit.viewport.window", "omni.kit.viewport.utility"):
+            try:
+                fn = getattr(importlib.import_module(mod),
+                             "get_viewport_window_instances", None)
+                if fn is not None:
+                    wins = list(fn())
+                    if wins:
+                        return wins
+            except Exception:  # noqa: BLE001
+                continue
+        return []
+
+    def _lock_inspection_viewports(self, verbose=False):
+        """Keep every viewport showing InspectionCamera / InspectionCameraPreview
+        at a 1:1 render aspect, so the square FOV is shown in full (letterboxed)
+        rather than cropped by a rectangular window — matching the square range
+        rays. Runs every frame; a no-op once square, re-squares on resize."""
+        wins = self._get_viewport_windows()
+        if verbose and not wins:
+            self._append_log("[cam] no viewport windows found (API unavailable)")
+        for win in wins:
+            vp = getattr(win, "viewport_api", None)
+            if vp is None:
+                continue
+            cp = getattr(vp, "camera_path", None)
+            res = getattr(vp, "resolution", None)
+            cp_s = str(cp) if cp is not None else ""
+            is_insp = (cp_s.endswith("/InspectionCamera")
+                       or cp_s.endswith("/InspectionCameraPreview"))
+            if verbose:
+                self._append_log(f"[cam] viewport cam={cp_s or '?'} res={res} insp={is_insp}")
+            if not is_insp or not res or not res[0] or not res[1]:
+                continue
+            w, h = int(res[0]), int(res[1])
+            if w != h:
+                n = max(w, h)
+                try:
+                    vp.resolution = (n, n)
+                    if verbose:
+                        self._append_log(f"[cam] locked {cp_s} → {n}x{n}")
+                except Exception as e:  # noqa: BLE001
+                    if verbose:
+                        self._append_log(f"[cam] set resolution failed: {e}")
 
     def _delete_fov_plane(self, key, log):
         import omni.usd
@@ -1757,35 +1829,6 @@ class PipelineWindow:
         # near(0.01) 가 남아 있으면 화면이 자기 렌즈 배럴로 가득 찬다.
         cam.GetClippingRangeAttr().Set(
             Gf.Vec2f(float(_config.CAMERA_NEAR_CLIP_M), float(_config.CAMERA_FAR_CLIP_M)))
-
-    def _poll_camera_specs(self):
-        """Viewport → UI: 카메라의 살아있는 intrinsic 을 공유 스펙으로 흡수한다
-        (마우스 줌이 숫자에 반영되도록).
-
-        스펙이 하나뿐이므로, 벌어진 값을 발견하면 그걸 공유 스펙으로 채택하고 **두 카메라에
-        도로 적용**한다. 그러면 다음 프레임엔 둘이 다시 같아져 서로 밀치며 깜빡이지 않는다.
-        """
-        import omni.usd
-        from pxr import UsdGeom
-
-        stage = omni.usd.get_context().get_stage()
-        if stage is None:
-            return
-        for key in self._cam_targets:
-            prim = self._find_camera_prim(stage, key)
-            if prim is None:
-                continue
-            cam = UsdGeom.Camera(prim)
-            fl = cam.GetFocalLengthAttr().Get()
-            ha = cam.GetHorizontalApertureAttr().Get()
-            va = cam.GetVerticalApertureAttr().Get()
-            if fl is None or ha is None or va is None:
-                continue
-            if (abs(self._cam_spec["wd"].get_value_as_float() - float(fl)) > 1e-3
-                    or abs(self._cam_spec["fov_w"].get_value_as_float() - float(ha)) > 1e-3
-                    or abs(self._cam_spec["fov_h"].get_value_as_float() - float(va)) > 1e-3):
-                self._set_camera_spec_mm(float(ha), float(va), float(fl))
-                return  # 적용이 나머지 카메라도 맞춰준다 — 이번 틱은 여기서 끝
 
     def _tick_camera_ranges(self, dt):
         """Throttled per-frame re-cast so the range rays follow the camera as the
@@ -1950,6 +1993,17 @@ class PipelineWindow:
 
         stage = omni.usd.get_context().get_stage()
         robot_root = self._cam_targets[key]["root"]
+        # Gate on robot visibility so the rays behave like the FOV rectangle
+        # (a child of the frame): the preview ghost is hidden until Load & Preview,
+        # so its range must not show either. The real robot is always visible.
+        root_prim = stage.GetPrimAtPath(robot_root)
+        if (not root_prim or not root_prim.IsValid()
+                or UsdGeom.Imageable(root_prim).ComputeVisibility(Usd.TimeCode.Default())
+                == UsdGeom.Tokens.invisible):
+            self._delete_camera_range(key, log=False)
+            if verbose:
+                self._append_log(f"[range:{key}] robot hidden — Load & Preview first.")
+            return False
         camera_frame = self._find_prim_by_name(
             stage, robot_root, urctl.CAMERA_OPTICAL_FRAME_NAME,
         )
@@ -1974,6 +2028,13 @@ class PipelineWindow:
 
         M = UsdGeom.Xformable(camera_frame).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         origin = np.array(list(M.Transform(Gf.Vec3d(0.0, 0.0, 0.0))), dtype=np.float64)
+        # Match the ray grid to the aspect of the viewport actually showing this
+        # camera: a non-square window conforms the square aperture and crops the
+        # top/bottom (or sides), so the full square would put rays outside the
+        # real view. When no such viewport exists, use the full aperture.
+        # Full square FOV. The inspection viewports are locked to a 1:1 render
+        # aspect (_lock_inspection_viewports), so the camera view shows the whole
+        # square (letterboxed) and matches these rays instead of cropping it.
         gx = np.linspace(-fov_w_m * 0.5, fov_w_m * 0.5, CAMERA_RANGE_GRID)
         gy = np.linspace(-fov_h_m * 0.5, fov_h_m * 0.5, CAMERA_RANGE_GRID)
         dirs = []
@@ -2052,42 +2113,37 @@ class PipelineWindow:
         else:
             t["range_on"] = True
             self._range_trimesh = None  # re-extract object geometry fresh
+            self._lock_inspection_viewports(verbose=True)  # diag: what viewports/res
             self._draw_camera_range_rays(key, verbose=True)
             if t["btn_range"] is not None:
                 t["btn_range"].text = "Hide Camera Range"
 
-    def _on_camera_spec_changed(self):
-        """공유 스펙이 바뀌면 두 카메라의 intrinsic 과 켜져 있는 시각화를 모두 갱신한다.
-
-        _cam_spec_updating 가드는 프로그램이 넣은 값(h5 동기화/뷰포트 폴링/Reset)을 걸러낸다 —
-        그쪽은 이미 _set_camera_spec_mm 이 한 번에 적용하므로 여기서 또 돌면 중복이다.
-        """
-        if self._cam_spec_updating:
+    def _on_camera_spec_changed(self, key):
+        """이 카메라 스펙이 바뀌면 그 카메라의 intrinsic + 켜진 시각화만 갱신한다.
+        UI 입력값은 카메라별 분리라 다른 카메라는 안 건드린다."""
+        t = self._cam_targets[key]
+        if t["updating"]:
             return
-        self._apply_camera_spec_to_all()
-
-    def _apply_camera_spec_to_all(self):
-        for key, t in self._cam_targets.items():
-            self._apply_camera_spec_to_camera(key)
-            if t["fov_on"]:
-                self._draw_fov_rectangle(key)
-            if t["range_on"]:
-                self._draw_camera_range_rays(key)
-        self._apply_render_resolution()
+        self._apply_camera_spec_to_camera(key)
+        if t["fov_on"]:
+            self._draw_fov_rectangle(key)
+        if t["range_on"]:
+            self._draw_camera_range_rays(key)
+        if key == "execute":
+            self._apply_render_resolution()
 
     def _apply_render_resolution(self):
-        """ROS 렌더 프로덕트 해상도를 FOV 종횡비에 맞춘다.
+        """ROS 렌더 프로덕트 해상도를 실 카메라(execute)의 FOV 종횡비에 맞춘다.
 
         USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산하므로(verticalAperture 는
         사실상 무시), 해상도 비율이 FOV 비율과 다르면 퍼블리시 이미지가 FOV_H 를 덮지 않는다.
-
-        해상도를 어떻게 미는지(그래프 노드 이름 포함)는 그래프를 만든 쪽이 안다 —
-        여기서는 urctl.set_render_resolution 에 맡긴다.
+        렌더 프로덕트는 실 카메라(InspectionCamera) 것이므로 execute 스펙을 쓴다.
         """
         from common import config as _config
 
-        fov_w_mm = float(self._cam_spec["fov_w"].get_value_as_float())
-        fov_h_mm = float(self._cam_spec["fov_h"].get_value_as_float())
+        t = self._cam_targets["execute"]
+        fov_w_mm = float(t["fov_w"].get_value_as_float())
+        fov_h_mm = float(t["fov_h"].get_value_as_float())
         if fov_w_mm <= 0.0 or fov_h_mm <= 0.0:
             return
         wh = _config.publish_resolution(fov_w_mm, fov_h_mm)
@@ -2103,40 +2159,53 @@ class PipelineWindow:
             f"[cam] render product -> {wh[0]}x{wh[1]} "
             f"(FOV {fov_w_mm:.0f}x{fov_h_mm:.0f} mm)")
 
-    def _set_camera_spec_mm(self, fov_w_mm, fov_h_mm, wd_mm):
-        """공유 스펙 세 필드를 한 번에 설정한다(적용/재그리기는 세 번이 아니라 한 번)."""
-        self._cam_spec_updating = True
+    def _set_camera_spec_mm(self, key, fov_w_mm, fov_h_mm, wd_mm):
+        """한 카메라의 스펙 세 필드를 한 번에 설정(적용/재그리기 한 번)."""
+        t = self._cam_targets[key]
+        t["updating"] = True
         try:
-            self._cam_spec["fov_w"].set_value(float(fov_w_mm))
-            self._cam_spec["fov_h"].set_value(float(fov_h_mm))
-            self._cam_spec["wd"].set_value(float(wd_mm))
+            t["fov_w"].set_value(float(fov_w_mm))
+            t["fov_h"].set_value(float(fov_h_mm))
+            t["wd"].set_value(float(wd_mm))
         finally:
-            self._cam_spec_updating = False
-        self._apply_camera_spec_to_all()
+            t["updating"] = False
+        self._apply_camera_spec_to_camera(key)
+        if t["fov_on"]:
+            self._draw_fov_rectangle(key)
+        if t["range_on"]:
+            self._draw_camera_range_rays(key)
+        if key == "execute":
+            self._apply_render_resolution()
 
-    def _on_reset_camera_spec(self):
-        """공유 카메라 스펙을 config 기본값으로 되돌린다."""
-        from common import config as _config
-        self._set_camera_spec_mm(
-            _config.CAMERA_FOV_WIDTH_MM,
-            _config.CAMERA_FOV_HEIGHT_MM,
-            _config.CAMERA_WORKING_DISTANCE_MM,
-        )
-        self._append_log("[cam] reset to config defaults")
+    def _on_reset_camera_spec(self, key):
+        """이 카메라 스펙을 공유 default(로드된 뷰포인트를 만들 때 쓴 값)로 되돌린다."""
+        d = self._cam_spec_default
+        self._set_camera_spec_mm(key, d["fov_w"], d["fov_h"], d["wd"])
+        self._append_log(
+            f"[cam:{key}] reset to viewpoint default "
+            f"(FOV {d['fov_w']:.0f}x{d['fov_h']:.0f} mm, WD {d['wd']:.0f} mm)")
 
     def _sync_camera_spec_from_h5(self, h5_path: str):
-        """공유 스펙을 viewpoint h5 의 스냅샷으로 맞춘다(그 viewpoint 세트의 기본값). Best-effort."""
+        """공유 default 를 viewpoint h5 스냅샷으로 갱신하고 두 카메라를 그 값으로 맞춘다.
+        (이후 사용자가 카메라별로 다르게 편집 가능.) Best-effort."""
         try:
             from core.viewpoint.storage import load_viewpoints_hdf5
             vp = load_viewpoints_hdf5(h5_path)
         except Exception as e:  # noqa: BLE001 — snapshot is best-effort
             self._append_log(f"[cam] could not read camera spec from h5: {e}")
             return
-        self._set_camera_spec_mm(
-            vp.fov_width_mm, vp.fov_height_mm, vp.working_distance_mm)
+        self._cam_spec_default = {
+            "fov_w": float(vp.fov_width_mm),
+            "fov_h": float(vp.fov_height_mm),
+            "wd": float(vp.working_distance_mm),
+        }
+        for key in self._cam_targets:
+            self._set_camera_spec_mm(
+                key, self._cam_spec_default["fov_w"],
+                self._cam_spec_default["fov_h"], self._cam_spec_default["wd"])
         self._append_log(
-            f"[cam] spec <- snapshot {vp.fov_width_mm:.1f}x"
-            f"{vp.fov_height_mm:.1f} mm @ WD={vp.working_distance_mm:.1f} mm"
+            f"[cam] default <- snapshot {vp.fov_width_mm:.1f}x"
+            f"{vp.fov_height_mm:.1f} mm @ WD={vp.working_distance_mm:.1f} mm (both cameras)"
         )
 
     @staticmethod
@@ -2831,15 +2900,16 @@ class PipelineWindow:
         self._ctrl_runner.pump()
         self._relay_runner.pump()
         self._sim_executor.step(dt)
-        # Viewport → UI: reflect mouse-driven camera intrinsic changes in the
-        # spec fields. Best-effort; never let it break the frame loop.
-        try:
-            self._poll_camera_specs()
-        except Exception:  # noqa: BLE001
-            pass
         # Live camera-range rays: re-cast so they follow the moving camera.
         try:
             self._tick_camera_ranges(dt)
+        except Exception:  # noqa: BLE001
+            pass
+        # Keep inspection-camera viewports square so the full FOV is shown, and
+        # keep the cameras mouse-locked (UI-only control).
+        self._lock_inspection_viewports()
+        try:
+            self._lock_camera_prims()
         except Exception:  # noqa: BLE001
             pass
         # While a trajectory is executing, lock BOTH mode combos so the user
