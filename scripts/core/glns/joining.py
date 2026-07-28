@@ -115,7 +115,7 @@ def resample_seam(q_from, q_to, seam_wp, *, robot_cfg, world_config, reconfig_ra
 
 def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
                      spacing, reconfig_rad, enable_via_ladder, home_bracket,
-                     order_strategy, out_csv, motion_planner=None):
+                     order_strategy, out_csv, motion_planner=None, meta=None):
     """충돌-free 성분들을 순서최적화 + seam transit + HOME 브래킷으로 한 궤적으로 stitch.
 
     seam(via-home 포함)이 하나라도 실패하면 ``SeamFailure`` — 성분을 조용히 드롭하지 않는다.
@@ -173,7 +173,7 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     joined_traj, joined_is_transit = PT.stitch_trajectory_pieces(pieces, masks)
     gate = collision_gate_and_save(
         joined_traj, joined_is_transit, robot_cfg=robot_cfg,
-        world_config=world_config, out_csv=out_csv,
+        world_config=world_config, out_csv=out_csv, meta=meta,
     )
     return {
         "order": [o["cid"] for o in oriented],
@@ -196,9 +196,9 @@ def plan_home_transitions(scan_traj, home_q, *, robot_cfg, world_config, wd_m,
     home = np.asarray(home_q, dtype=np.float64)
     specs = [
         ("approach", (home, scan[0]), "HOME→scan-start",
-         "glns_trajectory_home_to_start"),
+         "trajectory_home_to_start"),
         ("return", (scan[-1], home), "scan-end→HOME",
-         "glns_trajectory_end_to_home"),
+         "trajectory_end_to_home"),
     ]
     if transitions not in {"both", "approach", "return"}:
         raise ValueError(f"unknown HOME transition selection: {transitions}")

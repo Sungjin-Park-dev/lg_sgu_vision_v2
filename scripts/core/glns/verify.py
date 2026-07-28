@@ -5,33 +5,32 @@
 순서를 성분별로 고르지만, **각 viewpoint 의 정적 자세 충돌**만 검사하고 viewpoint
 사이의 **이동(motion)** 은 계획·충돌검사하지 않는다.
 
-이 도구는 그 GLNS 결과(``glns_result_*.h5``)를 받아, **성분마다 독립적으로** GLNS 가 고른
-joint 순서(``selected_joints``)를 ``trajectory/cli.py`` 의 Phase 4-6
-(reconfig transit 계획 → densify 충돌검증 → uniform resample → FK/시간 → CSV)에 그대로
-흘려보내 "충돌을 고려하면 이 경로가 실제로 실행 가능한가"를 확인한다.
+이 도구는 그 GLNS 결과(``solution.h5``)를 받아, **성분마다 독립적으로** GLNS 가 고른
+joint 순서(``selected_joints``)를 공유 모션 기계
+(``trajectory/motion.py`` 의 reconfig transit 계획 → ``trajectory/gating.py`` 의 densify
+충돌검증 → uniform resample → FK/시간 → CSV)에 그대로 흘려보내 "충돌을 고려하면 이 경로가
+실제로 실행 가능한가"를 확인한다.
 
-두 도구는 같은 collision world / robot config / wrist_3 lock 값을 쓰므로(둘 다
-``plan_trajectory`` 를 import), GLNS 에서 충돌-free 였던 자세는 여기서도 충돌-free 다 —
-검증 대상은 오직 자세 사이의 이동이다.
-
-plan_trajectory 는 일체 수정하지 않고 라이브러리로 재사용한다(solve_glns_path 와 동일 패턴).
+solve 와 verify 는 같은 collision world / robot config 를 쓰므로(둘 다 ``core.trajectory`` 를
+import), GLNS 에서 충돌-free 였던 자세는 여기서도 충돌-free 다 — 검증 대상은 오직 자세 사이의
+이동이다. 공유 모듈은 수정하지 않고 라이브러리로만 재사용한다.
 
 ``--join``(기본 on)이면 충돌-free 성분들을 하나의 연속 실행 궤적으로 잇는다: 방문 순서·방향을
 viewpoint component 간 seam 거리(joint L∞)로만 최적화하고 ``_stitch_pieces``로
 봉합한다. HOME 접근/복귀는 기본적으로 별도 계획하며, ``--home-bracket``을 명시한
-경우에만 양 끝에 붙인다. seam 은 절대 조용히 드롭하지 않고
-실패 시 hard-error(``glns_trajectory_joined.csv/.npz`` 미생성). 각 성분의 resample/drop 은
-성분 내부로 한정돼(``interpolate_and_resample`` 의 "최장 run keep" 이 성분 경계를 넘지 못함).
+경우에만 양 끝에 붙인다. seam 은 절대 조용히 드롭하지 않고 실패 시 hard-error
+(``trajectory.csv/.npz`` 미생성). 각 성분의 resample/drop 은 성분 내부로 한정돼
+(``interpolate_and_resample`` 의 "최장 run keep" 이 성분 경계를 넘지 못함).
 
 실행:
     uv run --no-sync scripts/core/glns/verify.py \
-        --result data/sample/ik/74/glns_result_YYYYMMDD_HHMMSS.h5 [--join] [--order optimized]
+        --result data/sample/trajectory/74/solution.h5 [--join] [--order optimized]
 
-성분별 trajectory CSV 는 결과 h5 와 같은 디렉토리에 ``glns_trajectory_comp{cid}.csv`` 로
-저장된다(DP 의 ``trajectory_*.csv`` 와 구분). 같은 자리에 ``glns_trajectory_comp{cid}.npz``
-(joints/ee_positions/is_transit/times)도 저장돼 ``trajectory_studio.py`` 가 transit 포함 실제
-motion 을 재생할 수 있다. ``--join`` 결과는 ``glns_trajectory_joined.csv/.npz`` (동일 스키마).
-충돌이 검출된 성분은 CSV/npz 를 쓰지 않고 FAIL 로 보고한다.
+**출력은 joined 하나다** — ``trajectory.csv`` + ``trajectory.npz``
+(joints/ee_positions/is_transit/times/meta)로, ``trajectory_studio.py`` 가 transit 포함 실제
+motion 을 재생한다. 성분별 중간 궤적은 메모리에만 두고 파일로 남기지 않는다(표로만 보고).
+viewpoint 1개짜리 성분도 join 에 포함한다 — 예전에는 건너뛰어 조용히 빠졌다.
+충돌이 검출되면 CSV/npz 를 쓰지 않고 FAIL 로 보고한다.
 """
 
 from __future__ import annotations
@@ -78,7 +77,7 @@ def _parse_args() -> argparse.Namespace:
                     "collision-aware transit/verify/resample stage, per component.",
     )
     parser.add_argument("--result", type=Path, required=True,
-                        help="GLNS result HDF5 (data/{object}/ik/{N}/glns_result_*.h5)")
+                        help="GLNS 해 HDF5 (data/{object}/trajectory/{N}/solution.h5)")
     parser.add_argument("--object", default=None,
                         help="Object name override (default: read from result attrs)")
     parser.add_argument("--spacing", type=float, default=PT.DEFAULT_SPACING_M,
@@ -90,7 +89,7 @@ def _parse_args() -> argparse.Namespace:
                              "드롭(viewpoint skip). graph-direct 만으로 도는지 확인용")
     parser.add_argument("--join", action=argparse.BooleanOptionalAction, default=True,
                         help="충돌-free 성분들을 seam transit으로 하나의 연속 "
-                             "scan 궤적(glns_trajectory_joined.csv)으로 연결 (default: on)")
+                             "scan 궤적(trajectory.csv)으로 연결 (default: on)")
     parser.add_argument("--order", choices=("optimized", "fixed"), default="optimized",
                         help="성분 방문 순서: optimized(seam 거리 최소) / fixed(id 순서). default optimized")
     parser.add_argument("--home-bracket", action=argparse.BooleanOptionalAction,
@@ -98,10 +97,10 @@ def _parse_args() -> argparse.Namespace:
                         help="joined 궤적 양 끝에 HOME 접근/복귀를 붙임 "
                              "(default: off; use separate HOME transition planning)")
     parser.add_argument("--require-full-coverage", action="store_true",
-                        help="fail a component and joined output if any viewpoint is skipped")
+                        help="joined 가 전체 viewpoint 를 덮지 못하면 실패 처리(성분 통째 누락 포함)")
     parser.add_argument("--home-transitions-only", action="store_true",
                         help="plan HOME→scan-start and scan-end→HOME from an existing "
-                             "glns_trajectory_joined.npz, without replanning the scan")
+                             "trajectory.npz, without replanning the scan")
     parser.add_argument("--home-transition", choices=("both", "approach", "return"),
                         default="both",
                         help="with --home-transitions-only, plan both legs or only "
@@ -204,10 +203,33 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
     }
 
 
+def _singleton_component(component):
+    """viewpoint 1개짜리 성분 → 자명한 1행 세그먼트.
+
+    이을 edge 가 없어 계획할 것이 없지만 **방문은 해야 한다.** 예전에는 `n_members < 2` 를
+    통째로 건너뛰어 그 viewpoint 가 joined 에서 빠졌고, `--require-full-coverage` 도 그걸
+    잡지 못했다(Delaunay 고립 정점이 있는 물체에서 발생). 여기서 1행 세그먼트로 만들어
+    join 에 넘기면 seam transit 이 앞뒤를 이어준다.
+    """
+    selected = np.asarray(component["selected_joints"], dtype=np.float64).reshape(1, -1)
+    return {
+        "M": 1, "covered": 1, "dropped": [], "n_runs": 1,
+        "reconfig_req": 0, "transit_req": 0, "transit_ok": 0,
+        "collision_fallback_req": 0, "collision_fallback_ok": 0,
+        "n_collisions": 0, "collision_free": True,
+        # 한 자세에 머무르는 구간이라 소요 시간이 없다. 충돌 검사는 joined 게이트가 한다.
+        "total_time": 0.0, "transit_time": 0.0, "n_waypoints": 1,
+        "reconfig_mismatch": 0, "csv": None,
+        "final_traj": selected,
+        "final_is_transit": np.zeros(1, dtype=bool),   # scan point (transit 아님)
+        "entry": selected[0].copy(), "exit": selected[0].copy(),
+    }
+
+
 def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
-                      spacing, out_csv, enable_via_ladder=True,
+                      spacing, out_csv=None, enable_via_ladder=True,
                       require_full_coverage=False, motion_planner=None):
-    """한 성분을 Phase 4-6 으로 검증(per-component CSV/npz 기록). 결과 dict 반환."""
+    """한 성분을 Phase 4-6 으로 검증. ``out_csv=None`` 이면 파일을 쓰지 않는다."""
     pr = _plan_and_resample_component(
         component, robot_cfg=robot_cfg, world_config=world_config,
         reconfig_rad=reconfig_rad, wd_m=wd_m,
@@ -227,8 +249,9 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "entry": None, "exit": None, "error": pr["error"],
         }
     if require_full_coverage and pr["dropped"]:
-        Path(out_csv).unlink(missing_ok=True)
-        Path(out_csv).with_suffix(".npz").unlink(missing_ok=True)
+        if out_csv is not None:
+            Path(out_csv).unlink(missing_ok=True)
+            Path(out_csv).with_suffix(".npz").unlink(missing_ok=True)
         return {
             "M": pr["M"], "covered": pr["covered"], "dropped": pr["dropped"],
             "n_runs": pr["n_runs"], "reconfig_req": pr["reconfig_req"],
@@ -300,7 +323,7 @@ def main() -> int:
 
     scan_joints = None
     if args.home_transitions_only:
-        scan_npz = out_dir / "glns_trajectory_joined.npz"
+        scan_npz = out_dir / "trajectory.npz"
         if not scan_npz.exists():
             print(f"HOME TRANSITIONS FAILED: scan trajectory not found: {scan_npz}")
             return 2
@@ -336,6 +359,7 @@ def main() -> int:
 
     rows = []
     join_inputs = []   # 충돌-free 성분(joined 대상): final_traj/endpoints
+    joined_cids = set()   # 실제로 joined 에 들어간 성분 — 전역 커버리지 판정의 기준
     for component in result["components"]:
         cid = component["name"]
         status = component["status"]
@@ -347,19 +371,21 @@ def main() -> int:
             print(f"    SKIP — {status}: {component.get('reason', '')}")
             rows.append((cid, status, n_members, None))
             continue
-        if n_members < 2:
-            print("    SKIP — fewer than 2 viewpoints (no path to verify)")
-            rows.append((cid, "too_short", n_members, None))
-            continue
 
-        out_csv = out_dir / f"glns_trajectory_comp{cid}.csv"
-        res = _verify_component(
-            component, robot_cfg=robot_cfg, world_config=world_config,
-            reconfig_rad=reconfig_rad, wd_m=wd_m,
-            spacing=args.spacing, out_csv=out_csv, enable_via_ladder=not args.no_via,
-            require_full_coverage=args.require_full_coverage,
-            motion_planner=motion_planner,
-        )
+        if n_members < 2:
+            # 이을 edge 는 없지만 방문은 해야 한다 — 건너뛰면 joined 에서 조용히 사라진다.
+            res = _singleton_component(component)
+            print("    single viewpoint — 계획할 edge 없음, join 에 그대로 포함")
+        else:
+            # 성분별 CSV/npz 는 쓰지 않는다(out_csv=None). join 은 메모리의 final_traj 를
+            # 쓰고, 실행용 산출물은 joined 하나면 충분하다.
+            res = _verify_component(
+                component, robot_cfg=robot_cfg, world_config=world_config,
+                reconfig_rad=reconfig_rad, wd_m=wd_m,
+                spacing=args.spacing, enable_via_ladder=not args.no_via,
+                require_full_coverage=args.require_full_coverage,
+                motion_planner=motion_planner,
+            )
         rows.append((cid, "solved", n_members, res))
 
         if res.get("error"):
@@ -385,7 +411,7 @@ def main() -> int:
               f"{res['n_waypoints']} waypoints{time_note}{drop_note}")
         print(f"    → {verdict}")
         if res["collision_free"]:
-            print(f"    CSV: {res['csv']}")
+            joined_cids.add(cid)
             join_inputs.append({
                 "cid": cid, "final_traj": res["final_traj"],
                 "final_is_transit": res["final_is_transit"],
@@ -400,8 +426,10 @@ def main() -> int:
           f"{'recfg':>6} {'transit':>8} {'coll':>5} {'time(s)':>8}")
     solved_total = 0
     solved_clean = 0
-    any_dropped = False
+    expected_total = 0     # 모든 성분의 viewpoint 합 (= reachable 총합)
+    covered_total = 0      # joined 에 실제로 들어간 viewpoint 합
     for cid, status, n_members, res in rows:
+        expected_total += n_members
         if res is None:
             print(f"{cid:>4} {status:>10} {n_members:>4} {'-':>6} {'-':>5} "
                   f"{'-':>6} {'-':>8} {'-':>5} {'-':>8}")
@@ -409,8 +437,8 @@ def main() -> int:
         solved_total += 1
         if res["collision_free"]:
             solved_clean += 1
-        if res["dropped"]:
-            any_dropped = True
+        if cid in joined_cids:
+            covered_total += res["covered"]
         coll = "0" if res["collision_free"] else str(res["n_collisions"])
         tstr = f"{res['total_time']:.1f}" if res["collision_free"] else "-"
         print(f"{cid:>4} {status:>10} {res['M']:>4} {res['covered']:>6} "
@@ -422,26 +450,46 @@ def main() -> int:
     headline = "YES" if all_clean else "NO"
     print(f"All solved components collision-free: {headline} "
           f"({solved_clean}/{solved_total})")
-    if any_dropped:
-        print("NOTE: 일부 viewpoint 가 드롭됨 — 해당 성분의 GLNS 경로가 충돌-aware 이동에서 "
-              "완전히 보존되지 못했다(연속 scan edge 충돌 또는 transit 계획 실패).")
+    # 커버리지는 **성분 단위가 아니라 viewpoint 단위 전역**으로 센다. 성분 하나가 통째로
+    # 빠져도(못 푼 성분, 예전의 1-viewpoint 스킵) 여기서 드러나야 한다.
+    missing_total = expected_total - covered_total
+    print(f"Coverage: {covered_total}/{expected_total} viewpoints"
+          + (f"  ({missing_total} MISSING)" if missing_total else ""))
+    if missing_total:
+        print("NOTE: joined 에 들어가지 못한 viewpoint 가 있다 — 못 푼 성분이거나, 충돌-aware "
+              "이동에서 GLNS 경로가 보존되지 못한 구간(연속 scan edge 충돌/transit 실패)이다.")
     print("=" * 64)
 
-    # --- 성분 연결: 하나의 연속 실행 궤적(glns_trajectory_joined.csv) ---
+    # --- 성분 연결: 하나의 연속 실행 궤적(trajectory.csv) ---
     if args.join:
         print("JOIN COMPONENTS → single continuous trajectory")
         print("-" * 64)
-        if args.require_full_coverage and any_dropped:
-            (out_dir / "glns_trajectory_joined.csv").unlink(missing_ok=True)
-            (out_dir / "glns_trajectory_joined.npz").unlink(missing_ok=True)
-            print("  FAIL — --require-full-coverage: skipped viewpoint detected; joined 미생성.")
+        if args.require_full_coverage and missing_total:
+            (out_dir / "trajectory.csv").unlink(missing_ok=True)
+            (out_dir / "trajectory.npz").unlink(missing_ok=True)
+            print(f"  FAIL — --require-full-coverage: {missing_total} viewpoint(s) "
+                  f"missing from joined ({covered_total}/{expected_total}); 미생성.")
             print("=" * 64)
             return 1
         if not join_inputs:
             print("  연결할 충돌-free 성분이 없음 — joined 미생성.")
             print("=" * 64)
         else:
-            joined_csv = out_dir / "glns_trajectory_joined.csv"
+            joined_csv = out_dir / "trajectory.csv"
+            # 파일명이 더 이상 생성 조건을 담지 않으므로 npz sidecar 에 남긴다
+            # (예전 DP 가 trajectory_dp_ee_s0010_… 로 인코딩하던 정보의 자리).
+            joined_meta = {
+                "source_solution": str(args.result),
+                "object": object_name,
+                "object_position": object_position.tolist(),
+                "object_quat_wxyz": object_quat.tolist(),
+                "working_distance_mm": wd_m * 1000.0,
+                "spacing_m": args.spacing,
+                "reconfig_threshold_deg": reconfig_deg,
+                "order_strategy": args.order,
+                "home_bracket": bool(args.home_bracket),
+                "coverage": [covered_total, expected_total],
+            }
             try:
                 jr = join_components(
                     join_inputs, home_q, robot_cfg=robot_cfg, world_config=world_config,
@@ -449,6 +497,7 @@ def main() -> int:
                     reconfig_rad=reconfig_rad, enable_via_ladder=not args.no_via,
                     home_bracket=args.home_bracket, order_strategy=args.order,
                     out_csv=joined_csv, motion_planner=motion_planner,
+                    meta=joined_meta,
                 )
             except SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} — 가교 불가(via-home 포함). joined 미생성.")
