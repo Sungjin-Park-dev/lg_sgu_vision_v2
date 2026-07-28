@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-"""Unified viser trajectory studio — place object, inspect live IK, generate (DP|GLNS), play back.
+"""Unified viser trajectory studio — place object, inspect live IK, generate (GLNS), play back.
 
 One browser tool that replicates isaac_pipeline.py Panels A/B/C without Isaac Sim:
   (A) Load an object + viewpoints, move the object with a gizmo.
   (B) See the LIVE in-process cuRobo IK distribution as you place it — per-viewpoint
       representative IK branches (green=collision-free / red=collision) and, on "Apply
       pose", an aggregate reachability sweep that recolors every viewpoint green/red.
-  (C) Generate a collision-free trajectory via the GLNS backend (solve + verify --join)
-      OR the DP backend (trajectory/cli.py), then play it back densely (transit=red /
-      scan=green).
+  (C) Solve GLNS, then plan the scan motion (verify --join), then play it back densely
+      (transit=red / scan=green).
 
-The live IK reuses plan_trajectory's robot_cfg / collision world / wrist_3 lock /
-batch_collision_check (via ik_backend.IKBackend), so a viewpoint that shows 0
-collision-free reps here is exactly the one DP/GLNS will drop (cross-validation).
+The live IK reuses the shared robot_cfg / collision world / batch_collision_check
+(via live_ik.IKBackend), so a viewpoint that shows 0 collision-free reps here is exactly
+the one GLNS will drop (cross-validation).
 
-Generation runs the same headless core scripts as a subprocess (isolated cuRobo
-process); GLNS reloads the rich glns_result h5 (Delaunay graph + components + reconfig),
-DP reloads its npz sidecar. Both backends emit {joints, ee_positions, is_transit, times},
-so dense playback is identical.
+생성은 headless 코어 스크립트를 서브프로세스로 돌린다(cuRobo 프로세스 분리). solve 가
+``solution.h5``(Delaunay 그래프 + 성분 + reconfig)를 쓰고, verify 가 그걸 읽어
+``trajectory.csv/.npz``(joints/ee_positions/is_transit/times/meta)를 낸다 — npz 가 dense 재생 소스다.
 
 Publish to the real robot is intentionally NOT here — use isaac_pipeline.py /
 trajectory/publish.py with the generated CSV.
 
 사용법:
     uv run --no-sync scripts/apps/trajectory_studio.py --object sample
-    uv run --no-sync scripts/apps/trajectory_studio.py --result data/sample/ik/74/glns_result_X.h5
+    uv run --no-sync scripts/apps/trajectory_studio.py --result data/sample/trajectory/74/solution.h5
 """
 
 from __future__ import annotations
@@ -152,8 +150,9 @@ class SubprocessRunner:
 
 
 def discover_results() -> dict[str, Path]:
+    """저장된 GLNS 해를 찾는다 — 궤적 산출물과 같은 폴더에 산다."""
     results = {}
-    for path in sorted(PROJECT_ROOT.glob("data/*/ik/*/glns_result*.h5")):
+    for path in sorted(PROJECT_ROOT.glob("data/*/trajectory/*/solution.h5")):
         results[str(path.relative_to(PROJECT_ROOT))] = path.resolve()
     return results
 
@@ -165,7 +164,7 @@ def _component_color(component_id: int) -> tuple[int, int, int]:
 
 
 class TrajectoryStudio:
-    """Object 배치 + 라이브 IK 분포 + DP/GLNS 경로 생성 + dense 재생을 한 viser 앱으로."""
+    """Object 배치 + 라이브 IK 분포 + GLNS 경로 생성 + dense 재생을 한 viser 앱으로."""
 
     def __init__(self, server, objects, initial_object, result_paths, initial_result=None):
         self.server = server
@@ -183,9 +182,9 @@ class TrajectoryStudio:
 
         # ── 상태 ──────────────────────────────────────────────────────────
         self.result = None              # GLNS 결과 dict (rich h5) 또는 None
-        self.result_kind = None         # "glns" | "dp" | None
+        self.result_kind = None         # "glns" | None
         self.result_h5_path = None
-        self.dense_dir = None           # data/{object}/trajectory/{N} (legacy: ik/{N})
+        self.dense_dir = None           # data/{object}/trajectory/{N}
         self.world_poses = None         # (N,4,4) base_link 프레임 카메라 포즈
         self._vp_raw = None             # (positions, normals, wd_m) — 물체 이동 시 재계산
         self._vp_path = None            # 로드된 viewpoints h5 경로 (생성 입력)
@@ -202,8 +201,6 @@ class TrajectoryStudio:
         self.runner = SubprocessRunner()
         self._pending_out = None        # GLNS 결과 h5
         self._pending_kind = None
-        self._pending_npz = None        # DP npz
-        self._pending_csv = None
         self._log_lines = []
         self._src = "target"
         self.layers = {
@@ -251,11 +248,6 @@ class TrajectoryStudio:
             )
             self.reach_md = gui.add_markdown("reachability: (Apply pose)")
         with gui.add_folder("Generate Trajectory"):
-            self.backend_dd = gui.add_dropdown(
-                "Backend",
-                options=["GLNS (solve + verify --join)", "DP (plan_trajectory)"],
-                initial_value="GLNS (solve + verify --join)",
-            )
             with gui.add_folder("GLNS Advanced"):
                 self.expand_hops = gui.add_number(
                     "Delaunay expand hops", initial_value=2, min=1, max=4, step=1,
@@ -275,7 +267,7 @@ class TrajectoryStudio:
                 self.ik_batch_size = gui.add_number(
                     "IK pose batch size", initial_value=128, min=1, max=128, step=1,
                 )
-            self.btn_gen = gui.add_button("1. Solve GLNS / Generate DP")
+            self.btn_gen = gui.add_button("1. Solve GLNS")
             self.btn_motion = gui.add_button("2. Plan scan motion (no HOME)")
             self.btn_motion.disabled = True
             self.metrics_md = gui.add_markdown("metrics: (GLNS result)")
@@ -319,7 +311,6 @@ class TrajectoryStudio:
         self.move_object.on_update(lambda _: self._toggle_gizmo())
         self.btn_gen.on_click(lambda _: self._on_generate())
         self.btn_motion.on_click(lambda _: self._on_plan_motion())
-        self.backend_dd.on_update(lambda _: self._update_motion_button())
         self.load_button.on_click(lambda _: self._load_selected_result_dropdown())
         self.component_dropdown.on_update(lambda _: self._on_component_change())
         self.show_dense.on_update(lambda _: self._on_component_change())
@@ -641,7 +632,7 @@ class TrajectoryStudio:
         self.obj_gizmo.wxyz = rot0.copy()
         self._apply_object_pose()
 
-    # ── 생성 (DP | GLNS) ─────────────────────────────────────────────────────
+    # ── 생성 (GLNS) ──────────────────────────────────────────────────────────
     def _set_buttons_enabled(self, enabled: bool):
         self.btn_gen.disabled = not enabled
         self.btn_apply.disabled = not enabled
@@ -656,9 +647,7 @@ class TrajectoryStudio:
             self.result_kind == "glns" and self.result_h5_path is not None
             and Path(self.result_h5_path).exists()
         )
-        self.btn_motion.disabled = (
-            self.runner.running or not self.backend_dd.value.startswith("GLNS") or not has_result
-        )
+        self.btn_motion.disabled = self.runner.running or not has_result
 
     def _num_viewpoints(self) -> int:
         try:
@@ -666,23 +655,11 @@ class TrajectoryStudio:
         except (ValueError, AttributeError, TypeError):
             return len(self.world_poses) if self.world_poses is not None else 0
 
-    def _glns_trajectory_dir(self, *, legacy_dir=None) -> Path:
-        """Return the DP-compatible output directory for GLNS trajectory artifacts.
-
-        Older Studio versions wrote ``glns_trajectory_*`` beside the GLNS result
-        under ``ik/{N}``.  Prefer the canonical ``trajectory/{N}`` directory, but
-        keep loading legacy artifacts when no canonical artifacts exist yet.
-        """
-        preferred = config.get_trajectory_path(
-            self.object_name, self._num_viewpoints(), "dummy",
+    def _trajectory_dir(self) -> Path:
+        """궤적 산출물 폴더 — 해(solution.h5)와 같은 자리다."""
+        return config.get_solution_path(
+            self.object_name, self._num_viewpoints(),
         ).parent.resolve()
-        if any(preferred.glob("glns_trajectory_*")):
-            return preferred
-        if legacy_dir is not None:
-            legacy = Path(legacy_dir).resolve()
-            if any(legacy.glob("glns_trajectory_*")):
-                return legacy
-        return preferred
 
     def _on_generate(self):
         if self.runner.running:
@@ -694,55 +671,41 @@ class TrajectoryStudio:
         obj = self.object_name
         pos = np.asarray(self.obj_gizmo.position, dtype=float)
         wxyz = np.asarray(self.obj_gizmo.wxyz, dtype=float)
-        spacing = PT.DEFAULT_SPACING_M
         n = self._num_viewpoints()
         vp = str(self._vp_path)
         pos_s = " ".join(f"{v:.6f}" for v in pos)
         quat_s = " ".join(f"{v:.6f}" for v in wxyz)
         # 생성 서브프로세스가 자체 cuRobo 를 띄우기 전에 캐시된 VRAM 반납(co-residency 완화).
         torch.cuda.empty_cache()
-        self._pending_out = self._pending_npz = self._pending_csv = None
+        self._pending_out = None
 
-        if self.backend_dd.value.startswith("GLNS"):
-            hops = max(1, int(round(self.expand_hops.value)))
-            augment = ""
-            if self.roll_augment.value:
-                augment += " --roll-augment"
-            if self.tilt_augment.value:
-                angles = " ".join(str(float(x)) for x in self.tilt_angles.value.split())
-                augment += (f" --tilt-augment --tilt-angles-deg {angles}"
-                            f" --tilt-azimuths {int(round(self.tilt_azimuths.value))}")
-            augment += f" --max-candidates-per-viewpoint {int(round(self.max_candidates.value))}"
-            ik_num_seeds = max(1, int(round(self.ik_num_seeds.value)))
-            ik_batch_size = max(1, int(round(self.ik_batch_size.value)))
-            ik_options = (f" --num-seeds {ik_num_seeds} --ik-batch-size {ik_batch_size}"
-                          f" --ik-seed {PT.IK_RANDOM_SEED}")
-            det_h5 = PROJECT_ROOT / f"data/{obj}/ik/{n}/glns_result_studio.h5"
-            det_h5.parent.mkdir(parents=True, exist_ok=True)
-            shell = (
-                f"uv run --no-sync scripts/core/glns/solve.py "
-                f"--object {obj} --viewpoints '{vp}' "
-                f"--object-position {pos_s} --object-quat {quat_s} "
-                f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
-            )
-            cmd = ["bash", "-c", shell]
-            self._pending_out = det_h5
-            self._pending_kind = "glns_solve"
-            self._log(f"▶ GLNS solve @ pos={np.round(pos, 3).tolist()}, hops={hops}, "
-                      f"seeds={ik_num_seeds}, ik_seed={PT.IK_RANDOM_SEED}, "
-                      f"batch={ik_batch_size} …")
-        else:
-            suffix = "dp"
-            cmd = [
-                "uv", "run", "--no-sync", "scripts/core/trajectory/cli.py",
-                "--object", obj, "--num-viewpoints", str(n),
-                "--viewpoints", vp, "--spacing", str(spacing),
-                "--output-suffix", suffix,
-                "--object-position", *(f"{v:.6f}" for v in pos),
-                "--object-quat", *(f"{v:.6f}" for v in wxyz),
-            ]
-            self._pending_kind = "dp"
-            self._log(f"▶ DP @ pos={np.round(pos, 3).tolist()}, sp={spacing}, suffix={suffix} …")
+        hops = max(1, int(round(self.expand_hops.value)))
+        augment = ""
+        if self.roll_augment.value:
+            augment += " --roll-augment"
+        if self.tilt_augment.value:
+            angles = " ".join(str(float(x)) for x in self.tilt_angles.value.split())
+            augment += (f" --tilt-augment --tilt-angles-deg {angles}"
+                        f" --tilt-azimuths {int(round(self.tilt_azimuths.value))}")
+        augment += f" --max-candidates-per-viewpoint {int(round(self.max_candidates.value))}"
+        ik_num_seeds = max(1, int(round(self.ik_num_seeds.value)))
+        ik_batch_size = max(1, int(round(self.ik_batch_size.value)))
+        ik_options = (f" --num-seeds {ik_num_seeds} --ik-batch-size {ik_batch_size}"
+                      f" --ik-seed {PT.IK_RANDOM_SEED}")
+        det_h5 = config.get_solution_path(obj, n)
+        det_h5.parent.mkdir(parents=True, exist_ok=True)
+        shell = (
+            f"uv run --no-sync scripts/core/glns/solve.py "
+            f"--object {obj} --viewpoints '{vp}' "
+            f"--object-position {pos_s} --object-quat {quat_s} "
+            f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
+        )
+        cmd = ["bash", "-c", shell]
+        self._pending_out = det_h5
+        self._pending_kind = "glns_solve"
+        self._log(f"▶ GLNS solve @ pos={np.round(pos, 3).tolist()}, hops={hops}, "
+                  f"seeds={ik_num_seeds}, ik_seed={PT.IK_RANDOM_SEED}, "
+                  f"batch={ik_batch_size} …")
 
         self._set_buttons_enabled(False)
         self.runner.start(
@@ -769,7 +732,6 @@ class TrajectoryStudio:
         ).parent.resolve()
         torch.cuda.empty_cache()
         self._pending_out = result_path
-        self._pending_npz = self._pending_csv = None
         self._pending_kind = "glns_motion"
         cmd = [
             "uv", "run", "--no-sync", "scripts/core/glns/verify.py",
@@ -791,12 +753,6 @@ class TrajectoryStudio:
         m = re.search(r"GLNS_RESULT_H5\s+(\S+)", line)
         if m:
             self._pending_out = Path(m.group(1))
-        m = re.search(r"NPZ saved to (\S+)", line)
-        if m:
-            self._pending_npz = Path(m.group(1))
-        m = re.search(r"CSV saved to (\S+)", line)
-        if m:
-            self._pending_csv = Path(m.group(1))
 
     def _on_proc_exit(self, rc: int):
         self._log(f"■ exit {rc}")
@@ -824,19 +780,6 @@ class TrajectoryStudio:
                 self.component_dropdown.value = joined
                 self._on_component_change()
             self._log("✓ Scan motion planning 완료 — HOME 제외 joined scan 로드")
-        elif self._pending_kind == "dp":
-            npz = self._pending_npz
-            if npz is None and self._pending_csv is not None:
-                npz = Path(self._pending_csv).with_suffix(".npz")
-            if npz is None or not Path(npz).exists():
-                self._log("✗ DP npz 를 찾지 못함")
-                return
-            dense = self._load_dense_npz(npz)
-            if dense is None:
-                self._log("✗ DP npz 로드 실패")
-                return
-            self._enter_dense_mode(dense, f"DP ({Path(npz).name})")
-            self._log("✓ DP trajectory 로드 — 재생")
 
     # ── GLNS 결과 로드 ───────────────────────────────────────────────────────
     def _source_path(self, metadata: dict) -> Path:
@@ -883,7 +826,7 @@ class TrajectoryStudio:
         self._vp_path = source_path
         # FOV 는 원본 h5, WD 는 solve 당시 metadata(실제로 쓰인 값).
         self._refresh_camera_md(viewpoint, wd_m=wd_m)
-        self.dense_dir = self._glns_trajectory_dir(legacy_dir=path.parent)
+        self.dense_dir = self._trajectory_dir()
         self._reach = None
         self.result = result
         self.result_kind = "glns"
@@ -899,13 +842,13 @@ class TrajectoryStudio:
             label = f"C{name} · {component['status']} · {len(component['members'])} vp"
             options.append(label)
             self.component_by_label[label] = component
-        if self._trajectory_artifact_is_current(self.dense_dir / "glns_trajectory_joined.npz"):
+        if self._trajectory_artifact_is_current(self.dense_dir / "trajectory.npz"):
             options.append("⨝ Scan joined (no HOME)")
         if self._trajectory_artifact_is_current(
-                self.dense_dir / "glns_trajectory_home_to_start.npz"):
+                self.dense_dir / "trajectory_home_to_start.npz"):
             options.append("↗ HOME → Scan start")
         if self._trajectory_artifact_is_current(
-                self.dense_dir / "glns_trajectory_end_to_home.npz"):
+                self.dense_dir / "trajectory_end_to_home.npz"):
             options.append("↘ Scan end → HOME")
         self.component_dropdown.options = options or ["(none)"]
         self.component_dropdown.value = options[0] if options else "(none)"
@@ -991,30 +934,7 @@ class TrajectoryStudio:
                 run += 1
                 start = i
 
-    def _enter_dense_mode(self, dense, label):
-        """DP 결과(또는 임의 dense npz) 재생 모드. GLNS 그래프 컨트롤은 비활성."""
-        self.result = None
-        self.result_kind = "dp"
-        self.current_component = None
-        for name in ("delaunay", "path"):
-            for handle in self.layers[name]:
-                handle.remove()
-            self.layers[name].clear()
-        self.dense = dense
-        self._dense_label = label
-        self.play_position = 0.0
-        self.metrics_md.content = f"metrics: DP dense `{len(dense['joints'])}` wp"
-        self.component_dropdown.options = ["(DP dense)"]
-        self.component_dropdown.value = "(DP dense)"
-        self._build_dense_path()
-        self._make_step_slider(len(dense["joints"]))
-        self._show_step()
-        self._apply_visibility()
-        self._update_motion_button()
-
     def _on_component_change(self):
-        if self.result_kind == "dp":         # DP dense 는 dropdown 을 거치지 않는다
-            return
         for handle in self.layers["path"]:
             handle.remove()
         self.layers["path"].clear()
@@ -1027,7 +947,7 @@ class TrajectoryStudio:
 
         label = self.component_dropdown.value
         if label.startswith("⨝ Scan"):
-            joined_path = self.dense_dir / "glns_trajectory_joined.npz"
+            joined_path = self.dense_dir / "trajectory.npz"
             self.dense = (self._load_dense_npz(joined_path)
                           if self._trajectory_artifact_is_current(joined_path) else None)
             self._dense_label = "Joined (all components)"
@@ -1042,9 +962,9 @@ class TrajectoryStudio:
 
         home_paths = {
             "↗ HOME → Scan start": (
-                "glns_trajectory_home_to_start.npz", "HOME → Scan start"),
+                "trajectory_home_to_start.npz", "HOME → Scan start"),
             "↘ Scan end → HOME": (
-                "glns_trajectory_end_to_home.npz", "Scan end → HOME"),
+                "trajectory_end_to_home.npz", "Scan end → HOME"),
         }
         if label in home_paths:
             filename, dense_label = home_paths[label]
@@ -1067,18 +987,9 @@ class TrajectoryStudio:
             self._make_step_slider(1)
             return
 
-        if self.show_dense.value:
-            dense_path = self.dense_dir / f"glns_trajectory_comp{component['name']}.npz"
-            if self._trajectory_artifact_is_current(dense_path):
-                self.dense = self._load_dense_npz(dense_path)
-        if self.dense is not None:
-            self._dense_label = f"Component {component['name']}"
-            self._build_dense_path()
-            self._make_step_slider(len(self.dense["joints"]))
-            self._show_step()
-            self._apply_visibility()
-            return
-
+        # 성분별 dense 궤적은 더 이상 파일로 남기지 않는다(verify 가 joined 만 쓴다).
+        # 성분 단위 보기는 해(solution.h5)의 selected_joints 로 그리는 이산 경로다 —
+        # dense 로 보려면 위의 "⨝ Scan joined" 를 고른다.
         order = component.get("viewpoint_order")
         if order is None:
             self._make_step_slider(len(component["members"]))
@@ -1210,9 +1121,9 @@ class TrajectoryStudio:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Unified viser trajectory studio (DP|GLNS)")
+    parser = argparse.ArgumentParser(description="Unified viser trajectory studio (GLNS)")
     parser.add_argument("--object", type=str, default=None, help="object name (data/{object}/...)")
-    parser.add_argument("--result", type=Path, default=None, help="optional glns_result*.h5 to open")
+    parser.add_argument("--result", type=Path, default=None, help="optional solution.h5 to open")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8081)
     return parser.parse_args()

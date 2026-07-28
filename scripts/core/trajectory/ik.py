@@ -11,7 +11,7 @@ from curobo.types import GoalToolPose, Pose
 
 from common import config
 from .robot import _tick
-from .settings import DP_CANDIDATE_DEDUP_RAD, IK_RANDOM_SEED
+from .settings import CANDIDATE_DEDUP_RAD, IK_RANDOM_SEED
 
 def normalize_joints(q):
     """Joint angles를 [-π, π] 범위로 정규화. 형상 유지."""
@@ -121,7 +121,8 @@ def cluster_ik_solutions(all_solutions, all_success):
     """viewpoint당 대표 해 추출 — 성공 IK 해에서 near-duplicate만 greedy 제거(모든 분기 보존).
 
     클러스터 medoid(클러스터당 1개)는 이웃과 연속인 분기를 버릴 수 있어, 대신 L∞ fine tolerance
-    (DP_CANDIDATE_DEDUP_RAD)로 거의 동일한 seed만 제거하고 분기를 모두 후보로 남겨 DP가 직접 고른다.
+    (CANDIDATE_DEDUP_RAD)로 거의 동일한 seed만 제거하고 분기를 모두 후보로 남겨
+    순서 최적화(GLNS)가 직접 고르게 한다.
 
     Args:
         all_solutions: (N, S, 6)
@@ -144,14 +145,14 @@ def cluster_ik_solutions(all_solutions, all_success):
         # greedy near-dup 제거: 이미 채택한 해와 L∞ > tol 인 해만 남긴다(분기 보존)
         kept = []
         for s in successful:
-            if all(np.max(np.abs(s - k)) > DP_CANDIDATE_DEDUP_RAD for k in kept):
+            if all(np.max(np.abs(s - k)) > CANDIDATE_DEDUP_RAD for k in kept):
                 kept.append(s)
         representatives.append(np.array(kept))
         total_reps += len(kept)
 
     avg_reps = total_reps / max(N - empty_count, 1)
     print(f"  Phase 2 done: {N} viewpoints → avg {avg_reps:.1f} representatives/viewpoint "
-          f"(dedup={DP_CANDIDATE_DEDUP_RAD:.2f} rad, {empty_count} empty)")
+          f"(dedup={CANDIDATE_DEDUP_RAD:.2f} rad, {empty_count} empty)")
 
     return representatives
 

@@ -110,7 +110,7 @@ def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                 if lock_nominal_wrist3:
                     q[-1] = wrist3_fixed
                 if any(np.max(np.abs(periodic_joint_delta(q - prior, joint_periods)))
-                       <= PT.DP_CANDIDATE_DEDUP_RAD for prior in kept):
+                       <= PT.CANDIDATE_DEDUP_RAD for prior in kept):
                     continue
                 kept.append(q)
                 fields["variant"].append(targets["variant"][pose_idx])

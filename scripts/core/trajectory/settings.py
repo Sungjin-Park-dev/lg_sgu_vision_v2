@@ -10,9 +10,10 @@ IK_BATCH_SIZE = 4
 IK_RANDOM_SEED = 123
 RECONFIG_THRESHOLD_DEG = 29.0
 
-# DP 후보: 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모든 분기를 후보로 남겨
-# DP가 이웃과 연속인 분기를 직접 고르게 한다(클러스터 medoid는 연속 해를 버릴 수 있어 미사용).
-DP_CANDIDATE_DEDUP_RAD = 0.08   # ~4.6°, 분기는 보존하며 거의 동일한 seed 만 제거
+# IK 후보: 성공 IK 해 전체를 fine tolerance로 near-duplicate만 제거하고 모든 분기를 후보로 남겨
+# 순서 최적화(GLNS)가 이웃과 연속인 분기를 직접 고르게 한다(클러스터 medoid는 연속 해를 버릴 수
+# 있어 미사용).
+CANDIDATE_DEDUP_RAD = 0.08   # ~4.6°, 분기는 보존하며 거의 동일한 seed 만 제거
 
 # Reconfig transit(충돌회피 joint-to-joint) 계획.
 # plan_cspace는 timeout이 없고 max_attempts 회 재시도 후 실패하는 단순 루프라(성공 시 즉시 break),

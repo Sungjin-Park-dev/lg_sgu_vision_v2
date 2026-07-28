@@ -2,7 +2,7 @@
 """임의의 두 관절자세 사이를 충돌-free 로 잇는 궤적 하나를 계획해 CSV(+npz)로 낸다.
 
 저장소에 "시작 q + 목표 q → 계획된 궤적" 진입점이 없어서 만든 것이다. 스캔 궤적을 만드는
-경로(`trajectory/cli.py`, `glns/solve.py`)는 viewpoint 에서 출발하고, `glns/verify.py
+경로(`glns/solve.py` → `glns/verify.py`)는 viewpoint 에서 출발하고, `glns/verify.py
 --home-transitions-only` 는 A/B 가 (HOME, scan[0]) / (scan[-1], HOME) 로 고정돼 있다.
 그래서 "지금 로봇이 있는 자리에서 저기까지" 를 계획할 방법이 없었다 — isaac_pipeline 의
 HOME↔스캔시작 버튼이 계획 없이 직선으로 움직이던 이유다.
@@ -13,7 +13,7 @@ HOME↔스캔시작 버튼이 계획 없이 직선으로 움직이던 이유다.
 계획 사다리(direct → via-roll → via-tilt → via-home)를 그대로 물려받는다.
 
 물체 pose 는 `--object-position/--object-quat` 로 받아 `config.TARGET_OBJECT` 에 덮어쓴다 —
-`trajectory/pipeline.py` 와 `glns/solve.py` 가 쓰는 것과 같은 관례다(호출자가 살아있는
+`glns/solve.py` 가 쓰는 것과 같은 관례다(호출자가 살아있는
 기즈모 pose 를 넘긴다).
 
 Exit: 0 = 충돌-free CSV 생성, 2 = 경로 없음 / 충돌 게이트 실패 / 인자 오류(argparse).

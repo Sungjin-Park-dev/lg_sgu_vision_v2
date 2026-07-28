@@ -17,12 +17,11 @@ from .robot import (
     compute_fk,
     resolve_robot_config,
 )
-from .selection import dp_optimal_path
 from .settings import (
     CORNER_ANGLE_THRESHOLD_DEG,
     CORNER_MAX_SLOWDOWN,
     DEFAULT_SPACING_M,
-    DP_CANDIDATE_DEDUP_RAD,
+    CANDIDATE_DEDUP_RAD,
     EE_ANGULAR_SPEED_DEG_S,
     EE_SPEED_MM_S,
     IK_BATCH_SIZE,

@@ -2,8 +2,8 @@
 """
 Check per-viewpoint IK reachability for the current object pose.
 
-This is the lightweight counterpart to trajectory/cli.py for Isaac UI
-placement feedback. It runs only the Phase 1 multi-seed IK stage and writes a
+This is the lightweight counterpart to the full GLNS pipeline (glns/solve.py) for
+Isaac UI placement feedback. It runs only the multi-seed IK stage and writes a
 JSON file containing one success count per viewpoint, preserving the HDF5 order
 so the UI can color the displayed points directly.
 """
