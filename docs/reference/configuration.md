@@ -33,4 +33,4 @@
 
 물체 위치, 테이블, 벽과 support 형상도 `config.py`에서 정의한다. 설정을 바꾼 뒤에는 viewpoint pose, IK와 충돌 검사를 다시 실행한다.
 
-경로 생성에는 `get_mesh_path`, `get_viewpoint_path`, `get_ik_path`, `get_trajectory_path` 헬퍼를 사용한다.
+경로 생성에는 `get_mesh_path`, `resolve_viewpoint_path`, `get_solution_path`, `get_trajectory_artifact_path` 헬퍼를 사용한다. 파일명 규칙은 [데이터 형식](data-formats.md)에 있다.

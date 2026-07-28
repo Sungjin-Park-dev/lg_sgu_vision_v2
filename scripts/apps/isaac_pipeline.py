@@ -2409,8 +2409,12 @@ class PipelineWindow:
         ik_batch_size = max(1, int(self._get_field("glns_ik_batch_size", int)))
         augment += (f" --num-seeds {num_seeds} --ik-batch-size {ik_batch_size}"
                     f" --ik-seed {IK_RANDOM_SEED}")
-        det_h5 = f"data/{obj}/ik/{n_vp}/glns_result_gui.h5"
-        trajectory_dir = f"data/{obj}/trajectory/{n_vp}"
+        from common import config as _config
+
+        # 해와 궤적은 한 폴더에 산다. 이름에 앱 이름을 넣지 않는다 — 어느 앱이 만들었든
+        # 같은 물체/viewpoint 수면 같은 해다(재solve 는 덮어쓰기).
+        det_h5 = str(_config.get_solution_path(obj, n_vp))
+        trajectory_dir = str(Path(det_h5).parent)
         pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
         quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
         shell = (

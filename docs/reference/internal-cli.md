@@ -5,18 +5,16 @@
 | 역할 | 경로 |
 |---|---|
 | viewpoint 배치 생성 | `scripts/core/viewpoint/cli.py` |
-| DP 궤적 생성 | `scripts/core/trajectory/cli.py` |
 | viewpoint IK 검사 | `scripts/core/trajectory/check_ik.py` |
 | 두 자세 사이 충돌-free 이동 계획 | `scripts/core/trajectory/plan_move.py` |
 | ROS2/Isaac 궤적 전송 | `scripts/core/trajectory/publish.py` |
-| GLNS solve | `scripts/core/glns/solve.py` |
-| GLNS motion 검증·연결 | `scripts/core/glns/verify.py` |
+| GLNS solve (1단계) | `scripts/core/glns/solve.py` |
+| GLNS motion 계획·연결 (2단계) | `scripts/core/glns/verify.py` |
 
 옵션의 현재 기본값은 각 명령의 `--help`를 기준으로 한다.
 
 ```bash
 uv run --no-sync scripts/core/viewpoint/cli.py --help
-uv run --no-sync scripts/core/trajectory/cli.py --help
 uv run --no-sync scripts/core/glns/solve.py --help
 uv run --no-sync scripts/core/glns/verify.py --help
 ```

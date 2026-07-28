@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Solve Delaunay-constrained viewpoint/IK GTSP components with GLNS.jl.
 
-This is an experimental, standalone stage. It computes fresh collision-aware
-IK candidates, solves one open GTSP per induced Delaunay component, and writes a
-``glns_result_*.h5`` artifact for ``scripts/apps/trajectory_studio.py``. It does
-not alter the source viewpoint HDF5 or invoke the trajectory/motion planner.
+궤적 생성의 1단계다. 충돌-aware IK 후보를 새로 계산하고, 유도된 Delaunay 성분마다 open
+GTSP 를 하나씩 풀어 ``data/{object}/trajectory/{N}/solution.h5`` 를 쓴다. 그 해를 실행 가능한
+궤적으로 바꾸는 것은 2단계인 ``glns/verify.py`` 다(모션 계획 + 충돌 게이트).
+원본 viewpoint HDF5 는 건드리지 않는다.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--viewpoints", type=Path, default=None,
                         help="Source viewpoints HDF5 containing viewpoints/adjacency")
     parser.add_argument("--output", type=Path, default=None,
-                        help="Output GLNS result HDF5 (default: timestamped data/{object}/ik/...)")
+                        help="GLNS 해 HDF5 (기본: data/{object}/trajectory/{N}/solution.h5)")
     parser.add_argument("--num-seeds", type=int, default=PT.NUM_IK_SEEDS,
                         help=f"IK seeds per viewpoint (default: {PT.NUM_IK_SEEDS})")
     parser.add_argument("--ik-batch-size", type=int, default=PT.IK_BATCH_SIZE,
@@ -237,8 +237,11 @@ def _run_glns(
 
 
 def _default_output(object_name: str, count: int) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return config.get_ik_path(object_name, count, f"glns_result_{stamp}.h5")
+    """물체·viewpoint 수당 해는 하나다 — 재solve 하면 덮어쓴다.
+
+    옛 궤적 npz 는 mtime 비교로 자동 무효화되므로(trajectory_studio) 이력을 남길 필요가 없다.
+    """
+    return config.get_solution_path(object_name, count)
 
 
 def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) -> dict:

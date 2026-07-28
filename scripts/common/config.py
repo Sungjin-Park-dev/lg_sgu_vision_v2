@@ -121,7 +121,8 @@ MOUNT_HEIGHT = 0.805
 # 가 불변이라 기존 viewpoint h5 재생성 불필요(비-z 회전은 재생성 필요).
 # 아래 값은 기존 GLNS 배치 스윕에서 얻은 min-reconfig best.
 # 실제 joined motion reconfig = scan reconfig + seam(=solved component 수-1) 을 최소화(1~2개 미커버 허용).
-# 전부 base reconfig=0. 각 물체별 placement_sweep/summary 참조. (coverage-우선 best 는 커밋 이력/summary 참고)
+# 전부 base reconfig=0. 근거 자료는 docs/reference/placement-sweep/{object}/summary.csv
+# (coverage-우선 best 는 커밋 이력/summary 참고)
 OBJECT_PLACEMENTS = {
     # curved: 99/100, base0, scan reconfig2, 1 component(seam0) → 실제 ~2. (coverage-best 는 100/100·reconfig6)
     "curved_structure": {
@@ -440,26 +441,37 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
             f"No viewpoints*.h5 under {directory} — "
             f"generate them first (scripts/core/viewpoint/cli.py --object {object_name})."
         )
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    chosen = max(candidates, key=lambda p: p.stat().st_mtime)
+    # 후보가 여럿이면 mtime 이 정한다 — 조용히 고르면 어느 클러스터링으로 계획했는지
+    # 모르는 채 진행하게 되므로 반드시 찍는다(같은 폴더에 coacd/delaunay 가 공존한다).
+    if len(candidates) > 1:
+        others = ", ".join(p.name for p in candidates if p != chosen)
+        print(f"  viewpoints: {chosen.name} (최근) — 같은 폴더의 다른 후보: {others}")
+    return chosen
 
 
-def get_ik_path(object_name: str, num_viewpoints: int, filename: str = "ik_solutions.h5") -> Path:
+def get_solution_path(object_name: str, num_viewpoints: int) -> Path:
+    """GLNS 해 h5 — ``verify.py`` 의 입력이자 studio 시각화 소스.
+
+    궤적 산출물과 같은 폴더에 둔다: 이 해로부터 궤적이 나오고, 둘의 수명이 같다.
+
+        data/{object}/trajectory/{N}/solution.h5
     """
-    IK 솔루션 파일 경로 반환
+    return get_trajectory_path(object_name, num_viewpoints, "solution.h5")
 
-    Args:
-        object_name: 객체 이름 (예: "glass")
-        num_viewpoints: 뷰포인트 개수
-        filename: 파일명 (기본값: "ik_solutions.h5")
 
-    Returns:
-        IK 솔루션 경로: data/{object_name}/ik/{num_viewpoints}/{filename}
+def get_trajectory_artifact_path(object_name: str, num_viewpoints: int,
+                                 role: str | None = None, suffix: str = ".csv") -> Path:
+    """실행 궤적 산출물 경로.
 
-    Example:
-        >>> get_ik_path("glass", 500)
-        PosixPath('data/glass/ik/500/ik_solutions.h5')
+    명명 규칙은 ``{역할}[_{세부}]`` 이고 백엔드 토큰은 없다 — 생산자가 GLNS 하나뿐이다.
+
+        role=None                 → trajectory.csv        (스캔 궤적)
+        role='home_to_start'      → trajectory_home_to_start.csv
+        role='end_to_home'        → trajectory_end_to_home.csv
     """
-    return DATA_ROOT / object_name / "ik" / str(num_viewpoints) / filename
+    name = "trajectory" if not role else f"trajectory_{role}"
+    return get_trajectory_path(object_name, num_viewpoints, f"{name}{suffix}")
 
 
 def get_trajectory_path(object_name: str, num_viewpoints: int, filename: str = "gtsp.csv") -> Path:
