@@ -108,15 +108,6 @@ COLOR_BY_CLUSTERS = "Clusters"
 COLOR_BY_COMPONENTS = "Delaunay components"
 COLOR_BY_OPTIONS = [COLOR_BY_CLUSTERS, COLOR_BY_COMPONENTS]
 
-# 오브젝트별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
-# (CLI의 --material-rgb 와 동일 경로. 미지정 오브젝트는 전체 메시.)
-OBJECT_TARGET_MATERIAL = {
-    # 컨벤션: 초록(0,255,0) = 검사대상. 회색(170,163,158)은 비대상이라 제외.
-    # (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일. CLI --material-rgb "0,255,0" 와 동일.)
-    "sample": "0,255,0",
-}
-
-
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
@@ -587,7 +578,7 @@ class Studio:
         try:
             obj = p["obj"]
             if obj not in self.mesh_cache:
-                mat = OBJECT_TARGET_MATERIAL.get(obj)  # 예: sample → 초록만. 미지정 시 전체 메시
+                mat = config.OBJECT_TARGET_MATERIAL.get(obj)  # 예: sample → 초록만. 미지정 시 전체 메시
                 self.mesh_cache[obj] = load_meshes(obj, mat)
             full_mesh, target_mesh, input_path = self.mesh_cache[obj]
 

@@ -130,7 +130,13 @@ Examples:
     parser.add_argument('--compare', action='store_true',
                         help='선택된 방법의 파라미터 변형 비교 HTML 생성')
 
-    # --- Visualization ---
+    # --- Output ---
+    # solve.py --output / verify.py --output-dir 와 짝을 맞춘다. 이게 없으면 세 단계 중
+    # viewpoint 만 리다이렉션이 안 돼서, data/ 를 건드리지 않는 실행(회귀 테스트 등)이 불가능하다.
+    parser.add_argument('--output', type=Path, default=None,
+                        help='출력 h5 경로 '
+                             '(기본: data/{object}/viewpoint/{N}/viewpoints_{method}.h5)')
+
     # --- Debug ---
     parser.add_argument('--dry-run', action='store_true', help='통계만 출력, HDF5 저장 안 함')
 
@@ -176,13 +182,20 @@ def main():
 
     input_path = str(config.get_mesh_path(args.object, mesh_type="source"))
 
+    # 재질 필터를 안 주면 물체별 기본값(config)에서 채운다 — 안 그러면 sample 이 조용히
+    # 161개(전체 메시)로 나온다. 정답은 초록 재질만 74개다.
+    rgb_source = "지정"
+    if args.material_rgb is None:
+        args.material_rgb = config.OBJECT_TARGET_MATERIAL.get(args.object)
+        rgb_source = "config 기본값"
+
     print("=" * 60)
     print("GENERATE VIEWPOINTS")
     print("=" * 60)
     print(f"Object: {args.object}")
     print(f"Input:  {input_path}")
     if args.material_rgb:
-        print(f"Target RGB: {args.material_rgb}")
+        print(f"Target RGB: {args.material_rgb}  ({rgb_source})")
     else:
         print(f"Target: entire mesh (no material filter)")
     print(f"Clustering: {args.cluster_method}")
@@ -388,9 +401,10 @@ def main():
         print()
         print("[DRY RUN] HDF5 not modified.")
     else:
-        output_path = str(config.get_viewpoint_path(
+        output_path = str(args.output) if args.output else str(config.get_viewpoint_path(
             args.object, len(res.positions), filename=f"viewpoints_{method}.h5",
         ))
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         print(f"Output: {output_path}")
 
         print("Saving to HDF5...")

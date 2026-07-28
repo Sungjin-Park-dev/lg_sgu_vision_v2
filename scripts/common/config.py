@@ -175,6 +175,16 @@ OBJECT_FILTER_INTERIOR = {
     "square_structure": {"hull_align_min": 0.3},
 }
 
+# 물체별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
+# 컨벤션: 초록(0,255,0) = 검사대상. 회색(170,163,158)은 비대상이라 제외.
+# (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일)
+# ⚠️ 이 표를 안 보고 viewpoint 를 만들면 조용히 틀린 개수가 나온다 — sample 은 74 대신 161.
+#    viewpoint_studio 와 viewpoint/cli.py 가 같은 표를 봐야 하는 이유다(예전엔 studio 에만 있어
+#    CLI 는 사람이 --material-rgb 를 기억해 넘겨야 했다).
+OBJECT_TARGET_MATERIAL = {
+    "sample": "0,255,0",
+}
+
 
 def apply_object_placement(object_name):
     """object_name 의 배치를 TARGET_OBJECT/support 에 in-place 반영(robot frame).
