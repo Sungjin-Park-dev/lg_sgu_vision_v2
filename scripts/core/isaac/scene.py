@@ -243,8 +243,8 @@ def spawn_scene_obstacles(config_module=_config) -> None:
         token = obstacle.get("isaac_visual", "primitive")
         if token not in ISAAC_VISUAL_TOKENS:
             raise ValueError(
-                f"obstacle '{obstacle['name']}': 알 수 없는 isaac_visual {token!r} — "
-                f"가능한 값 {sorted(ISAAC_VISUAL_TOKENS)}")
+                f"obstacle '{obstacle['name']}': unknown isaac_visual {token!r} — "
+                f"expected one of {sorted(ISAAC_VISUAL_TOKENS)}")
         if token in ("usd_table", "usd_mount"):
             continue   # load_workcell 이 전용 USD 로 이미 배치했다
 

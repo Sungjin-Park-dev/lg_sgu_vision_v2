@@ -238,8 +238,8 @@ def sync_support_to_target():
     if height <= 0.0:
         raise ValueError(
             f"[scene '{ACTIVE_SCENE}'] Target object bottom z ({object_bottom_z:.4f}) must be "
-            f"above table top z ({table_top_z:.4f}) — 씬의 object_placements 또는 table 높이를 "
-            f"확인할 것"
+            f"above table top z ({table_top_z:.4f}) — check the scene's "
+            f"object_placements or table height"
         )
 
     support["position"] = np.array([
@@ -383,7 +383,7 @@ def get_mesh_path(object_name: str, filename: str = None, mesh_type: str = "targ
                 return target_ply
             filename = "target.obj"
         else:
-            raise ValueError(f"잘못된 mesh_type: '{mesh_type}'. 'source' 또는 'target'이어야 합니다")
+            raise ValueError(f"invalid mesh_type: '{mesh_type}'. Expected 'source' or 'target'")
 
     return DATA_ROOT / object_name / "mesh" / filename
 
@@ -433,7 +433,7 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
     # 모르는 채 진행하게 되므로 반드시 찍는다(같은 폴더에 coacd/delaunay 가 공존한다).
     if len(candidates) > 1:
         others = ", ".join(p.name for p in candidates if p != chosen)
-        print(f"  viewpoints: {chosen.name} (최근) — 같은 폴더의 다른 후보: {others}")
+        print(f"  viewpoints: {chosen.name} (most recent) — other candidates in the same folder: {others}")
     return chosen
 
 

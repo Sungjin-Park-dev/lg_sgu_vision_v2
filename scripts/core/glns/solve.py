@@ -318,7 +318,7 @@ def main() -> int:
         graph_edges = expand_edges_by_hops(source_edges, n_viewpoints, args.delaunay_expand_hops)
         print(f"  Graph relaxed to {args.delaunay_expand_hops}-hop: "
               f"{len(source_edges)} → {len(graph_edges)} edges "
-              f"(GLNS 순서 자유도↑)")
+              f"(more ordering freedom for GLNS)")
     else:
         graph_edges = source_edges
 

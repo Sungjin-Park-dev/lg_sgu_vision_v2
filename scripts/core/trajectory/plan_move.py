@@ -56,9 +56,9 @@ def _joints(text: str) -> np.ndarray:
     try:
         q = np.array([float(v) for v in values], dtype=np.float64)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"숫자로 못 읽음 ({exc})")
+        raise argparse.ArgumentTypeError(f"could not parse as numbers ({exc})")
     if q.shape != (6,):
-        raise argparse.ArgumentTypeError(f"관절값 6개가 필요하다 (받은 값 {len(values)}개)")
+        raise argparse.ArgumentTypeError(f"expected 6 joint values (got {len(values)})")
     return q
 
 
@@ -120,7 +120,7 @@ def main() -> int:
         # 이미 목표 자세다. 실패가 아니므로 출력 계약(항상 CSV)을 지킨다 — 호출자가
         # "경로 없음" 과 "이동 없음" 을 분기할 필요가 없다. 플래너는 건너뛰지만 아래
         # 충돌 게이트는 그대로 지난다: 지금 자세가 이미 충돌 중이면 정직하게 실패한다.
-        print("  이미 목표 자세다 — 이동 없는 2행 궤적을 낸다.")
+        print("  Already at the target pose — writing a 2-row no-motion trajectory.")
         traj = selected
     else:
         planner = PT.build_reconfig_motion_planner(
@@ -133,7 +133,7 @@ def main() -> int:
         waypoints = segments.get(0)
         route = next((s.get("route") for s in stats if s.get("success")), None)
         if waypoints is None:
-            print("  ✗ 충돌-free 경로를 찾지 못했다 (direct/via 전부 실패).")
+            print("  x No collision-free path found (direct and via ladder both failed).")
             return 2
         print(f"  ✓ planned via '{route}' — {len(waypoints)} raw waypoints")
 
@@ -153,7 +153,7 @@ def main() -> int:
         out_csv=args.output,
     )
     if not gate["collision_free"]:
-        print(f"  ✗ 충돌 게이트 실패: {gate['n_collisions']} collisions — 저장하지 않았다.")
+        print(f"  x Collision gate failed: {gate['n_collisions']} collisions — not saved.")
         return 2
 
     # 끝점은 계획의 전제다 — 실행기가 CSV 첫 행과 현재 자세가 다르면 계획되지 않은 직선을

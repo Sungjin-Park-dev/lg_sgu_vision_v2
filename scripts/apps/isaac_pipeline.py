@@ -1215,10 +1215,10 @@ class PipelineWindow:
             selection = omni.usd.get_context().get_selection()
             paths = list(selection.get_selected_prim_paths())
         except Exception as exc:      # Kit 버전마다 selection API 가 다르다 — 죽지 않고 안내만
-            self._append_log(f"[scene] 선택 API 를 쓸 수 없다 ({exc}) — Stage 트리에서 확인할 것")
+            self._append_log(f"[scene] selection API unavailable ({exc}) — check the Stage tree")
             return
         if not paths:
-            self._append_log("[scene] 뷰포트나 Stage 트리에서 prim 을 먼저 고를 것.")
+            self._append_log("[scene] select a prim in the viewport or Stage tree first.")
             return
 
         stage = omni.usd.get_context().get_stage()
@@ -1231,12 +1231,12 @@ class PipelineWindow:
         for path in paths:
             prim = stage.GetPrimAtPath(path)
             if not prim or not prim.IsValid():
-                self._append_log(f"[scene] {path}: 유효하지 않은 prim")
+                self._append_log(f"[scene] {path}: not a valid prim")
                 continue
             bound = cache.ComputeWorldBound(prim)
             rng = bound.GetRange()
             if rng.IsEmpty():
-                self._append_log(f"[scene] {path}: bbox 를 계산할 수 없다 (Xform 전용 prim?)")
+                self._append_log(f"[scene] {path}: no bbox (Xform-only prim?)")
                 continue
 
             m = bound.GetMatrix()
@@ -1258,12 +1258,12 @@ class PipelineWindow:
             name = _SCENE_PRIM_NAME_RE.sub("_", prim.GetName()).strip("_").lower() or "obstacle"
             snippet = scene_config.obstacle_yaml_snippet(name, position, dims, rotation)
             if np.any(np.asarray(dims) <= 0.0):
-                self._append_log(f"[scene] {path}: 치수가 0 이다 — 껍데기 없는 prim 인지 확인")
+                self._append_log(f"[scene] {path}: zero-sized — prim may have no geometry")
             if urctl._is_under_root(str(path), urctl.STAGE_PATH) or \
                     urctl._is_under_root(str(path), GHOST_ROOT_PATH):
-                self._append_log(f"[scene] 주의: {path} 는 로봇의 일부다 — 장애물이 아니다")
+                self._append_log(f"[scene] note: {path} is part of the robot, not an obstacle")
             self._append_log(
-                f"[scene] {path} → workcell/scenes/{self._scene}.yaml 의 obstacles 에 붙여넣기:\n"
+                f"[scene] {path} → paste into obstacles: in workcell/scenes/{self._scene}.yaml\n"
                 f"{snippet}")
 
     def _build_panel_object(self):
@@ -2689,8 +2689,8 @@ class PipelineWindow:
         pose = self._read_object_world_pose()
         if not obj or pose is None:
             self._append_log(
-                "[home] no target object on stage — 충돌 세계를 만들 수 없다. "
-                "Object 를 Load 한 뒤 다시 시도할 것.")
+                "[home] no target object on stage — cannot build the collision world. "
+                "Load an object first, then retry.")
             return
         pos_robot, quat_wxyz = pose
 
@@ -2702,7 +2702,7 @@ class PipelineWindow:
         try:
             current_q = self._sim_executor.current_joints()
         except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
-            self._append_log(f"[home] 현재 관절값을 읽지 못했다: {exc}")
+            self._append_log(f"[home] could not read current joint values: {exc}")
             return
 
         if self._preview.loaded:
@@ -2721,7 +2721,7 @@ class PipelineWindow:
         def on_planned(rc: int):
             self._append_log(f"[home] plan exit code = {rc}")
             if rc != 0 or not out_csv.exists():
-                self._append_log(f"[home] {label}: 충돌-free 경로가 없어 움직이지 않는다.")
+                self._append_log(f"[home] {label}: no collision-free path — not moving.")
                 re_enable()
                 return
             self._append_log(f"[home] executing planned {label}: {out_csv}")
@@ -2743,7 +2743,7 @@ class PipelineWindow:
             f"--to-joints={','.join(f'{v:.6f}' for v in target_q)!r} "
             f"--output {str(out_csv)!r}"
         )
-        self._append_log(f"[home] {label}: 현재 자세에서 충돌-free 경로 계획 중…")
+        self._append_log(f"[home] {label}: planning a collision-free path from the current pose...")
         self._append_log("[home] $ " + shell)
         self._gen_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
                                on_line=self._append_log, on_exit=on_planned)

@@ -142,9 +142,9 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
         gl_reconfig = np.asarray(gl_reconfig, dtype=bool)
         mismatch = int(np.sum(gl_reconfig != is_reconfig))
         if mismatch:
-            print(f"    WARNING: GLNS is_reconfiguration 와 재산출 결과가 {mismatch}개 "
-                  f"edge 에서 불일치 — wrist_3 lock/threshold 가정 확인 필요. "
-                  f"재산출값으로 진행.")
+            print(f"    WARNING: GLNS is_reconfiguration disagrees with the recomputed value on {mismatch} "
+                  f"edge(s) — check the wrist_3 lock/threshold assumption. "
+                  f"Proceeding with the recomputed value.")
 
     # 작은 jump는 원래 joint 직선 보간 대상이다. 이 중 충돌하는 edge도 viewpoint를
     # drop하기 전에 MotionGen fallback 대상으로 승격한다. reconfiguration edge와 합쳐
@@ -316,13 +316,13 @@ def main() -> int:
         # 명시 override 는 재현이 아니라 실험이다 — 조용히 다른 셀로 검증하지 않도록 알린다.
         config.load_scene(args.scene)
         if snap is not None:
-            print(f"  ⚠️ --scene {args.scene} 이 h5 에 박힌 씬"
-                  f"('{_decode(meta.get('scene_name', '?'))}')을 덮어쓴다 — "
-                  f"이 해는 그 씬으로 풀린 게 아니다")
+            print(f"  WARNING: --scene {args.scene} overrides the scene baked into the h5 "
+                  f"('{_decode(meta.get('scene_name', '?'))}') — "
+                  f"this solution was NOT solved in that scene")
     elif snap is not None:
         config.load_scene_snapshot(snap)
     else:
-        print(f"  이 해는 scene 스냅샷 이전 파일 — 기본 씬 '{config.ACTIVE_SCENE}' 으로 재현한다")
+        print(f"  Result predates scene snapshots — reproducing with default scene '{config.ACTIVE_SCENE}'")
 
     # 순서 주의: 씬 로드가 TARGET_OBJECT 를 씬 기본값으로 되돌리므로 pose 재주입은 반드시 그 뒤.
     config.TARGET_OBJECT["position"] = object_position
@@ -393,7 +393,7 @@ def main() -> int:
         if n_members < 2:
             # 이을 edge 는 없지만 방문은 해야 한다 — 건너뛰면 joined 에서 조용히 사라진다.
             res = _singleton_component(component)
-            print("    single viewpoint — 계획할 edge 없음, join 에 그대로 포함")
+            print("    single viewpoint — no edge to plan, included in join as-is")
         else:
             # 성분별 CSV/npz 는 쓰지 않는다(out_csv=None). join 은 메모리의 final_traj 를
             # 쓰고, 실행용 산출물은 joined 하나면 충분하다.
@@ -474,8 +474,8 @@ def main() -> int:
     print(f"Coverage: {covered_total}/{expected_total} viewpoints"
           + (f"  ({missing_total} MISSING)" if missing_total else ""))
     if missing_total:
-        print("NOTE: joined 에 들어가지 못한 viewpoint 가 있다 — 못 푼 성분이거나, 충돌-aware "
-              "이동에서 GLNS 경로가 보존되지 못한 구간(연속 scan edge 충돌/transit 실패)이다.")
+        print("NOTE: some viewpoints did not make it into joined — either an unsolved "
+              "component, or a stretch where the GLNS path could not survive collision-aware motion.")
     print("=" * 64)
 
     # --- 성분 연결: 하나의 연속 실행 궤적(trajectory.csv) ---
@@ -486,11 +486,11 @@ def main() -> int:
             (out_dir / "trajectory.csv").unlink(missing_ok=True)
             (out_dir / "trajectory.npz").unlink(missing_ok=True)
             print(f"  FAIL — --require-full-coverage: {missing_total} viewpoint(s) "
-                  f"missing from joined ({covered_total}/{expected_total}); 미생성.")
+                  f"missing from joined ({covered_total}/{expected_total}); nothing written.")
             print("=" * 64)
             return 1
         if not join_inputs:
-            print("  연결할 충돌-free 성분이 없음 — joined 미생성.")
+            print("  No collision-free component to join — nothing written.")
             print("=" * 64)
         else:
             joined_csv = out_dir / "trajectory.csv"
@@ -518,7 +518,7 @@ def main() -> int:
                     meta=joined_meta,
                 )
             except SeamFailure as exc:
-                print(f"  SEAM FAILED: {exc} — 가교 불가(via-home 포함). joined 미생성.")
+                print(f"  SEAM FAILED: {exc} — could not bridge (via-home included). Nothing written.")
                 print("=" * 64)
                 return 2
             hb = args.home_bracket
@@ -535,7 +535,7 @@ def main() -> int:
                 print(f"  CSV: {g['csv']}")
                 print("=" * 64)
             else:
-                print(f"  → FAIL — {g['n_collisions']} colliding dense waypoints; joined 미저장")
+                print(f"  -> FAIL — {g['n_collisions']} colliding dense waypoints; joined not saved")
                 print("=" * 64)
                 return 1
 

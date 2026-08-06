@@ -188,8 +188,8 @@ def build_collision_world(object_name: str):
         if obj["type"] != "cuboid":
             approximated.append(f"{obj['name']}({obj['type']})")
     if approximated:
-        print(f"  Collision world: OBB 근사 — {', '.join(approximated)} "
-              f"(cuRobo 0.8 은 sphere/cylinder/capsule 을 충돌에 넣지 않는다)")
+        print(f"  Collision world: OBB approximation — {', '.join(approximated)} "
+              f"(cuRobo 0.8 does not feed sphere/cylinder/capsule into collision)")
 
     meshes = []
     mesh_path = config.get_mesh_path(object_name, mesh_type="source")
@@ -213,7 +213,7 @@ def build_collision_world(object_name: str):
                 dims=mesh.extents.tolist(),
             ))
             print(f"  Collision world: {len(cuboids)} cuboids "
-                  f"(target as box proxy {np.round(mesh.extents, 3).tolist()} m — 소형 mesh 충돌 오판 회피)")
+                  f"(target as box proxy {np.round(mesh.extents, 3).tolist()} m — avoids small-mesh false positives)")
         else:
             meshes.append(CuRoboMesh(
                 name="target_object",

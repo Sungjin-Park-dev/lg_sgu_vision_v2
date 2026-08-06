@@ -63,8 +63,8 @@ def resolve_scene_path(name_or_path) -> Path:
             return path
     tried = "\n  ".join(str(p) for p in candidates)
     raise FileNotFoundError(
-        f"씬 '{name_or_path}' 을 찾을 수 없다. 시도한 경로:\n  {tried}\n"
-        f"사용 가능한 씬: {', '.join(available_scenes()) or '(없음)'}")
+        f"scene '{name_or_path}' not found. Tried:\n  {tried}\n"
+        f"Available scenes: {', '.join(available_scenes()) or '(none)'}")
 
 
 def available_scenes() -> list[str]:
@@ -80,9 +80,9 @@ def available_scenes() -> list[str]:
 def _vec(value, n, where):
     arr = np.asarray(value, dtype=np.float64)
     if arr.shape != (n,):
-        raise ValueError(f"{where}: 길이 {n} 인 리스트여야 한다 (받은 값 {value!r})")
+        raise ValueError(f"{where}: expected a list of length {n} (got {value!r})")
     if not np.all(np.isfinite(arr)):
-        raise ValueError(f"{where}: 유한한 수여야 한다 (받은 값 {value!r})")
+        raise ValueError(f"{where}: values must be finite (got {value!r})")
     return arr
 
 
@@ -93,39 +93,39 @@ def _quat(value, where):
     norm = float(np.linalg.norm(arr))
     # 손으로 잰 셀의 오타(0.7071 을 0.707 로 적는 류)를 여기서 잡는다.
     if abs(norm - 1.0) > 1e-6:
-        raise ValueError(f"{where}: 쿼터니언 [w,x,y,z] 의 노름이 1 이어야 한다 (norm={norm:.9f})")
+        raise ValueError(f"{where}: quaternion [w,x,y,z] must be unit-norm (norm={norm:.9f})")
     return arr
 
 
 def _positive(value, where):
     v = float(value)
     if not np.isfinite(v) or v <= 0.0:
-        raise ValueError(f"{where}: 양수여야 한다 (받은 값 {value!r})")
+        raise ValueError(f"{where}: must be positive (got {value!r})")
     return v
 
 
 def _parse_obstacle(raw, idx):
     if not isinstance(raw, dict):
-        raise ValueError(f"obstacles[{idx}]: 매핑이어야 한다 (받은 값 {raw!r})")
+        raise ValueError(f"obstacles[{idx}]: must be a mapping (got {raw!r})")
     name = raw.get("name")
     if not isinstance(name, str) or not name:
-        raise ValueError(f"obstacles[{idx}]: name 이 필요하다")
+        raise ValueError(f"obstacles[{idx}]: name is required")
     where = f"obstacle '{name}'"
 
     # 이름은 그대로 USD prim 이름이 된다.
     if not _USD_NAME_RE.match(name):
         raise ValueError(
-            f"{where}: USD prim 이름 규칙에 맞아야 한다 (영문/숫자/_, 첫 글자는 숫자 불가) — "
-            f"core/isaac/scene.py 가 /World/SceneObstacles/{{name}} 으로 만든다")
+            f"{where}: must be a legal USD prim name (letters/digits/_, cannot start with a "
+            f"digit) — core/isaac/scene.py creates it as /World/SceneObstacles/{{name}}")
     if name in RESERVED_PRIM_NAMES:
         raise ValueError(
-            f"{where}: 예약된 prim 이름이다. isaac_pipeline 이 스테이지 전체에서 이 이름을 "
-            f"찾아 지우므로 장애물이 조용히 사라진다. 다른 이름을 쓸 것 "
-            f"(예약: {', '.join(RESERVED_PRIM_NAMES)})")
+            f"{where}: reserved prim name. isaac_pipeline deletes prims with this name "
+            f"stage-wide, so the obstacle would silently disappear. Pick another name "
+            f"(reserved: {', '.join(RESERVED_PRIM_NAMES)})")
 
     kind = raw.get("type", "cuboid")
     if kind not in PRIMITIVE_TYPES:
-        raise ValueError(f"{where}: type 은 {PRIMITIVE_TYPES} 중 하나여야 한다 (받은 값 {kind!r})")
+        raise ValueError(f"{where}: type must be one of {PRIMITIVE_TYPES} (got {kind!r})")
 
     obs = {
         "name": name,
@@ -136,10 +136,10 @@ def _parse_obstacle(raw, idx):
     }
     if kind == "cuboid":
         if "dimensions" not in raw:
-            raise ValueError(f"{where}: cuboid 는 dimensions [x,y,z] 가 필요하다")
+            raise ValueError(f"{where}: cuboid requires dimensions [x,y,z]")
         dims = _vec(raw["dimensions"], 3, f"{where}.dimensions")
         if np.any(dims <= 0.0):
-            raise ValueError(f"{where}: dimensions 는 모두 양수여야 한다 (받은 값 {dims.tolist()})")
+            raise ValueError(f"{where}: dimensions must all be positive (got {dims.tolist()})")
         obs["dimensions"] = dims
     elif kind == "sphere":
         obs["radius"] = _positive(raw.get("radius"), f"{where}.radius")
@@ -156,7 +156,7 @@ def _parse_obstacle(raw, idx):
 def _parse_placement(raw, key):
     where = f"object_placements['{key}']"
     if not isinstance(raw, dict):
-        raise ValueError(f"{where}: 매핑이어야 한다")
+        raise ValueError(f"{where}: must be a mapping")
     out = {"rotation": _quat(raw.get("rotation"), f"{where}.rotation")}
     if "position" in raw:
         out["position"] = _vec(raw["position"], 3, f"{where}.position")
@@ -166,12 +166,12 @@ def _parse_placement(raw, key):
 def parse_scene(data: dict, source: str) -> dict:
     """이미 읽어들인 매핑(YAML 또는 h5 스냅샷)을 검증·정규화한다."""
     if not isinstance(data, dict):
-        raise ValueError(f"{source}: 최상위가 매핑이어야 한다")
+        raise ValueError(f"{source}: top level must be a mapping")
 
     version = data.get("version")
     if version != SCHEMA_VERSION:
         raise ValueError(
-            f"{source}: version 이 {SCHEMA_VERSION} 이어야 한다 (받은 값 {version!r})")
+            f"{source}: version must be {SCHEMA_VERSION} (got {version!r})")
 
     raw_target = data.get("target_object") or {}
     target = {
@@ -183,19 +183,19 @@ def parse_scene(data: dict, source: str) -> dict:
 
     raw_obstacles = data.get("obstacles")
     if not isinstance(raw_obstacles, list) or not raw_obstacles:
-        raise ValueError(f"{source}: obstacles 리스트가 필요하다")
+        raise ValueError(f"{source}: an obstacles list is required")
     obstacles = [_parse_obstacle(o, i) for i, o in enumerate(raw_obstacles)]
 
     names = [o["name"] for o in obstacles]
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
-        raise ValueError(f"{source}: 장애물 이름이 중복됐다 — {', '.join(dupes)}")
+        raise ValueError(f"{source}: duplicate obstacle names — {', '.join(dupes)}")
     for role in ROLE_NAMES:
         if names.count(role) != 1:
             raise ValueError(
-                f"{source}: '{role}' 이름의 장애물이 정확히 하나 있어야 한다 "
-                f"(현재 {names.count(role)}개). config.sync_support_to_target() 과 "
-                f"core/isaac/scene.py 가 이 이름으로 찾는다")
+                f"{source}: exactly one obstacle must be named '{role}' "
+                f"(found {names.count(role)}). config.sync_support_to_target() and "
+                f"core/isaac/scene.py look it up by this name")
 
     table = next(o for o in obstacles if o["name"] == "table")
     if table["type"] != "cuboid" or not np.allclose(table["rotation"], _IDENTITY_QUAT):
@@ -203,8 +203,8 @@ def parse_scene(data: dict, source: str) -> dict:
         # 상면을 구한다. 축정렬 cuboid 일 때만 맞는 식이라, 회전을 허용하면 support 높이가
         # 조용히 틀린다. 틀린 값을 만드는 대신 여기서 거절한다.
         raise ValueError(
-            f"{source}: 'table' 은 회전 없는(identity) cuboid 여야 한다 — "
-            f"config.sync_support_to_target() 이 상면 높이를 축정렬로 가정한다")
+            f"{source}: 'table' must be an axis-aligned (identity-rotation) cuboid — "
+            f"config.sync_support_to_target() assumes that when deriving the top surface")
 
     placements = {}
     for key, raw in (data.get("object_placements") or {}).items():
@@ -335,7 +335,7 @@ def obstacle_obb(obstacle: dict):
         center = pos + _quat_to_matrix(quat) @ ((base + tip) / 2.0)
         length = float(np.linalg.norm(tip - base)) + 2 * r
         return center, quat.copy(), np.array([2 * r, 2 * r, length], dtype=np.float64)
-    raise ValueError(f"알 수 없는 장애물 type: {kind!r}")
+    raise ValueError(f"unknown obstacle type: {kind!r}")
 
 
 def obstacle_trimesh(obstacle: dict):

@@ -349,7 +349,7 @@ def main():
         csv_path = args.csv
         if not Path(csv_path).exists():
             print(f"Error: CSV not found: {csv_path}")
-            print("  glns/solve.py → glns/verify.py 로 먼저 궤적을 생성하세요.")
+            print("  Generate a trajectory first: glns/solve.py -> glns/verify.py")
             return
 
         print(f"Loading trajectory from {csv_path}...")
