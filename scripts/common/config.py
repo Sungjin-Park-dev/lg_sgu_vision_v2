@@ -126,6 +126,9 @@ ACTIVE_SCENE = None          # 현재 로드된 씬 이름
 ACTIVE_SCENE_PATH = None     # 그 씬의 파일 경로 (스냅샷 재현 시 None)
 
 TARGET_OBJECT: dict = {}     # 대상 물체 pose (name/position/rotation)
+# 씬이 준 물체 기본 pose 의 **불변 사본**. TARGET_OBJECT 는 배치/기즈모/CLI 가 계속
+# 덮어쓰므로, 미등록 물체를 기본값으로 되돌리려면 별도 보관이 필요하다.
+_SCENE_TARGET_DEFAULT: dict = {}
 OBJECT_PLACEMENTS: dict = {}  # 물체별 배치 override
 OBSTACLES: list = []         # 씬 순서 그대로의 전체 장애물 — 신규 정식 API
 TABLE: dict = {}             # OBSTACLES 안의 그 dict 자체 (별칭)
@@ -198,10 +201,20 @@ def apply_object_placement(object_name):
     """object_name 의 배치를 TARGET_OBJECT/support 에 in-place 반영(robot frame).
 
     각 진입점에서 CLI override 전에 호출 → 다운스트림(build_camera_poses / build_collision_world /
-    isaac scene)이 read 시점에 per-object 배치를 본다. 표에 없으면 기본값 유지하고 False 반환.
+    isaac scene)이 read 시점에 per-object 배치를 본다.
+
+    표에 없는 물체는 **씬의 target_object 기본값으로 되돌리고** False 를 반환한다. 예전에는
+    아무것도 안 하고 False 만 돌려줬는데, 그러면 TARGET_OBJECT 가 직전 물체 pose 로 오염된 채
+    남는다 — studio 에서 물체를 갈아끼우면 미등록 물체가 앞 물체의 자리에 놓였다. 반환값 계약
+    (표에 있었나?)은 그대로라 호출부 9곳의 로그 로직은 안 바뀐다.
     """
     p = OBJECT_PLACEMENTS.get(object_name)
     if p is None:
+        TARGET_OBJECT["position"] = np.asarray(
+            _SCENE_TARGET_DEFAULT["position"], dtype=np.float64).copy()
+        TARGET_OBJECT["rotation"] = np.asarray(
+            _SCENE_TARGET_DEFAULT["rotation"], dtype=np.float64).copy()
+        sync_support_to_target()
         return False
     if "position" in p:
         TARGET_OBJECT["position"] = np.asarray(p["position"], dtype=np.float64).copy()

@@ -263,6 +263,10 @@ def apply_to(cfg, scene: dict) -> None:
     cfg.TARGET_OBJECT.clear()
     cfg.TARGET_OBJECT.update({k: (v.copy() if isinstance(v, np.ndarray) else v)
                               for k, v in scene["target_object"].items()})
+    # 미등록 물체를 되돌릴 기준값 — TARGET_OBJECT 와 달리 아무도 덮어쓰지 않는다.
+    cfg._SCENE_TARGET_DEFAULT.clear()
+    cfg._SCENE_TARGET_DEFAULT.update({k: (v.copy() if isinstance(v, np.ndarray) else v)
+                                      for k, v in scene["target_object"].items()})
 
     cfg.OBJECT_PLACEMENTS.clear()
     cfg.OBJECT_PLACEMENTS.update({
