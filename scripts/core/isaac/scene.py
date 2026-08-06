@@ -86,8 +86,11 @@ def _is_under_root(path: str, root: str) -> bool:
     """
     return path == root or path.startswith(root + "/")
 
+# robot base 높이는 config 가 소유한다 — 여기서 재정의하면 조용히 갈라진다.
+# (isaac_pipeline 이 urctl.MOUNT_HEIGHT 로 읽으므로 재수출은 유지한다.)
+MOUNT_HEIGHT = _config.MOUNT_HEIGHT
+
 # 워크셀 USD에서 측정한 치수
-MOUNT_HEIGHT = 0.805
 MOUNT_USD_INTRINSIC_Z = 0.515
 TABLE_USD_INTRINSIC_X = 0.910
 TABLE_USD_INTRINSIC_Y = 0.768
