@@ -811,6 +811,11 @@ class TrajectoryStudio:
         object_name = str(_decode_attr(metadata["object"]))
         object_position = np.asarray(_decode_attr(metadata["object_position"]), dtype=np.float64)
         object_quat = np.asarray(_decode_attr(metadata["object_quat_wxyz"]), dtype=np.float64)
+        # 해가 풀린 셀을 그대로 되살린다 — 안 하면 다른 씬으로 띄운 studio 가 그 해를
+        # 엉뚱한 장애물 배치 위에 그린다. 순서 주의: 씬 로드가 TARGET_OBJECT 를 되돌린다.
+        snap = _decode_attr(metadata["scene"]) if "scene" in metadata else None
+        if snap is not None and _decode_attr(metadata.get("scene_name")) != config.ACTIVE_SCENE:
+            config.load_scene_snapshot(snap)
         config.TARGET_OBJECT["position"] = object_position
         config.TARGET_OBJECT["rotation"] = object_quat
         if object_name != self.backend.object_name:

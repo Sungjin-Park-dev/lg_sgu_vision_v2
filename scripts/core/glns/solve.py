@@ -644,6 +644,11 @@ def main() -> int:
         "working_distance_m": float(source["wd_m"]),
         "object_position": config.TARGET_OBJECT["position"].astype(float).tolist(),
         "object_quat_wxyz": config.TARGET_OBJECT["rotation"].astype(float).tolist(),
+        # 씬을 이름이 아니라 **해결된 스냅샷**으로 박는다. 이름만 넣으면 solve 이후 YAML 이
+        # 편집됐을 때 verify 가 다른 월드로 검증한다 — 실측 셀을 맞추는 동안 매일 편집한다.
+        # storage.write_result_hdf5 가 dict 를 자동으로 json.dumps 하므로 저장 계층은 그대로다.
+        "scene_name": config.ACTIVE_SCENE,
+        "scene": config.scene_snapshot(),
         "robot_config": PT.ROBOT_CONFIG,
         "num_ik_seeds": args.num_seeds,
         "ik_batch_size": args.ik_batch_size,

@@ -46,7 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns.joining import (  # noqa: E402
     SeamFailure,
@@ -80,6 +80,9 @@ def _parse_args() -> argparse.Namespace:
                         help="GLNS 해 HDF5 (data/{object}/trajectory/{N}/solution.h5)")
     parser.add_argument("--object", default=None,
                         help="Object name override (default: read from result attrs)")
+    # 기본값은 h5 에 박제된 씬 스냅샷이다(재현). 이 플래그는 "다른 셀이면 어떻게 되나"를
+    # 물어보는 실험용 override 라, 쓰면 경고를 찍는다.
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--spacing", type=float, default=PT.DEFAULT_SPACING_M,
                         help=f"Scan resample spacing in meters (default: {PT.DEFAULT_SPACING_M})")
     parser.add_argument("--output-dir", type=Path, default=None,
@@ -305,8 +308,23 @@ def main() -> int:
     reconfig_rad = np.deg2rad(reconfig_deg)
     roll_augmented = bool(_decode(meta.get("roll_augmented", False)))
 
-    # GLNS IK 가 풀린 바로 그 world 를 재현 — 결과에 박제된 배치를 config 에 주입한 뒤
-    # plan_trajectory 의 build_collision_world 가 그 배치로 mesh 를 놓도록 한다(inspector 와 동일).
+    # GLNS IK 가 풀린 바로 그 world 를 재현한다. 물체 pose 만으로는 부족하다 — 씬(테이블/벽/
+    # 지그)이 바뀌면 같은 해라도 다른 월드에서 검증하게 된다. 그래서 h5 에 박제된 **스냅샷**을
+    # 쓴다(이름이 아니라). solve 이후 YAML 이 편집돼도 검증은 같은 셀을 본다.
+    snap = _decode(meta["scene"]) if "scene" in meta else None
+    if args.scene is not None:
+        # 명시 override 는 재현이 아니라 실험이다 — 조용히 다른 셀로 검증하지 않도록 알린다.
+        config.load_scene(args.scene)
+        if snap is not None:
+            print(f"  ⚠️ --scene {args.scene} 이 h5 에 박힌 씬"
+                  f"('{_decode(meta.get('scene_name', '?'))}')을 덮어쓴다 — "
+                  f"이 해는 그 씬으로 풀린 게 아니다")
+    elif snap is not None:
+        config.load_scene_snapshot(snap)
+    else:
+        print(f"  이 해는 scene 스냅샷 이전 파일 — 기본 씬 '{config.ACTIVE_SCENE}' 으로 재현한다")
+
+    # 순서 주의: 씬 로드가 TARGET_OBJECT 를 씬 기본값으로 되돌리므로 pose 재주입은 반드시 그 뒤.
     config.TARGET_OBJECT["position"] = object_position
     config.TARGET_OBJECT["rotation"] = object_quat
 
