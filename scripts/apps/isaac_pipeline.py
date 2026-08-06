@@ -875,11 +875,13 @@ class PipelineWindow:
                 with ui.VStack(height=0, spacing=6):
                     self._build_panel_pipeline_mode()
                     self._build_panel_mode()
-                    self._build_panel_scene()
                     self._build_panel_object()
                     self._build_panel_generate()
                     self._build_panel_preview()
                     self._build_panel_publish()
+                    # 워크플로(물체→생성→프리뷰→실행) 뒤, 로그 바로 위. 셀을 실측에 맞출 때만
+                    # 쓰는 도구라 기본 접힘으로 눈에 안 띄게 둔다.
+                    self._build_panel_scene()
                     self._build_log()
 
     def _lock(self, widget):
@@ -1179,13 +1181,17 @@ class PipelineWindow:
                 button.enabled = home_enabled
 
     def _build_panel_scene(self):
-        """활성 셀(씬)이 무엇인지 보여주고, 뷰포트에서 잰 치수를 씬 YAML 조각으로 뽑는다.
+        """활성 셀(씬) 표시 + 뷰포트에서 잰 치수를 씬 YAML 조각으로 뽑는 보조 도구.
 
-        기즈모로 옮긴 결과는 **저장해야** 계획에 반영된다(스테이지는 플래너의 진실원이 아니다).
-        그 저장 경로가 이 버튼이다 — 찍힌 조각을 workcell/scenes/{scene}.yaml 에 붙여넣는다.
+        일상 워크플로가 아니다 — 씬을 실측에 맞출 때만 쓴다. 그래서 워크플로 패널들 뒤,
+        로그 바로 위에 **기본 접힘**으로 둔다.
+
+        기즈모로 옮긴 결과는 YAML 에 적어야 계획에 반영된다(스테이지는 플래너의 진실원이
+        아니다). 이 버튼은 그 숫자를 robot frame 으로 변환해 붙여넣기 좋게 찍어줄 뿐,
+        파일은 쓰지 않는다.
         """
         ui = self._ui
-        frame = ui.CollapsableFrame("Scene (obstacles)", height=0)
+        frame = ui.CollapsableFrame("Scene (obstacles)", height=0, collapsed=True)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
