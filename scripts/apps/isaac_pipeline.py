@@ -476,7 +476,7 @@ class IsaacArticulationExecutor:
         """UR20 의 현재 관절값 (rad).
 
         **두 run-mode 모두 여기서 읽는다.** sim 은 Isaac 이 곧 로봇이고, real 은
-        /ActionGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
+        /RealRobotGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
         (apply_mode 참고) — 그래서 별도 ROS 구독 없이 실제 자세를 얻는다.
         """
         self._initialize()
@@ -531,7 +531,7 @@ class PreviewPlayer:
 
     The ghost USD is physics-free; this class only does USD-level pose
     writes. The real /World/UR20 articulation is never touched, so
-    ActionGraphSwitch and any external /joint_states publisher keep running
+    GraphTickSwitch and any external /joint_states publisher keep running
     independently.
     """
 
@@ -665,8 +665,12 @@ class PreviewPlayer:
 # Action Graph enable/disable — probe both API surfaces.
 # =============================================================================
 
-class ActionGraphSwitch:
-    """Disable OnPlaybackTick while preview is active so the graph stops writing."""
+class GraphTickSwitch:
+    """그래프의 OnPlaybackTick 을 껐다 켜서 그래프가 관절을 쓰는 것을 막는다.
+
+    /RealRobotGraph 와 /SimRobotGraph 에 하나씩 붙는다 — 둘 다 ArticulationController 를
+    갖고 있어서 동시에 tick 하면 같은 관절을 두고 싸운다. 정확히 하나만 돌게 하는 게 이 스위치다.
+    """
 
     def __init__(self, graph_path: str, log: Callable[[str], None]):
         self._graph_path = graph_path
@@ -740,9 +744,9 @@ class PipelineWindow:
     LOG_MAX_LINES = 500
 
     def __init__(self, ghost_root_prim: str, base_link_path: str,
-                 chain: "list[GhostJoint]", graph_path: str,
+                 chain: "list[GhostJoint]", real_graph_path: str,
                  default_object: str, initial_mode: str = "sim",
-                 moveit_graph_path: str = "/MoveItGraph",
+                 sim_graph_path: str = "/SimRobotGraph",
                  initial_pipeline_mode: str = "inspection",
                  articulation_root: str = "",
                  scene: str = ""):
@@ -772,8 +776,9 @@ class PipelineWindow:
             "fov_h": float(_cfg.CAMERA_FOV_HEIGHT_MM),
             "wd": float(_cfg.CAMERA_WORKING_DISTANCE_MM),
         }
-        # _graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다.
-        self._graph_path = graph_path
+        # _real_graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다
+        # (검사 카메라 렌더 프로덕트가 RealRobotGraph 안에 있다).
+        self._real_graph_path = real_graph_path
         self._render_resolution = (_cfg.CAMERA_PUBLISH_W, _cfg.CAMERA_PUBLISH_H)
         #   preview -> InspectionCameraPreview (ghost, Preview panel)
         #   execute -> InspectionCamera        (real robot, Execute panel)
@@ -791,15 +796,15 @@ class PipelineWindow:
         self._pub_runner = SubprocessRunner()
         self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
         self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
-        # Keep ActionGraphSwitch around for the publish path. Preview no
+        # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
         # stable original idle behavior is preserved.
-        self._graph = ActionGraphSwitch(graph_path, self._append_log)
+        self._real_graph = GraphTickSwitch(real_graph_path, self._append_log)
         # Separate switch for the MoveIt bridge graph (/isaac_joint_commands).
-        # Only one of (_graph, _moveit_graph) ticks at a time — see apply_pipeline_mode.
-        self._moveit_graph = ActionGraphSwitch(moveit_graph_path, self._append_log)
-        self._moveit_graph_path = moveit_graph_path
+        # Only one of (_real_graph, _sim_graph) ticks at a time — see apply_mode.
+        self._sim_graph = GraphTickSwitch(sim_graph_path, self._append_log)
+        self._sim_graph_path = sim_graph_path
         self._articulation_root = articulation_root
         self._mode_applied: Optional[str] = None  # last run mode actually applied
         self._preview = PreviewPlayer(
@@ -959,9 +964,10 @@ class PipelineWindow:
         # if the ROS stack isn't up yet.)
         if self._mode == "sim":
             # Inspection SIM executes directly through SingleArticulation and must
-            # not require ROS or allow the MoveIt graph to overwrite PD targets.
-            self._moveit_graph.set_active(mode == "moveit")
-            self._graph.set_active(False)
+            # not require ROS or allow /SimRobotGraph to overwrite PD targets.
+            # (그래서 sim × inspection 에서는 두 그래프 모두 꺼진다.)
+            self._sim_graph.set_active(mode == "moveit")
+            self._real_graph.set_active(False)
             if mode == "moveit":
                 # Relay forwarding is owned by apply_mode (stays True throughout sim);
                 # re-asserting it here is redundant and, at startup, double-starts the
@@ -1093,10 +1099,10 @@ class PipelineWindow:
     def apply_mode(self, mode: str):
         """Run mode = which robot drives the Isaac articulation:
 
-          sim  → Isaac IS the robot: /MoveItGraph drives from /isaac_joint_commands
-                 and publishes /isaac_joint_states + /clock; /ActionGraph mirror OFF.
-          real → Isaac MIRRORS the real robot: /ActionGraph ON (drive from real
-                 /joint_states + cameras); /MoveItGraph's driving + publishing nodes
+          sim  → Isaac IS the robot: /SimRobotGraph drives from /isaac_joint_commands
+                 and publishes /isaac_joint_states + /clock; /RealRobotGraph mirror OFF.
+          real → Isaac MIRRORS the real robot: /RealRobotGraph ON (drive from real
+                 /joint_states + cameras); /SimRobotGraph's driving + publishing nodes
                  OFF (so it neither moves Isaac nor feeds the twin loop).
 
         Cross-mode replay is stopped at the SOURCE: the relay (셸2) is the only thing
@@ -1110,21 +1116,21 @@ class PipelineWindow:
         """
         self._mode = mode
         if mode == "sim":
-            clear_artic_commands(self._moveit_graph_path)
-            self._graph.set_active(False)      # /ActionGraph mirror off
+            clear_artic_commands(self._sim_graph_path)
+            self._real_graph.set_active(False)      # /RealRobotGraph mirror off
             if self._pipeline_mode == "moveit":
                 self._set_relay_forwarding(True)
-                self._moveit_graph.set_active(True)
-                which = "/MoveItGraph drives (live /isaac_joint_commands)"
+                self._sim_graph.set_active(True)
+                which = "/SimRobotGraph drives (live /isaac_joint_commands)"
             else:
-                self._moveit_graph.set_active(False)
+                self._sim_graph.set_active(False)
                 which = "in-process executor drives Isaac UR20 (ROS-free)"
         else:  # real
             self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
-            self._moveit_graph.set_active(False)
-            clear_artic_commands(self._graph_path)
-            self._graph.set_active(True)       # /ActionGraph mirror on
-            which = "/ActionGraph mirrors real /joint_states (twin)"
+            self._sim_graph.set_active(False)
+            clear_artic_commands(self._real_graph_path)
+            self._real_graph.set_active(True)       # /RealRobotGraph mirror on
+            which = "/RealRobotGraph mirrors real /joint_states (twin)"
         self._mode_applied = mode
         self._sync_mode_ui()
         self._append_log(f"[run-mode] → {mode.upper()} :: {which}")
@@ -2248,7 +2254,7 @@ class PipelineWindow:
         if wh == self._render_resolution:
             return                      # 스펙 편집마다 그래프를 건드리지 않는다
         try:
-            urctl.set_render_resolution(self._graph_path, wh[0], wh[1])
+            urctl.set_render_resolution(self._real_graph_path, wh[0], wh[1])
         except Exception as e:  # noqa: BLE001 — RP 노드가 없을 수 있다(카메라 없이 그래프 생성)
             self._append_log(f"[cam] render product resize skipped: {e}")
             return
@@ -3051,12 +3057,12 @@ def main():
     if inspection_cam is not None:
         simulation_app.update()
 
-    graph_path = urctl.build_action_graph(articulation_root, inspection_cam)
+    real_graph_path = urctl.build_real_robot_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
     # Separate MoveIt bridge graph (/isaac_joint_commands → robot, robot → /isaac_joint_states).
     # Gated independently from the inspection graph by the top-level pipeline mode.
-    moveit_graph_path = urctl.build_moveit_graph(articulation_root)
+    sim_graph_path = urctl.build_sim_robot_graph(articulation_root)
     simulation_app.update()
 
     # Physics-free ghost overlay for trajectory preview. Built once offline
@@ -3092,10 +3098,10 @@ def main():
         ghost_root_prim=GHOST_ROOT_PATH,
         base_link_path=base_link,
         chain=chain,
-        graph_path=graph_path,
+        real_graph_path=real_graph_path,
         default_object=(args.object or "sample"),
         initial_mode=args.mode,
-        moveit_graph_path=moveit_graph_path,
+        sim_graph_path=sim_graph_path,
         initial_pipeline_mode=args.pipeline_mode,
         articulation_root=articulation_root,
         scene=_cfg_module.ACTIVE_SCENE,
@@ -3146,10 +3152,10 @@ def main():
         is_playing = simulation_context.is_playing()
         if is_playing != was_playing:
             # Clear stale commands before the next step so they aren't re-applied.
-            clear_artic_commands(graph_path, moveit_graph_path)
+            clear_artic_commands(real_graph_path, sim_graph_path)
             if is_playing:
                 # Restore start pose only in sim (Isaac is the robot). In real mode
-                # the /ActionGraph mirror re-drives Isaac from the live /joint_states,
+                # the /RealRobotGraph mirror re-drives Isaac from the live /joint_states,
                 # so forcing a start pose would just fight the twin.
                 restore_pending = (window._mode == "sim")
                 window._append_log(

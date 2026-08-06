@@ -39,7 +39,8 @@ Module API (used by isaac_pipeline.py):
     find_articulation_root() -> str
     set_start_pose(articulation_root, joint_names, positions) -> None
     setup_inspection_camera(root_path, camera_name) -> str | None
-    build_action_graph(articulation_root, inspection_cam) -> str   # graph path
+    build_real_robot_graph(articulation_root, inspection_cam) -> str  # graph path
+    build_sim_robot_graph(articulation_root) -> str                   # graph path
 """
 
 import argparse
@@ -72,12 +73,18 @@ ENV_PATH   = "/World/Environment"
 # 스코프들(CuRoboCollisionSpheres 등)과 겹치면 안 된다 — scene_config 가 검증한다.
 OBSTACLES_SCOPE = "/World/SceneObstacles"
 ISAAC_VISUAL_TOKENS = frozenset({"primitive", "hidden", "usd_table", "usd_mount"})
-ACTION_GRAPH_PATH = "/ActionGraph"
-MOVEIT_GRAPH_PATH = "/MoveItGraph"
+# Isaac 의 UR20 을 무엇이 움직이는가로 갈린다. 동시에 하나만 tick 한다 —
+# 두 그래프 모두 ArticulationController 를 갖고 있어서, 같이 돌면 같은 관절을 두고 싸운다.
+#   RealRobotGraph : 실로봇 /joint_states → Isaac (Isaac 은 트윈 화면) + 검사 카메라 발행
+#   SimRobotGraph  : /isaac_joint_commands → Isaac, /isaac_joint_states·/clock 발행
+#                    (Isaac 이 ros2_control 의 하드웨어 대역을 한다)
+# ⚠️ sim × inspection 에서는 **둘 다 안 돈다** — in-process executor 가 직접 구동한다.
+REAL_ROBOT_GRAPH_PATH = "/RealRobotGraph"
+SIM_ROBOT_GRAPH_PATH = "/SimRobotGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
 CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 INSPECTION_CAMERA_NAME = "InspectionCamera"
-# 렌더 프로덕트 노드의 그래프 내 이름. build_action_graph 의 노드 키와 반드시 같아야 한다
+# 렌더 프로덕트 노드의 그래프 내 이름. build_real_robot_graph 의 노드 키와 반드시 같아야 한다
 # (같은 파일이라 rename 은 이 파일 grep 하나로 끝난다). 바깥에서 해상도를 바꿀 때는 이 이름을
 # 직접 쓰지 말고 set_render_resolution() 을 부른다 — 그래프 스키마는 이 모듈이 소유한다.
 RENDER_PRODUCT_NODE = "RP"
@@ -143,10 +150,10 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
     # extension-enable (which is fragile after play() in Isaac 6.0).
     if enable_ros_bridge:
         extensions.enable_extension("isaacsim.ros2.bridge")
-    # In GUI mode, also load the OmniGraph editor window so the /ActionGraph is
+    # In GUI mode, also load the OmniGraph editor window so the graphs are
     # inspectable via Window > Graph Editors > Action Graph. SimulationApp's
     # minimal app does NOT auto-enable editor UI: the graph runtime works (and
-    # /ActionGraph shows in Stage), but the editor menu/window are absent until
+    # they show in Stage), but the editor menu/window are absent until
     # this extension is on.
     if not headless:
         extensions.enable_extension("omni.graph.window.action")
@@ -473,18 +480,22 @@ def setup_inspection_camera(
     return inspection_cam_path
 
 
-def build_action_graph(articulation_root: str, inspection_cam: str | None) -> str:
-    """Create the ROS2 joint-state subscriber + optional camera publishers. Returns graph path."""
+def build_real_robot_graph(articulation_root: str, inspection_cam: str | None) -> str:
+    """실로봇 /joint_states 로 Isaac 을 구동(미러) + 검사 카메라 발행. graph path 반환.
+
+    단방향이다 — Isaac 은 관절 상태를 ROS 로 되돌려주지 않는다(카메라 이미지만 내보낸다).
+    run mode = real 에서만 tick 한다.
+    """
     import omni.graph.core as og
     import omni.usd
     from isaacsim.core.utils import prims
 
-    # Idempotency guard: ACTION_GRAPH_PATH is fixed, so re-running this would try
+    # Idempotency guard: REAL_ROBOT_GRAPH_PATH is fixed, so re-running this would try
     # to CREATE_NODES onto an existing graph (duplicate-node error). Tear any
     # existing graph down first so the function is safe to call more than once.
     stage = omni.usd.get_context().get_stage()
-    if stage is not None and stage.GetPrimAtPath(ACTION_GRAPH_PATH).IsValid():
-        prims.delete_prim(ACTION_GRAPH_PATH)
+    if stage is not None and stage.GetPrimAtPath(REAL_ROBOT_GRAPH_PATH).IsValid():
+        prims.delete_prim(REAL_ROBOT_GRAPH_PATH)
 
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
@@ -540,7 +551,7 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
 
     try:
         og.Controller.edit(
-            {"graph_path": ACTION_GRAPH_PATH, "evaluator_name": "execution"},
+            {"graph_path": REAL_ROBOT_GRAPH_PATH, "evaluator_name": "execution"},
             {
                 og.Controller.Keys.CREATE_NODES: create_nodes,
                 og.Controller.Keys.CONNECT: connect,
@@ -550,7 +561,7 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
     except Exception as e:
         print(e)
 
-    return ACTION_GRAPH_PATH
+    return REAL_ROBOT_GRAPH_PATH
 
 
 def set_render_resolution(graph_path: str, width: int, height: int) -> None:
@@ -570,25 +581,25 @@ def set_render_resolution(graph_path: str, width: int, height: int) -> None:
             f"{graph_path}/{RENDER_PRODUCT_NODE}.inputs:{name}").set(int(value))
 
 
-def build_moveit_graph(articulation_root: str) -> str:
+def build_sim_robot_graph(articulation_root: str) -> str:
     """Create the MoveIt(cuMotion) bridge graph. Returns graph path.
 
-    Mirrors build_action_graph but wired for the isaac_ros_cumotion / MoveIt
+    Mirrors build_real_robot_graph but wired for the isaac_ros_cumotion / MoveIt
     TopicBasedSystem convention (ur.ros2_control.xacro):
       - subscribe MOVEIT_JOINT_COMMANDS_TOPIC (/isaac_joint_commands) → drive robot
       - publish   MOVEIT_JOINT_STATES_TOPIC   (/isaac_joint_states)   ← robot state
 
-    Built as a SEPARATE graph from /ActionGraph so the two can be gated
+    Built as a SEPARATE graph from /RealRobotGraph so the two can be gated
     independently (the pipeline UI keeps only one ticking at a time).
     """
     import omni.graph.core as og
     import omni.usd
     from isaacsim.core.utils import prims
 
-    # Idempotency guard (see build_action_graph).
+    # Idempotency guard (see build_real_robot_graph).
     stage = omni.usd.get_context().get_stage()
-    if stage is not None and stage.GetPrimAtPath(MOVEIT_GRAPH_PATH).IsValid():
-        prims.delete_prim(MOVEIT_GRAPH_PATH)
+    if stage is not None and stage.GetPrimAtPath(SIM_ROBOT_GRAPH_PATH).IsValid():
+        prims.delete_prim(SIM_ROBOT_GRAPH_PATH)
 
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
@@ -632,7 +643,7 @@ def build_moveit_graph(articulation_root: str) -> str:
 
     try:
         og.Controller.edit(
-            {"graph_path": MOVEIT_GRAPH_PATH, "evaluator_name": "execution"},
+            {"graph_path": SIM_ROBOT_GRAPH_PATH, "evaluator_name": "execution"},
             {
                 og.Controller.Keys.CREATE_NODES: create_nodes,
                 og.Controller.Keys.CONNECT: connect,
@@ -642,7 +653,7 @@ def build_moveit_graph(articulation_root: str) -> str:
     except Exception as e:
         print(e)
 
-    return MOVEIT_GRAPH_PATH
+    return SIM_ROBOT_GRAPH_PATH
 
 
 def main():
@@ -676,7 +687,7 @@ def main():
     if inspection_cam is not None:
         simulation_app.update()
 
-    build_action_graph(articulation_root, inspection_cam)
+    build_real_robot_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
     simulation_context.initialize_physics()
