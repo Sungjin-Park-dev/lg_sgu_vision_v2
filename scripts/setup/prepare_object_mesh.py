@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from common.math_utils import quaternion_to_rotation_matrix  # noqa: E402
 
 
@@ -81,6 +81,8 @@ def rotation_matrix(args: argparse.Namespace) -> np.ndarray:
     if args.quat is not None:
         return quaternion_matrix(np.asarray(args.quat, dtype=float))
 
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     config.apply_object_placement(args.object)
     configured = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
     target = quaternion_to_rotation_matrix(
@@ -146,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="bake a corrective rotation and restore the object origin convention",
     )
     reorient_parser.add_argument("--object", required=True)
+    scene_config.add_cli_argument(reorient_parser)
     reorient_parser.add_argument("--input", type=Path, default=Path("source.obj"))
     reorient_parser.add_argument("--output", type=Path, default=Path("source.obj"))
     rotation = reorient_parser.add_mutually_exclusive_group(required=True)

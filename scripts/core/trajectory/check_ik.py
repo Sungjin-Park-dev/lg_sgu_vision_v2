@@ -32,7 +32,7 @@ from core.trajectory import (  # noqa: E402
     solve_ik_multi_seed,
 )
 from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -50,6 +50,7 @@ def _parse_args() -> argparse.Namespace:
                         help=f"IK seeds per viewpoint (default: {NUM_IK_SEEDS})")
     parser.add_argument("--batch-size", type=int, default=IK_BATCH_SIZE,
                         help=f"IK batch size (default: {IK_BATCH_SIZE})")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--object-position", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"),
                         help="Override target object position in robot-base frame (meters)")
@@ -70,6 +71,8 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     if config.apply_object_placement(args.object):
         print(f"  Per-object placement '{args.object}': pos={config.TARGET_OBJECT['position']}, "
               f"quat={config.TARGET_OBJECT['rotation']}")

@@ -369,8 +369,12 @@ def apply_cli(args, config_module) -> str:
 
     주의: 반드시 config.apply_object_placement() **이전**에 불러야 한다 —
     물체 배치가 이제 씬 소유이기 때문이다.
+
+    기본 씬은 config import 시점에 이미 로드돼 있으므로, --scene 이 없으면 재로드하지 않는다
+    (재로드하면 CLI override 로 덮어쓴 TARGET_OBJECT 가 조용히 되돌아간다).
     """
     name = getattr(args, "scene", None)
-    active = config_module.load_scene(name)
-    print(f"  Scene: {active} ({config_module.ACTIVE_SCENE_PATH})")
-    return active
+    if name is not None:
+        config_module.load_scene(name)
+    print(f"  Scene: {config_module.ACTIVE_SCENE} ({config_module.ACTIVE_SCENE_PATH})")
+    return config_module.ACTIVE_SCENE

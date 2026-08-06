@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns.candidates import (  # noqa: E402
     _build_pose_variants,
@@ -141,6 +141,7 @@ def _parse_args() -> argparse.Namespace:
                         help="Refuse a component whose dense Int64 matrix exceeds this size")
     parser.add_argument("--keep-glns-files", action="store_true",
                         help="Keep generated .gtsp and GLNS tour files beside the result")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--object-position", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"))
     parser.add_argument("--object-quat", type=float, nargs=4, default=None,
@@ -271,6 +272,8 @@ def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) 
 
 def main() -> int:
     args = _parse_args()
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     if config.apply_object_placement(args.object):
         print(f"  Per-object placement: pos={config.TARGET_OBJECT['position']}, "
               f"quat={config.TARGET_OBJECT['rotation']}")

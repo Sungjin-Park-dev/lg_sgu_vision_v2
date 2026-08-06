@@ -45,6 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Reuse the core Isaac scene loaders — same workcell, robot, camera.
 from core.isaac import scene as urctl  # noqa: E402
+from common import config as _cfg_module  # noqa: E402
+from common import scene_config  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -740,11 +742,15 @@ class PipelineWindow:
                  default_object: str, initial_mode: str = "sim",
                  moveit_graph_path: str = "/MoveItGraph",
                  initial_pipeline_mode: str = "inspection",
-                 articulation_root: str = ""):
+                 articulation_root: str = "",
+                 scene: str = ""):
         import omni.ui as ui
 
         self._ui = ui
         self._mode = initial_mode  # "sim" (no live ROS) | "real" (ROS robot)
+        # 활성 씬 이름 — 서브프로세스(check_ik/solve/plan_move)에 그대로 넘긴다.
+        # 앱과 플래너가 다른 셀을 보면 조용히 틀린 궤적이 나온다.
+        self._scene = scene or _cfg_module.ACTIVE_SCENE
         # Top-level mode: "inspection" (this whole UI) | "moveit" (MoveIt drives robot).
         self._pipeline_mode = initial_pipeline_mode
         self._log_lines: list[str] = []
@@ -1591,6 +1597,7 @@ class PipelineWindow:
         ]
         if n_vp is not None:
             cmd += ["--num-viewpoints", str(n_vp)]
+        cmd += ["--scene", self._scene]
         cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
         cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
 
@@ -2489,6 +2496,7 @@ class PipelineWindow:
         shell = (
             f"{self._uv} run --no-sync scripts/core/glns/solve.py "
             f"--object {obj!r} --viewpoints {h5!r} "
+            f"--scene {self._scene!r} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
@@ -2637,6 +2645,7 @@ class PipelineWindow:
         shell = (
             f"{self._uv} run --no-sync scripts/core/trajectory/plan_move.py "
             f"--object {obj!r} "
+            f"--scene {self._scene!r} "
             f"--object-position {' '.join(f'{v:.6f}' for v in pos_robot)} "
             f"--object-quat {' '.join(f'{v:.6f}' for v in quat_wxyz)} "
             f"--from-joints={','.join(f'{v:.6f}' for v in current_q)!r} "
@@ -2932,6 +2941,9 @@ def main():
     if not args.usd_path.exists():
         sys.exit(f"Robot USD not found: {args.usd_path}")
 
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
+    scene_config.apply_cli(args, _cfg_module)
+
     simulation_app = urctl.start_sim(headless=False)
 
     from isaacsim.core.api import SimulationContext
@@ -2995,6 +3007,7 @@ def main():
         moveit_graph_path=moveit_graph_path,
         initial_pipeline_mode=args.pipeline_mode,
         articulation_root=articulation_root,
+        scene=_cfg_module.ACTIVE_SCENE,
     )
 
     simulation_context.initialize_physics()

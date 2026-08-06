@@ -53,6 +53,7 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config as _config  # noqa: E402
+from common import scene_config as _scene_config  # noqa: E402
 
 ROBOT_DIR = PROJECT_ROOT / "workcell" / "robot"
 ENV_DIR   = PROJECT_ROOT / "workcell" / "environment"
@@ -112,6 +113,7 @@ def parse_args(argv=None):
                         help=f"Robot USD path (default: {DEFAULT_USD.relative_to(PROJECT_ROOT)})")
     parser.add_argument("--object", type=str, default=None,
                         help="Object name to load workcell (e.g. 'sample')")
+    _scene_config.add_cli_argument(parser)
     parser.add_argument("--mode", choices=["sim", "real"], default="sim",
                         help="sim = Isaac-only, no live ROS traffic (default); "
                              "real = mirror /joint_states + publish to the robot")
@@ -231,8 +233,6 @@ def spawn_scene_obstacles(config_module=_config) -> None:
     import omni.usd
     from isaacsim.core.utils import prims
 
-    from common import scene_config
-
     if prims.is_prim_path_valid(OBSTACLES_SCOPE):
         prims.delete_prim(OBSTACLES_SCOPE)
 
@@ -248,7 +248,7 @@ def spawn_scene_obstacles(config_module=_config) -> None:
         if token in ("usd_table", "usd_mount"):
             continue   # load_workcell 이 전용 USD 로 이미 배치했다
 
-        pos, quat, dims = scene_config.obstacle_obb(obstacle)
+        pos, quat, dims = _scene_config.obstacle_obb(obstacle)
         prim_path = f"{OBSTACLES_SCOPE}/{obstacle['name']}"
         cube = UsdGeom.Cube.Define(stage, prim_path)
         cube.CreateSizeAttr(1.0)
@@ -654,6 +654,9 @@ def main():
             f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD\n"
             f"to workcell/robot/ur20_with_camera.usd"
         )
+
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
+    _scene_config.apply_cli(args, _config)
 
     simulation_app = start_sim(headless=False)
 

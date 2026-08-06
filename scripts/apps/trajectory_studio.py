@@ -699,6 +699,7 @@ class TrajectoryStudio:
         shell = (
             f"uv run --no-sync scripts/core/glns/solve.py "
             f"--object {obj} --viewpoints '{vp}' "
+            f"--scene {config.ACTIVE_SCENE} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
         )
@@ -1125,6 +1126,7 @@ class TrajectoryStudio:
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified viser trajectory studio (GLNS)")
     parser.add_argument("--object", type=str, default=None, help="object name (data/{object}/...)")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--result", type=Path, default=None, help="optional solution.h5 to open")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8081)
@@ -1139,6 +1141,10 @@ def main():
     initial_object = args.object if args.object in objects else objects[0]
     if args.object and args.object not in objects:
         print(f"  '{args.object}' 없음 → '{initial_object}' 사용. 가능: {objects}")
+
+    # 씬을 먼저 — 물체 배치가 씬 소유이고, IKBackend 의 collision_cache 가
+    # 씬의 cuboid 개수로 잡히므로 백엔드 생성 전에 확정돼야 한다.
+    scene_config.apply_cli(args, config)
 
     # 물체 배치를 config 에 반영(IKBackend/gizmo 가 이 pose 를 캡처하므로 그 전에).
     if config.apply_object_placement(initial_object):

@@ -15,7 +15,7 @@ import numpy as np
 SCRIPTS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core.viewpoint import (  # noqa: E402
     DEFAULT_DELAUNAY_DISTANCE_FACTOR,
     DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
@@ -54,6 +54,7 @@ Examples:
 
     # --- Viewpoint generation ---
     parser.add_argument('--object', type=str, required=True, help='오브젝트 이름')
+    scene_config.add_cli_argument(parser)
     parser.add_argument('--material-rgb', type=str, default=None,
                         help='Target material RGB color as "R,G,B" (e.g., "0,255,0")')
     parser.add_argument('--color-tolerance', type=float, default=5.0,
@@ -177,6 +178,8 @@ def main():
     args = parse_arguments()
 
     # 물체별 배치를 반영(rotation 은 bottom-filter 판정에 사용 — line ~1776).
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     if config.apply_object_placement(args.object):
         print(f"  Per-object placement '{args.object}': quat={config.TARGET_OBJECT['rotation']}")
 
