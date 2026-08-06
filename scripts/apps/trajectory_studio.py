@@ -49,7 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns import read_result_hdf5  # noqa: E402
 from core.trajectory.live_ik import (  # noqa: E402
@@ -399,13 +399,15 @@ class TrajectoryStudio:
             handle.remove()
         self.layers["obstacles"].clear()
         config.sync_support_to_target()
-        for obstacle in [config.TABLE, config.ROBOT_MOUNT] + list(config.WALLS):
-            box = trimesh.creation.box(extents=np.asarray(obstacle["dimensions"], dtype=float))
+        # 플래너가 푸는 것과 같은 OBB 를 그린다(scene_config.obstacle_obb) — 회전을 빼먹으면
+        # 화면과 충돌 월드가 조용히 어긋난다.
+        for obstacle in config.OBSTACLES:
+            box, position, wxyz = scene_config.obstacle_trimesh(obstacle)
             self.layers["obstacles"].append(self.server.scene.add_mesh_simple(
                 f"/studio/obstacles/{obstacle['name']}",
                 np.asarray(box.vertices), np.asarray(box.faces),
                 color=COLOR_OBSTACLE, opacity=0.18, side="double",
-                position=np.asarray(obstacle["position"], dtype=float),
+                position=position, wxyz=wxyz,
             ))
         self._apply_visibility()
 
