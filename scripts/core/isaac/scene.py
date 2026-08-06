@@ -66,6 +66,11 @@ STAGE_PATH = "/World/UR20"
 MOUNT_PATH = "/World/Mount"
 TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
+# 씬 YAML 장애물은 전부 이 스코프 아래로 간다. 예약 경로와 겹치지 않고, 스코프 하나만
+# 지우면 정리된다. 스코프 이름은 isaac_pipeline 이 스테이지 전체에서 이름으로 지우는
+# 스코프들(CuRoboCollisionSpheres 등)과 겹치면 안 된다 — scene_config 가 검증한다.
+OBSTACLES_SCOPE = "/World/SceneObstacles"
+ISAAC_VISUAL_TOKENS = frozenset({"primitive", "hidden", "usd_table", "usd_mount"})
 ACTION_GRAPH_PATH = "/ActionGraph"
 MOVEIT_GRAPH_PATH = "/MoveItGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
@@ -153,7 +158,7 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
 
 
 def load_workcell(usd_path: Path) -> None:
-    """Place environment + mount + table + robot + support cuboid on stage."""
+    """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다."""
     from isaacsim.core.utils import prims
 
     prims.create_prim(
@@ -181,7 +186,7 @@ def load_workcell(usd_path: Path) -> None:
         usd_path=str(usd_path),
     )
 
-    _create_support(_config)
+    spawn_scene_obstacles(_config)
 
 
 def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
@@ -211,24 +216,61 @@ def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
     return position, scale
 
 
-def _create_support(config_module) -> None:
-    """Create or replace the visual support using the current collision config."""
-    from isaacsim.core.api.objects import VisualCuboid
+def spawn_scene_obstacles(config_module=_config) -> None:
+    """씬 YAML 의 장애물을 스테이지에 그린다. 재호출 안전(스코프째 지우고 다시 만든다).
+
+    플래너가 푸는 것과 같은 OBB(scene_config.obstacle_obb)를 그린다 — cuRobo 가 비-cuboid 를
+    OBB 로만 받기 때문이다. 그래서 화면에 보이는 것이 곧 충돌 월드다.
+
+    isaac_visual 토큰(어휘의 소유자는 이 모듈이다):
+      usd_table / usd_mount  전용 USD 자산이 이미 load_workcell 에서 배치된다 → 여기선 건너뛴다
+      hidden                 프림은 만들되 invisible. Stage 트리에서 켜면 플래너가 보는 벽이 보인다
+      primitive              반투명 박스로 그린다
+    """
+    from pxr import Gf, UsdGeom
+    import omni.usd
     from isaacsim.core.utils import prims
 
-    prim_path = "/World/Support"
-    if prims.is_prim_path_valid(prim_path):
-        prims.delete_prim(prim_path)
+    from common import scene_config
 
-    support = next(w for w in config_module.WALLS if w["name"] == "support")
-    VisualCuboid(
-        prim_path=prim_path,
-        name="support",
-        position=support["position"] + np.array([0.0, 0.0, MOUNT_HEIGHT]),
-        size=1.0,
-        scale=support["dimensions"],
-        color=np.array([0.5, 0.5, 0.5]),
-    )
+    if prims.is_prim_path_valid(OBSTACLES_SCOPE):
+        prims.delete_prim(OBSTACLES_SCOPE)
+
+    stage = omni.usd.get_context().get_stage()
+    UsdGeom.Xform.Define(stage, OBSTACLES_SCOPE)
+
+    for obstacle in config_module.OBSTACLES:
+        token = obstacle.get("isaac_visual", "primitive")
+        if token not in ISAAC_VISUAL_TOKENS:
+            raise ValueError(
+                f"obstacle '{obstacle['name']}': 알 수 없는 isaac_visual {token!r} — "
+                f"가능한 값 {sorted(ISAAC_VISUAL_TOKENS)}")
+        if token in ("usd_table", "usd_mount"):
+            continue   # load_workcell 이 전용 USD 로 이미 배치했다
+
+        pos, quat, dims = scene_config.obstacle_obb(obstacle)
+        prim_path = f"{OBSTACLES_SCOPE}/{obstacle['name']}"
+        cube = UsdGeom.Cube.Define(stage, prim_path)
+        cube.CreateSizeAttr(1.0)
+        cube.CreateDisplayColorAttr([Gf.Vec3f(0.5, 0.5, 0.5)])
+        cube.CreateDisplayOpacityAttr([0.35])
+
+        # position/scale 을 create_prim 이나 VisualCuboid 로 주면 XFormPrim → physics/Fabric
+        # 경로를 타서 **재생 중**에는 어긋난다(load_target_object 의 주석 참고 — 같은 버그를
+        # 타깃 물체에서 이미 겪었다). 로컬 USD op 를 직접 저작하면 재생 상태와 무관하다.
+        # USD 는 row-vector 규약이라 스케일이 먼저다.
+        S = Gf.Matrix4d().SetScale(Gf.Vec3d(*(float(v) for v in dims)))
+        RT = Gf.Matrix4d()
+        RT.SetTransform(
+            Gf.Rotation(Gf.Quatd(float(quat[0]), Gf.Vec3d(*(float(v) for v in quat[1:])))),
+            Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]) + MOUNT_HEIGHT),
+        )
+        xf = UsdGeom.Xformable(cube.GetPrim())
+        xf.ClearXformOpOrder()
+        xf.AddTransformOp().Set(S * RT)
+
+        if token == "hidden":
+            UsdGeom.Imageable(cube.GetPrim()).MakeInvisible()
 
 
 def load_target_object(object_name: str | None) -> None:
@@ -255,8 +297,9 @@ def load_target_object(object_name: str | None) -> None:
         )
         return
 
-    # Runtime object swap에서도 support visual을 새 물체 위치에 맞춘다.
-    _create_support(_config)
+    # Runtime object swap에서도 support visual을 새 물체 위치에 맞춘다
+    # (support 는 물체 배치에서 파생되므로 물체가 바뀌면 다시 그려야 한다).
+    spawn_scene_obstacles(_config)
 
     prim_path = f"/World/{_config.TARGET_OBJECT['name']}"
     if prims.is_prim_path_valid(prim_path):
