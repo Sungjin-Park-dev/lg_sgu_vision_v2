@@ -64,6 +64,8 @@ IK_RANDOM_SEED = 123
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
 GHOST_ROOT_PATH = "/World/UR20_preview"
+# prim 이름 → 씬 YAML 의 장애물 이름(USD prim 규칙: 영문/숫자/_).
+_SCENE_PRIM_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
 GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 
 # Trajectory controllers, gated by pipeline mode (only one active at a time):
@@ -873,6 +875,7 @@ class PipelineWindow:
                 with ui.VStack(height=0, spacing=6):
                     self._build_panel_pipeline_mode()
                     self._build_panel_mode()
+                    self._build_panel_scene()
                     self._build_panel_object()
                     self._build_panel_generate()
                     self._build_panel_preview()
@@ -1174,6 +1177,88 @@ class PipelineWindow:
         for button in (self._btn_home_approach, self._btn_home_return):
             if button is not None:
                 button.enabled = home_enabled
+
+    def _build_panel_scene(self):
+        """활성 셀(씬)이 무엇인지 보여주고, 뷰포트에서 잰 치수를 씬 YAML 조각으로 뽑는다.
+
+        기즈모로 옮긴 결과는 **저장해야** 계획에 반영된다(스테이지는 플래너의 진실원이 아니다).
+        그 저장 경로가 이 버튼이다 — 찍힌 조각을 workcell/scenes/{scene}.yaml 에 붙여넣는다.
+        """
+        ui = self._ui
+        frame = ui.CollapsableFrame("Scene (obstacles)", height=0)
+        self._inspection_frames.append(frame)
+        with frame:
+            with ui.VStack(spacing=4):
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Active scene", width=110)
+                    ui.Label(f"{self._scene}  (workcell/scenes/{self._scene}.yaml)")
+                with ui.HStack(height=28, spacing=6):
+                    self._lock(ui.Button("Log Selected Prim as YAML",
+                                         clicked_fn=self._on_log_selected_prim_yaml))
+
+    def _on_log_selected_prim_yaml(self):
+        """뷰포트에서 고른 prim 의 pose/치수를 씬 YAML 조각으로 로그에 찍는다(파일은 안 쓴다).
+
+        파일을 쓰지 않는 이유: 씬 YAML 은 손으로 쓴 근거 주석을 달고 있어서 writer 가 그걸
+        날린다. 실측값은 사람이 보고 넣는 게 맞다.
+        """
+        import omni.usd
+        from pxr import Gf, Usd, UsdGeom
+
+        try:
+            selection = omni.usd.get_context().get_selection()
+            paths = list(selection.get_selected_prim_paths())
+        except Exception as exc:      # Kit 버전마다 selection API 가 다르다 — 죽지 않고 안내만
+            self._append_log(f"[scene] 선택 API 를 쓸 수 없다 ({exc}) — Stage 트리에서 확인할 것")
+            return
+        if not paths:
+            self._append_log("[scene] 뷰포트나 Stage 트리에서 prim 을 먼저 고를 것.")
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        # BBoxCache 는 참조된 USD(테이블 등) 같은 임의 prim 에도 동작한다. Xformable 의
+        # 행렬에서 ExtractRotationQuat 를 쓰면 스케일이 섞인 행렬에서 회전이 오염되므로
+        # 쓰지 않는다 — 여기서는 bbox 행렬의 basis 행을 정규화해 회전과 크기를 분리한다.
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                  [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+                                  useExtentsHint=True)
+        for path in paths:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                self._append_log(f"[scene] {path}: 유효하지 않은 prim")
+                continue
+            bound = cache.ComputeWorldBound(prim)
+            rng = bound.GetRange()
+            if rng.IsEmpty():
+                self._append_log(f"[scene] {path}: bbox 를 계산할 수 없다 (Xform 전용 prim?)")
+                continue
+
+            m = bound.GetMatrix()
+            # bbox 행렬의 basis 행 노름 = 축별 스케일. 그걸 빼내야 (a) 치수가 실제 크기가 되고
+            # (b) 남은 정규직교 행렬에서 회전을 깨끗하게 뽑을 수 있다.
+            basis = [np.array([m[r][0], m[r][1], m[r][2]], dtype=float) for r in range(3)]
+            scales = [float(np.linalg.norm(b)) or 1.0 for b in basis]
+            dims = [float(s) * k for s, k in zip(rng.GetSize(), scales)]
+            center_world = m.Transform(rng.GetMidpoint())
+            position = [float(center_world[0]), float(center_world[1]),
+                        float(center_world[2]) - urctl.MOUNT_HEIGHT]
+
+            rot = Gf.Matrix4d()
+            for r, (b, s) in enumerate(zip(basis, scales)):
+                rot.SetRow3(r, Gf.Vec3d(*(b / s)))
+            quat = rot.ExtractRotationQuat().GetNormalized()
+            rotation = [float(quat.GetReal()), *(float(v) for v in quat.GetImaginary())]
+
+            name = _SCENE_PRIM_NAME_RE.sub("_", prim.GetName()).strip("_").lower() or "obstacle"
+            snippet = scene_config.obstacle_yaml_snippet(name, position, dims, rotation)
+            if np.any(np.asarray(dims) <= 0.0):
+                self._append_log(f"[scene] {path}: 치수가 0 이다 — 껍데기 없는 prim 인지 확인")
+            if urctl._is_under_root(str(path), urctl.STAGE_PATH) or \
+                    urctl._is_under_root(str(path), GHOST_ROOT_PATH):
+                self._append_log(f"[scene] 주의: {path} 는 로봇의 일부다 — 장애물이 아니다")
+            self._append_log(
+                f"[scene] {path} → workcell/scenes/{self._scene}.yaml 의 obstacles 에 붙여넣기:\n"
+                f"{snippet}")
 
     def _build_panel_object(self):
         """검사 대상 정의 — 물체, 그 물체의 viewpoint h5, 그리고 카메라 스펙.
