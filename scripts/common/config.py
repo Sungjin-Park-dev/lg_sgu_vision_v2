@@ -456,7 +456,8 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
     # 모르는 채 진행하게 되므로 반드시 찍는다(같은 폴더에 coacd/delaunay 가 공존한다).
     if len(candidates) > 1:
         others = ", ".join(p.name for p in candidates if p != chosen)
-        print(f"  viewpoints: {chosen.name} (최근) — 같은 폴더의 다른 후보: {others}")
+        print(f"  viewpoints: {chosen.name} (newest) - other candidates in the same "
+              f"folder: {others}")
     return chosen
 
 

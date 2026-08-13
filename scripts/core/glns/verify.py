@@ -139,9 +139,9 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
         gl_reconfig = np.asarray(gl_reconfig, dtype=bool)
         mismatch = int(np.sum(gl_reconfig != is_reconfig))
         if mismatch:
-            print(f"    WARNING: GLNS is_reconfiguration 와 재산출 결과가 {mismatch}개 "
-                  f"edge 에서 불일치 — wrist_3 lock/threshold 가정 확인 필요. "
-                  f"재산출값으로 진행.")
+            print(f"    WARNING: GLNS is_reconfiguration disagrees with the recomputed "
+                  f"value on {mismatch} edge(s) - check the wrist_3 lock / threshold "
+                  f"assumption. Proceeding with the recomputed value.")
 
     # 작은 jump는 원래 joint 직선 보간 대상이다. 이 중 충돌하는 edge도 viewpoint를
     # drop하기 전에 MotionGen fallback 대상으로 승격한다. reconfiguration edge와 합쳐
@@ -154,7 +154,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
         labels = [f"{int(vp_order[i])}→{int(vp_order[i + 1])}"
                   for i in collision_fallback_indices]
         print(f"    Scan interpolation collision: {len(collision_fallback_indices)} edge(s) "
-              f"→ MotionGen fallback [{', '.join(labels)}]")
+              f"-> MotionGen fallback [{', '.join(labels)}]")
 
     # --- Phase 4: reconfig + colliding scan edge transit 계획(충돌회피 motion) ---
     motion_indices = np.union1d(reconfig_indices, collision_fallback_indices).astype(np.int64)
@@ -312,7 +312,7 @@ def main() -> int:
 
     print(f"Result:   {args.result}")
     print(f"Object:   {object_name}  pos={object_position.tolist()}  quat(wxyz)={object_quat.tolist()}")
-    print(f"WD:       {wd_m * 1000:.0f} mm   reconfig threshold: {reconfig_deg:.0f}°"
+    print(f"WD:       {wd_m * 1000:.0f} mm   reconfig threshold: {reconfig_deg:.0f} deg"
           f"   roll_augmented: {roll_augmented}")
     print(f"Output:   {out_dir}")
     print()
@@ -368,14 +368,14 @@ def main() -> int:
         print(f"[component {cid}] status={status}, {n_members} viewpoints")
 
         if status != "solved":
-            print(f"    SKIP — {status}: {component.get('reason', '')}")
+            print(f"    SKIP - {status}: {component.get('reason', '')}")
             rows.append((cid, status, n_members, None))
             continue
 
         if n_members < 2:
             # 이을 edge 는 없지만 방문은 해야 한다 — 건너뛰면 joined 에서 조용히 사라진다.
             res = _singleton_component(component)
-            print("    single viewpoint — 계획할 edge 없음, join 에 그대로 포함")
+            print("    single viewpoint - no edge to plan, included in the join as is")
         else:
             # 성분별 CSV/npz 는 쓰지 않는다(out_csv=None). join 은 메모리의 final_traj 를
             # 쓰고, 실행용 산출물은 joined 하나면 충분하다.
@@ -389,7 +389,7 @@ def main() -> int:
         rows.append((cid, "solved", n_members, res))
 
         if res.get("error"):
-            print(f"    SKIP — {res['error']}")
+            print(f"    SKIP - {res['error']}")
             continue
 
         verdict = "OK (collision-free)" if res["collision_free"] else \
@@ -409,7 +409,7 @@ def main() -> int:
         print(f"    transit {res['transit_ok']}/{res['transit_req']} OK{fallback_note}, "
               f"coverage {res['covered']}/{res['M']}, "
               f"{res['n_waypoints']} waypoints{time_note}{drop_note}")
-        print(f"    → {verdict}")
+        print(f"    -> {verdict}")
         if res["collision_free"]:
             joined_cids.add(cid)
             join_inputs.append({
@@ -456,23 +456,24 @@ def main() -> int:
     print(f"Coverage: {covered_total}/{expected_total} viewpoints"
           + (f"  ({missing_total} MISSING)" if missing_total else ""))
     if missing_total:
-        print("NOTE: joined 에 들어가지 못한 viewpoint 가 있다 — 못 푼 성분이거나, 충돌-aware "
-              "이동에서 GLNS 경로가 보존되지 못한 구간(연속 scan edge 충돌/transit 실패)이다.")
+        print("NOTE: some viewpoints are missing from the join - either an unsolved "
+              "component, or a stretch where the collision-aware motion could not "
+              "preserve the GLNS path (scan-edge collision / transit failure).")
     print("=" * 64)
 
     # --- 성분 연결: 하나의 연속 실행 궤적(trajectory.csv) ---
     if args.join:
-        print("JOIN COMPONENTS → single continuous trajectory")
+        print("JOIN COMPONENTS -> single continuous trajectory")
         print("-" * 64)
         if args.require_full_coverage and missing_total:
             (out_dir / "trajectory.csv").unlink(missing_ok=True)
             (out_dir / "trajectory.npz").unlink(missing_ok=True)
-            print(f"  FAIL — --require-full-coverage: {missing_total} viewpoint(s) "
-                  f"missing from joined ({covered_total}/{expected_total}); 미생성.")
+            print(f"  FAIL - --require-full-coverage: {missing_total} viewpoint(s) "
+                  f"missing from joined ({covered_total}/{expected_total}); not written.")
             print("=" * 64)
             return 1
         if not join_inputs:
-            print("  연결할 충돌-free 성분이 없음 — joined 미생성.")
+            print("  no collision-free component to join - joined not written.")
             print("=" * 64)
         else:
             joined_csv = out_dir / "trajectory.csv"
@@ -500,24 +501,24 @@ def main() -> int:
                     meta=joined_meta,
                 )
             except SeamFailure as exc:
-                print(f"  SEAM FAILED: {exc} — 가교 불가(via-home 포함). joined 미생성.")
+                print(f"  SEAM FAILED: {exc} - cannot bridge (via-home included). joined not written.")
                 print("=" * 64)
                 return 2
             hb = args.home_bracket
             seq = (["HOME"] if hb else []) + [f"comp{c}" for c in jr["order"]] + \
                   (["HOME"] if hb else [])
-            print(f"  order({args.order}): {' → '.join(seq)}")
+            print(f"  order({args.order}): {' -> '.join(seq)}")
             print(f"  seams {jr['n_seams']}: routes={jr['seam_routes']}")
             g = jr["gate"]
             if g["collision_free"]:
-                print(f"  → OK (collision-free), {g['n_waypoints']} waypoints, "
+                print(f"  -> OK (collision-free), {g['n_waypoints']} waypoints, "
                       f"time={g['total_time']:.1f}s "
                       f"(scan={g['total_time'] - g['transit_time']:.1f}s, "
                       f"transit={g['transit_time']:.1f}s)")
                 print(f"  CSV: {g['csv']}")
                 print("=" * 64)
             else:
-                print(f"  → FAIL — {g['n_collisions']} colliding dense waypoints; joined 미저장")
+                print(f"  -> FAIL - {g['n_collisions']} colliding dense waypoints; joined not saved")
                 print("=" * 64)
                 return 1
 

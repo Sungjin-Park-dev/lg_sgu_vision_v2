@@ -151,7 +151,7 @@ def cluster_ik_solutions(all_solutions, all_success):
         total_reps += len(kept)
 
     avg_reps = total_reps / max(N - empty_count, 1)
-    print(f"  Phase 2 done: {N} viewpoints → avg {avg_reps:.1f} representatives/viewpoint "
+    print(f"  Phase 2 done: {N} viewpoints -> avg {avg_reps:.1f} representatives/viewpoint "
           f"(dedup={CANDIDATE_DEDUP_RAD:.2f} rad, {empty_count} empty)")
 
     return representatives

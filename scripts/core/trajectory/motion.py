@@ -309,8 +309,8 @@ def plan_reconfig_transits(
         })
         if announce:
             print(
-                f"    {_lbl(idx)}→{_lbl(idx+1)}: OK [{route}] ({len(waypoints)} waypoints, "
-                f"max_step={max_step_deg:.2f}°, {dt:.2f}s)"
+                f"    {_lbl(idx)}->{_lbl(idx+1)}: OK [{route}] ({len(waypoints)} waypoints, "
+                f"max_step={max_step_deg:.2f} deg, {dt:.2f}s)"
             )
 
     recon = [int(i) for i in reconfig_indices]
@@ -373,7 +373,7 @@ def plan_reconfig_transits(
             _record(idx, waypoints, route, dt)
         else:
             transit_stats.append({"idx": int(idx), "success": False, "time": dt})
-            print(f"    {_lbl(idx)}→{_lbl(idx+1)}: FAILED [genuinely-unbridgeable] ({dt:.2f}s)")
+            print(f"    {_lbl(idx)}->{_lbl(idx+1)}: FAILED [genuinely-unbridgeable] ({dt:.2f}s)")
     _tick("transit_pending", _t_pending)
 
     n_ok = sum(1 for s in transit_stats if s["success"])

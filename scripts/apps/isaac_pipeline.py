@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -58,6 +59,9 @@ JOINT_NAMES = [
 # Must match scripts/core/trajectory/settings.py::IK_RANDOM_SEED. Kept local because
 # this module is imported by Isaac Sim's bundled Python before the uv subprocess.
 IK_RANDOM_SEED = 123
+# Must match scripts/core/trajectory/settings.py::CANDIDATE_DEDUP_RAD (default dedup
+# threshold for the Check-and-Save-IK / GLNS IK candidate stage).
+CANDIDATE_DEDUP_RAD = 0.08
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
@@ -75,6 +79,8 @@ TARGET_OBJECT_PRIM = "/World/target_object"
 VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
 VIEWPOINTS_POINTS_PRIM = f"{VIEWPOINTS_ROOT_PRIM}/CameraPoints"
 VIEWPOINT_POINT_WIDTH_M = 0.008
+# Tilt 중심으로 고른 viewpoint 하나를 눈에 띄게 (크게 + 노랗게) 그리는 배율.
+VIEWPOINT_HIGHLIGHT_SCALE = 3.0
 COLLISION_SPHERES_SCOPE_NAME = "CuRoboCollisionSpheres"
 FOV_PLANE_SCOPE_NAME = "CameraFovPlane"
 FOV_PLANE_OUTLINE_WIDTH_M = 0.003
@@ -96,7 +102,7 @@ CAMERA_COLLISION_LINKS = {
 
 # Execute 패널의 HOME 이동. 각 leg 는 현재 자세 → 목표를 plan_move.py 로 계획해 실행한다.
 HOME_TRANSITIONS = {
-    "approach": "move to scan start",
+    "approach": "move to start",
     "return": "return to HOME",
 }
 
@@ -270,6 +276,9 @@ class SubprocessRunner:
     line callback. Stderr is merged into stdout to preserve ordering.
     """
 
+    # Cancel 은 프로세스 그룹에 SIGTERM 을 보낸다. 이만큼 지나도 안 죽으면 SIGKILL.
+    KILL_GRACE_S = 3.0
+
     def __init__(self):
         self._proc: Optional[subprocess.Popen] = None
         self._queue: Queue = Queue()
@@ -281,10 +290,17 @@ class SubprocessRunner:
         # them; pump() drops items from a superseded process so a stale __exit__
         # can't flip _done for a newly started one.
         self._gen = 0
+        self._term_at: Optional[float] = None
+        self._cancelled = False
 
     @property
     def running(self) -> bool:
         return not self._done
+
+    @property
+    def cancelled(self) -> bool:
+        """마지막 실행이 사용자 Cancel 로 끝났는가 — 실패와 구분해 로그를 정직하게 쓰려고."""
+        return self._cancelled
 
     def start(self, cmd, cwd, on_line, on_exit):
         # Supersede any in-flight process instead of raising. A prior
@@ -305,10 +321,17 @@ class SubprocessRunner:
         self._on_line = on_line
         self._on_exit = on_exit
         self._done = False
+        self._term_at = None
+        self._cancelled = False
         proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
+            # 자기 프로세스 그룹으로 띄운다 — Cancel 이 bash 뿐 아니라 그 자손(uv → python)
+            # 까지 한 번에 잡아야 한다. `A && B` 셸은 bash 가 exec 하지 않으므로 bash 만
+            # 죽이면 A 가 GPU 를 문 채 살아남고, stdout 파이프도 안 닫혀 reader 스레드가
+            # 끝나지 않는다 → __exit__ 이 오지 않아 UI 가 영원히 잠긴다(실측 확인).
+            start_new_session=True,
         )
         self._proc = proc
         self._reader = threading.Thread(
@@ -324,16 +347,38 @@ class SubprocessRunner:
             rc = proc.wait()
             self._queue.put((gen, "__exit__", rc))
 
-    def terminate(self):
-        if not self.running or self._proc is None:
+    def _signal_group(self, sig):
+        """프로세스 그룹 전체에 시그널. 그룹이 없으면(경합) 프로세스 하나라도 잡는다."""
+        if self._proc is None:
             return
         try:
-            self._proc.terminate()
-        except Exception:
-            pass
+            os.killpg(os.getpgid(self._proc.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                self._proc.send_signal(sig)
+            except Exception:  # noqa: BLE001 — 이미 죽었으면 할 일 없음
+                pass
+
+    def terminate(self):
+        """Cancel — 첫 호출은 그룹에 SIGTERM(정리 기회), 두 번째 호출은 즉시 SIGKILL."""
+        if not self.running or self._proc is None:
+            return
+        self._cancelled = True
+        if self._term_at is None:
+            self._term_at = time.time()
+            self._signal_group(signal.SIGTERM)
+        else:
+            self._term_at = None
+            self._signal_group(signal.SIGKILL)
 
     def pump(self):
         """Drain the queue, call on_line / on_exit on the UI thread."""
+        # SIGTERM 을 못 받는 자손(CUDA 커널 중 등)이 있으면 유예 뒤 강제 종료한다. 안 그러면
+        # 파이프가 안 닫혀 __exit__ 이 오지 않고 UI 가 잠긴 채 남는다.
+        if (self._term_at is not None and not self._done
+                and time.time() - self._term_at > self.KILL_GRACE_S):
+            self._term_at = None
+            self._signal_group(signal.SIGKILL)
         if self._on_line is None:
             return
         try:
@@ -815,6 +860,10 @@ class PipelineWindow:
         self._btn_cancel_ik = None
         self._btn_publish = None
         self._btn_cancel_pub = None
+        self._btn_tilt_generate = None
+        self._btn_tilt_cancel = None
+        # 장시간 작업이 도는 동안 유일하게 살아 있는 위젯(그 작업의 Cancel). None = 유휴.
+        self._busy_cancel = None
         self._slider_model: Optional["ui.SimpleFloatModel"] = None
         self._slider: Optional["ui.FloatSlider"] = None
         self._updating_slider = False
@@ -897,6 +946,23 @@ class PipelineWindow:
             else:
                 raise TypeError(type(model))
 
+    def _checkbox_row(self, label: str, default: bool, width: int = 180):
+        """라벨 + 실제 체크박스 한 줄. 모델을 반환한다(_get_field(key, bool)로 읽음)."""
+        ui = self._ui
+        with ui.HStack(height=22, spacing=6):
+            ui.Label(label, width=width)
+            cb = ui.CheckBox()
+            cb.model.set_value(bool(default))
+            return cb.model
+
+    def _num_field(self, default, width: int = 70):
+        """라벨 없는 좁은 숫자 입력 한 칸 (한 줄에 min/max/n 을 나란히 놓을 때). 모델 반환."""
+        ui = self._ui
+        f = ui.IntField(width=width) if isinstance(default, int) else ui.FloatField(width=width)
+        f.model.set_value(default)
+        self._lock(f)
+        return f.model
+
     # ------------------------------------------------------------------
     # Pipeline mode panel (Inspection / MoveIt) — top-level selector
     # ------------------------------------------------------------------
@@ -961,7 +1027,7 @@ class PipelineWindow:
         else:
             self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
         self._append_log(
-            f"[pipeline] → {mode.upper()} :: "
+            f"[pipeline] -> {mode.upper()} :: "
             + ("MoveIt active, Inspection locked" if mode == "moveit"
                else "Inspection active, MoveIt blocked"))
 
@@ -1040,6 +1106,33 @@ class PipelineWindow:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _set_busy(self, cancel_button=None):
+        """장시간 작업이 도는 동안 Inspection 위젯을 전부 잠그고 그 작업의 Cancel 하나만 남긴다.
+
+        IK 체크 / 스캔·틸트 생성 / 이동 / 실행이 모두 같은 스테이지 상태(물체 pose, 선택한
+        h5·CSV)와 같은 러너를 공유한다. 도중에 다른 버튼이 눌리면 입력이 바뀐 채로 결과가
+        돌아오거나 러너가 갈아엎힌다 — 그래서 하나가 돌면 나머지는 전부 잠근다.
+
+        프레임(_inspection_frames)은 건드리지 않는다: 컨테이너를 비활성화하면 살려둔 Cancel
+        버튼까지 같이 죽을 수 있다. 잠금은 위젯 단위로만 한다.
+        """
+        self._busy_cancel = cancel_button
+        for widget in self._inspection_widgets:
+            keep = widget is cancel_button
+            try:
+                widget.enabled = keep
+                widget.style = {} if keep else self._DIM_WIDGET_STYLE
+            except Exception:  # noqa: BLE001 — best-effort, never fatal
+                pass
+
+    def _clear_busy(self):
+        """작업이 끝났다 — Inspection UI 를 되살리고 모드별 상태를 다시 반영한다."""
+        self._busy_cancel = None
+        if self._pipeline_mode != "inspection":
+            return          # MoveIt 락이 이긴다 — 그쪽이 계속 잠근 상태로 두어야 한다
+        self._set_inspection_ui_enabled(True)
+        self._sync_mode_ui()
+
     def _sync_pipeline_ui(self):
         if self._pipeline_label is not None:
             self._pipeline_label.text = self._pipeline_text()
@@ -1116,7 +1209,7 @@ class PipelineWindow:
             which = "/ActionGraph mirrors real /joint_states (twin)"
         self._mode_applied = mode
         self._sync_mode_ui()
-        self._append_log(f"[run-mode] → {mode.upper()} :: {which}")
+        self._append_log(f"[run-mode] -> {mode.upper()} :: {which}")
 
     def _set_relay_forwarding(self, on: bool):
         """Tell the relay (셸2) whether to feed /isaac_joint_commands. This is the
@@ -1128,7 +1221,7 @@ class PipelineWindow:
         cmd = ("source /opt/ros/jazzy/setup.bash && "
                f"timeout 3 ros2 param set /isaac_joint_command_relay forward_enabled {val} "
                "2>/dev/null || true")
-        self._append_log(f"[relay] forward_enabled → {val}")
+        self._append_log(f"[relay] forward_enabled -> {val}")
         self._relay_runner.start(
             ["bash", "-c", cmd], cwd=PROJECT_ROOT, on_line=self._append_log,
             on_exit=lambda rc: self._append_log(f"[relay] param set exit={rc}"))
@@ -1155,9 +1248,10 @@ class PipelineWindow:
                 self._pipeline_mode == "inspection"
                 and not self._pub_runner.running and not self._sim_executor.running
             )
-        # Unified labels across sim/real (sim naming is the standard).
+        # Unified labels across sim/real (sim naming is the standard). "Move to Start" 는
+        # 스캔·틸트 공용이다 — 두 궤적이 같은 CSV 칸을 쓰므로 하는 일이 정확히 같다.
         if self._btn_home_approach is not None:
-            self._btn_home_approach.text = "Move to Scan Start"
+            self._btn_home_approach.text = "Move to Start"
         if self._btn_home_return is not None:
             self._btn_home_return.text = "Return to HOME"
         # _pub_runner 항이 빠져 있어 real 이동 중에 버튼이 되살아났다(기존 버그).
@@ -1211,30 +1305,73 @@ class PipelineWindow:
                 #          height=40, word_wrap=True)
                 # viewpoint h5 선택은 위 "Load Object & Viewpoints" 로 옮겼다 —
                 # 여기서는 그 h5(_h5_path_model)를 입력으로 쓰기만 한다.
+                # IK 후보 옵션 — Check and Save IK 와 Generate 가 공유한다. 값이 같아야 Generate
+                # 가 저장된 IK(data/{object}/ik/{N}/*.h5)를 그대로 재사용한다. 기본 펼침.
+                with ui.CollapsableFrame("IK options", height=0, collapsed=False):
+                    with ui.VStack(spacing=4):
+                        self._fields["glns_roll_augment"] = self._checkbox_row("roll augment", True)
+                        self._fields["glns_roll_step"] = self._row("    roll-step-deg", 30.0)
+                        self._fields["glns_tilt_augment"] = self._checkbox_row("tilt augment", True)
+                        self._fields["glns_tilt_angles"] = self._row("    tilt-angles-deg", "5 10")
+                        self._fields["glns_tilt_azimuths"] = self._row("    tilt-azimuths", 8)
+                        self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
+                        self._fields["glns_dedup_rad"] = self._row(
+                            "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
+                        self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
+                        self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
                 with ui.HStack(height=28, spacing=6):
                     self._btn_check_ik = self._lock(ui.Button(
-                        "Check IK Reachability",
+                        "Check and Save IK",
                         clicked_fn=self._on_check_ik_reachability,
                     ))
                     self._btn_cancel_ik = self._lock(ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik))
-                with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
+                with ui.CollapsableFrame("Scan options (GLNS)", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
-                        self._fields["glns_hops"]     = self._row("--delaunay-expand-hops (GLNS)", 2)
-                        self._fields["glns_roll_augment"] = self._row("--roll-augment (GLNS, 1/0)", 1)
-                        self._fields["glns_tilt_augment"] = self._row("--tilt-augment (GLNS, 1/0)", 1)
-                        self._fields["glns_tilt_angles"] = self._row("--tilt-angles-deg (GLNS)", "5 10")
-                        self._fields["glns_tilt_azimuths"] = self._row("--tilt-azimuths (GLNS)", 8)
+                        self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 2)
                         self._fields["glns_max_candidates"] = self._row(
-                            "--max-candidates-per-viewpoint (GLNS)", 32)
-                        self._fields["glns_num_seeds"] = self._row(
-                            "--num-seeds (GLNS)", 32)
-                        self._fields["glns_ik_batch_size"] = self._row(
-                            "--ik-batch-size (GLNS)", 128)
+                            "--max-candidates-per-viewpoint", 32)
                 with ui.HStack(height=28, spacing=6):
                     self._btn_generate = self._lock(ui.Button(
                         "Generate Scan Motion", clicked_fn=self._on_generate))
+                    self._btn_cancel_gen = self._lock(ui.Button(
+                        "Cancel", clicked_fn=self._on_cancel_generate))
+                # Tilt: 스캔과 나란한 두 번째 궤적 생성기 — 모든 viewpoint 를 한 번씩 도는 대신
+                # viewpoint 하나를 표면점 중심으로 공전한다(center→up→center→down→center→
+                # left→center→right→center). 입력(물체 pose, viewpoints h5)과 산출물이 놓이는
+                # 자리가 스캔과 같아서 같은 패널에 둔다. 재생/실행은 아래 공용 Preview/Execute.
+                with ui.CollapsableFrame("Tilt options", height=0, collapsed=True):
+                    with ui.VStack(spacing=4):
+                        with ui.HStack(height=22, spacing=6):
+                            ui.Label("center viewpoint idx", width=140)
+                            field = ui.IntField()
+                            field.model.set_value(0)
+                            self._fields["tilt_index"] = field.model
+                            self._lock(field)
+                            self._lock(ui.Button("Highlight", width=90,
+                                                 clicked_fn=self._on_highlight_tilt_viewpoint))
+                        # pitch(down/up) = 카메라 y축 둘레 공전, roll(left/right) = x축 둘레.
+                        # n 은 '중심 → 끝' 한쪽의 샘플 수(중심 포함)라 leg 당 새 포즈는 n-1 개다.
+                        with ui.HStack(height=22, spacing=6):
+                            ui.Label("pitch down/up deg", width=140)
+                            self._fields["tilt_pitch_min"] = self._num_field(-20.0)
+                            self._fields["tilt_pitch_max"] = self._num_field(20.0)
+                            ui.Label("n", width=12)
+                            self._fields["tilt_pitch_n"] = self._num_field(40, width=50)
+                        with ui.HStack(height=22, spacing=6):
+                            ui.Label("roll left/right deg", width=140)
+                            self._fields["tilt_roll_min"] = self._num_field(-20.0)
+                            self._fields["tilt_roll_max"] = self._num_field(20.0)
+                            ui.Label("n", width=12)
+                            self._fields["tilt_roll_n"] = self._num_field(40, width=50)
+                        self._fields["tilt_num_seeds"] = self._row("num-seeds", 32)
+                        self._fields["tilt_batch_size"] = self._row("ik-batch-size", 128)
+                        self._fields["tilt_clamp"] = self._checkbox_row(
+                            "clamp unreachable angles", True)
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_cancel_gen = self._lock(ui.Button("Cancel", clicked_fn=self._on_cancel_generate))
+                    self._btn_tilt_generate = self._lock(ui.Button(
+                        "Generate Tilt Motion", clicked_fn=self._on_generate_tilt))
+                    self._btn_tilt_cancel = self._lock(ui.Button(
+                        "Cancel", clicked_fn=self._on_cancel_generate))
 
     def _build_panel_preview(self):
         ui = self._ui
@@ -1283,7 +1420,7 @@ class PipelineWindow:
                 self._build_camera_view_ui("execute")
                 with ui.HStack(height=28, spacing=6):
                     self._btn_home_approach = self._lock(ui.Button(
-                        "Move to Scan Start",
+                        "Move to Start",
                         clicked_fn=lambda: self._on_plan_home_transition("approach")))
                     self._btn_home_return = self._lock(ui.Button(
                         "Return to HOME",
@@ -1294,7 +1431,7 @@ class PipelineWindow:
                     self._btn_publish = self._lock(ui.Button(
                         "Execute Selected CSV", clicked_fn=self._on_execute))
                     self._btn_cancel_pub = self._lock(ui.Button(
-                        "Cancel Execution", clicked_fn=self._on_cancel_execute))
+                        "Cancel", clicked_fn=self._on_cancel_execute))
 
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
@@ -1323,6 +1460,8 @@ class PipelineWindow:
     # ------------------------------------------------------------------
     def _get_field(self, key, kind):
         m = self._fields[key]
+        if kind is bool:
+            return m.get_value_as_bool()
         if kind is str:
             return m.get_value_as_string()
         if kind is int:
@@ -1331,6 +1470,31 @@ class PipelineWindow:
             return m.get_value_as_float()
         raise TypeError(kind)
 
+    def _ik_batch(self) -> int:
+        return max(1, int(self._get_field("glns_ik_batch_size", int)))
+
+    def _ik_candidate_tokens(self) -> list:
+        """roll/tilt/dedup/num-seeds/ik-seed CLI 토큰 — Check and Save IK 와 Generate 가
+        공유한다. 두 쪽이 같은 값을 넘겨야 저장된 IK(ik_*.h5)가 그대로 재사용된다. IK 배치
+        크기는 결과에 영향이 없고 스크립트별 플래그명이 달라(--batch-size vs --ik-batch-size)
+        여기 넣지 않고 호출자가 붙인다."""
+        toks: list[str] = []
+        if self._get_field("glns_roll_augment", bool):
+            toks.append("--roll-augment")
+            toks += ["--roll-step-deg", str(float(self._get_field("glns_roll_step", float)))]
+        if self._get_field("glns_tilt_augment", bool):
+            toks.append("--tilt-augment")
+            toks.append("--tilt-angles-deg")
+            toks += [str(float(x)) for x in self._get_field("glns_tilt_angles", str).split()]
+            toks += ["--tilt-azimuths", str(max(1, int(self._get_field("glns_tilt_azimuths", int))))]
+        if not self._get_field("glns_dedup", bool):
+            toks.append("--no-dedup")
+        else:
+            toks += ["--dedup-rad", str(float(self._get_field("glns_dedup_rad", float)))]
+        toks += ["--num-seeds", str(max(1, int(self._get_field("glns_num_seeds", int))))]
+        toks += ["--ik-seed", str(IK_RANDOM_SEED)]
+        return toks
+
     def _on_load_object(self):
         """Swap /World/target_object to the dropdown selection at its default pose."""
         idx = self._object_combo.model.get_item_value_model().get_value_as_int()
@@ -1338,7 +1502,7 @@ class PipelineWindow:
         usd_path = PROJECT_ROOT / "data" / obj / "mesh" / "source.usd"
         if not usd_path.exists():
             self._append_log(
-                f"[object] '{obj}' has no source.usd — build it once, then retry:\n"
+                f"[object] '{obj}' has no source.usd - build it once, then retry:\n"
                 f"  uv run scripts/setup/build_object_usd.py --object {obj}")
             return
         self._append_log(f"[object] loading '{obj}' ...")
@@ -1356,7 +1520,7 @@ class PipelineWindow:
         """Print the current object world orientation for prepare_object_mesh.py."""
         pose = self._read_object_world_pose()
         if pose is None:
-            self._append_log("[object] no target prim on stage — Load Object first.")
+            self._append_log("[object] no target prim on stage - Load Object first.")
             return
         (rx, ry, rz), (w, x, y, z) = pose
         obj = (self._current_object or "").strip() or "<name>"
@@ -1425,12 +1589,25 @@ class PipelineWindow:
         )
         return positions + safe_normals * wd_m, wd_m
 
-    def _draw_camera_viewpoint_points(self, points_local, colors=None, opacity: float = 0.9):
+    def _draw_camera_viewpoint_points(self, points_local, colors=None, opacity: float = 0.9,
+                                      highlight: Optional[int] = None):
+        """뷰포인트 점들을 물체 로컬 좌표로 그린다.
+
+        ``highlight`` 를 주면 그 인덱스 하나만 크고 노랗게 — tilt 중심으로 어느 점을 골랐는지
+        스테이지에서 바로 보이게 한다(색 배열이 이미 있으면 그 점만 덮어쓴다).
+        """
         import omni.usd
         from pxr import Gf, UsdGeom, Vt
 
         stage = omni.usd.get_context().get_stage()
         self._delete_viewpoint_points(log=False)
+
+        widths = [VIEWPOINT_POINT_WIDTH_M] * len(points_local)
+        if highlight is not None and 0 <= highlight < len(points_local):
+            widths[highlight] = VIEWPOINT_POINT_WIDTH_M * VIEWPOINT_HIGHLIGHT_SCALE
+            colors = (list(colors) if colors is not None
+                      else [(0.0, 0.85, 1.0)] * len(points_local))
+            colors[highlight] = (1.0, 0.85, 0.0)
 
         UsdGeom.Xform.Define(stage, VIEWPOINTS_ROOT_PRIM)
         points = UsdGeom.Points.Define(stage, VIEWPOINTS_POINTS_PRIM)
@@ -1438,9 +1615,7 @@ class PipelineWindow:
             Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
             for p in points_local
         ]))
-        points.CreateWidthsAttr(Vt.FloatArray(
-            [VIEWPOINT_POINT_WIDTH_M] * len(points_local)
-        ))
+        points.CreateWidthsAttr(Vt.FloatArray(widths))
 
         if colors is None:
             points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.0, 0.85, 1.0)]))
@@ -1472,7 +1647,7 @@ class PipelineWindow:
         stage = omni.usd.get_context().get_stage()
         target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
         if not target_prim or not target_prim.IsValid():
-            self._append_log("[viewpoints] no target object on stage — Load Object first.")
+            self._append_log("[viewpoints] no target object on stage - Load Object first.")
             return
 
         try:
@@ -1574,7 +1749,7 @@ class PipelineWindow:
         pose = self._read_object_world_pose()
         if pose is None:
             self._append_log(
-                "[ik] no target object on stage — pick one in the Object dropdown "
+                "[ik] no target object on stage - pick one in the Object dropdown "
                 "and click 'Load Object' first."
             )
             return
@@ -1583,6 +1758,8 @@ class PipelineWindow:
         result_path = Path("/tmp") / (
             f"isaac_pipeline_ik_{os.getpid()}_{int(time.time() * 1000)}.json"
         )
+        # 색칠용 JSON 은 임시. IK 후보는 data/{object}/ik/{N}/ 에 옵션(roll/tilt/dedup)별
+        # 파일로 저장되고(check_ik 가 경로를 정한다), Generate 가 같은 옵션·물체 pose 면 재사용한다.
         cmd = [
             self._uv, "run", "scripts/core/trajectory/check_ik.py",
             "--object", obj,
@@ -1591,21 +1768,23 @@ class PipelineWindow:
         ]
         if n_vp is not None:
             cmd += ["--num-viewpoints", str(n_vp)]
+        cmd += self._ik_candidate_tokens()
+        cmd += ["--batch-size", str(self._ik_batch())]
         cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
         cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
 
-        if self._btn_check_ik is not None:
-            self._btn_check_ik.enabled = False
+        self._set_busy(self._btn_cancel_ik)
         self._append_log("[ik] $ " + " ".join(cmd))
 
         def on_line(line: str):
             self._append_log(line)
 
         def on_exit(rc: int):
-            self._append_log(f"[ik] exit code = {rc}")
-            if self._btn_check_ik is not None:
-                self._btn_check_ik.enabled = True
-            if rc == 0:
+            cancelled = self._ik_runner.cancelled
+            self._append_log("[ik] cancelled" if cancelled
+                             else f"[ik] exit code = {rc}")
+            self._clear_busy()
+            if rc == 0 and not cancelled:
                 self._apply_ik_reachability_result(h5, result_path)
 
         self._ik_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
@@ -1762,7 +1941,7 @@ class PipelineWindow:
                 try:
                     vp.resolution = (n, n)
                     if verbose:
-                        self._append_log(f"[cam] locked {cp_s} → {n}x{n}")
+                        self._append_log(f"[cam] locked {cp_s} -> {n}x{n}")
                 except Exception as e:  # noqa: BLE001
                     if verbose:
                         self._append_log(f"[cam] set resolution failed: {e}")
@@ -2002,7 +2181,7 @@ class PipelineWindow:
                 == UsdGeom.Tokens.invisible):
             self._delete_camera_range(key, log=False)
             if verbose:
-                self._append_log(f"[range:{key}] robot hidden — Load & Preview first.")
+                self._append_log(f"[range:{key}] robot hidden - Load & Preview first.")
             return False
         camera_frame = self._find_prim_by_name(
             stage, robot_root, urctl.CAMERA_OPTICAL_FRAME_NAME,
@@ -2023,7 +2202,7 @@ class PipelineWindow:
         tm = self._range_trimesh
         if tm is None:
             if verbose:
-                self._append_log("[range] no target object mesh — Load Object first.")
+                self._append_log("[range] no target object mesh - Load Object first.")
             return False
 
         M = UsdGeom.Xformable(camera_frame).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
@@ -2445,7 +2624,7 @@ class PipelineWindow:
             self._append_log(
                 f"[generate] WARNING: h5 object '{obj}' != loaded scene object "
                 f"'{self._current_object}'. Pose & collision mesh come from the SCENE "
-                "object — load the matching object or pick the matching h5.")
+                "object - load the matching object or pick the matching h5.")
 
         spacing = 0.01
 
@@ -2455,7 +2634,7 @@ class PipelineWindow:
         pose = self._read_object_world_pose()
         if pose is None:
             self._append_log(
-                "[generate] no target object on stage — pick one in the Object "
+                "[generate] no target object on stage - pick one in the Object "
                 "dropdown and click 'Load Object' first.")
             return
         pos_robot, quat_wxyz = pose
@@ -2463,21 +2642,11 @@ class PipelineWindow:
         # GLNS solve → collision-aware verification/join. Both stages stream
         # stdout; verify prints the joined CSV path last for preview/publish capture.
         hops = max(1, int(self._get_field("glns_hops", int)))
-        augment = ""
-        if int(self._get_field("glns_roll_augment", int)) != 0:
-            augment += " --roll-augment"
-        if int(self._get_field("glns_tilt_augment", int)) != 0:
-            angles = " ".join(
-                str(float(x)) for x in self._get_field("glns_tilt_angles", str).split())
-            azimuths = max(1, int(self._get_field("glns_tilt_azimuths", int)))
-            augment += (f" --tilt-augment --tilt-angles-deg {angles}"
-                        f" --tilt-azimuths {azimuths}")
         max_candidates = max(1, int(self._get_field("glns_max_candidates", int)))
-        augment += f" --max-candidates-per-viewpoint {max_candidates}"
-        num_seeds = max(1, int(self._get_field("glns_num_seeds", int)))
-        ik_batch_size = max(1, int(self._get_field("glns_ik_batch_size", int)))
-        augment += (f" --num-seeds {num_seeds} --ik-batch-size {ik_batch_size}"
-                    f" --ik-seed {IK_RANDOM_SEED}")
+        # 공유 IK 후보 옵션(Check and Save IK 와 동일) — 같으면 저장 IK 를 재사용한다.
+        augment = (f" {' '.join(self._ik_candidate_tokens())}"
+                   f" --ik-batch-size {self._ik_batch()}"
+                   f" --max-candidates-per-viewpoint {max_candidates}")
         from common import config as _config
 
         # 해와 궤적은 한 폴더에 산다. 이름에 앱 이름을 넣지 않는다 — 어느 앱이 만들었든
@@ -2497,7 +2666,7 @@ class PipelineWindow:
         )
         cmd = ["bash", "-c", shell]
 
-        self._set_trajectory_buttons_enabled(False)
+        self._set_busy(self._btn_cancel_gen)
         self._append_log("[generate] $ " + " ".join(cmd))
         generated_csv_path: list[str] = []
 
@@ -2513,8 +2682,10 @@ class PipelineWindow:
                 self._append_log(f"[generate] captured CSV: {csv}")
 
         def on_exit(rc: int):
-            self._append_log(f"[generate] exit code = {rc}")
-            self._set_trajectory_buttons_enabled(True)
+            self._append_log(
+                f"[generate] cancelled" if self._gen_runner.cancelled
+                else f"[generate] exit code = {rc}")
+            self._clear_busy()
             if rc == 0 and generated_csv_path:
                 csv = generated_csv_path[0]
                 if self._preview.load(csv):
@@ -2523,14 +2694,6 @@ class PipelineWindow:
                     self._append_log(f"[preview] auto-loaded generated CSV: {csv}")
 
         self._gen_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
-
-    def _set_trajectory_buttons_enabled(self, enabled: bool):
-        if self._btn_generate is not None:
-            self._btn_generate.enabled = enabled
-        home_enabled = enabled and self._pipeline_mode == "inspection"
-        for button in (self._btn_home_approach, self._btn_home_return):
-            if button is not None:
-                button.enabled = home_enabled
 
     def _home_move_target(self, transition: str, obj: str):
         """(목표 관절값, 라벨, 출력 CSV 경로) — 실패 시 None.
@@ -2579,55 +2742,77 @@ class PipelineWindow:
         """
         if transition not in HOME_TRANSITIONS:
             raise ValueError(f"unknown HOME transition: {transition}")
-        if (self._gen_runner.running or self._sim_executor.running
-                or self._pub_runner.running):
-            self._append_log("[home] a plan or move is already running")
+        context = self._move_context("home")
+        if context is None:
             return
-
-        # 충돌 세계는 스테이지의 살아있는 물체 pose 로 만든다(_on_generate 와 같은 관례).
-        # 물체를 먼저 확정한다 — 계획의 입력이자 산출물이 놓일 자리를 정한다.
-        obj = (self._current_object or "").strip()
-        pose = self._read_object_world_pose()
-        if not obj or pose is None:
-            self._append_log(
-                "[home] no target object on stage — 충돌 세계를 만들 수 없다. "
-                "Object 를 Load 한 뒤 다시 시도할 것.")
-            return
-        pos_robot, quat_wxyz = pose
+        obj, pos_robot, quat_wxyz = context
 
         target = self._home_move_target(transition, obj)
         if target is None:
             return
         target_q, label, out_csv = target
+        self._plan_and_execute_move(
+            tag="home", obj=obj, pos_robot=pos_robot, quat_wxyz=quat_wxyz,
+            target_q=target_q, label=label, out_csv=out_csv)
 
+    def _move_context(self, tag: str):
+        """이동 계획의 공통 전제 → (object, pos_robot, quat_wxyz) 또는 None.
+
+        충돌 세계는 스테이지의 살아있는 물체 pose 로 만든다(_on_generate 와 같은 관례).
+        물체를 먼저 확정한다 — 계획의 입력이자 산출물이 놓일 자리를 정한다.
+        """
+        if (self._gen_runner.running or self._sim_executor.running
+                or self._pub_runner.running):
+            self._append_log(f"[{tag}] a plan or move is already running")
+            return None
+        obj = (self._current_object or "").strip()
+        pose = self._read_object_world_pose()
+        if not obj or pose is None:
+            self._append_log(
+                f"[{tag}] no target object on stage - cannot build the collision world. "
+                "Load an object first, then retry.")
+            return None
+        return obj, pose[0], pose[1]
+
+    def _plan_and_execute_move(self, *, tag, obj, pos_robot, quat_wxyz,
+                               target_q, label, out_csv):
+        """현재 자세 → target_q 를 계획해 실행한다. HOME 이동과 tilt 진입이 공유한다.
+
+        2단계 체인이다: plan_move.py(_gen_runner) → 성공 시 _start_csv_execution.
+        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel(Generate) 이 그대로 적용된다.
+        """
         try:
             current_q = self._sim_executor.current_joints()
         except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
-            self._append_log(f"[home] 현재 관절값을 읽지 못했다: {exc}")
+            self._append_log(f"[{tag}] could not read the current joint state: {exc}")
             return
 
         if self._preview.loaded:
             self._preview.stop()
-        self._set_trajectory_buttons_enabled(False)
-        self._btn_publish.enabled = False
-
-        def re_enable():
-            self._set_trajectory_buttons_enabled(True)
-            self._btn_publish.enabled = True
+        # 계획과 실행을 한 덩어리로 취소할 수 있게, 두 단계 모두 Execute 패널의 Cancel 을
+        # 살려둔다 — 사용자가 누른 버튼(Move to Start / Return to HOME)과 같은 패널이라
+        # 어디를 눌러야 멈추는지 찾을 필요가 없다. 어느 러너를 멈출지는
+        # _on_cancel_execute 가 단계를 보고 고른다.
+        self._set_busy(self._btn_cancel_pub)
 
         def finished(rc: int):
-            self._append_log(f"[home] {label} exit code = {rc}")
-            re_enable()
+            self._append_log(f"[{tag}] {label} exit code = {rc}")
+            self._clear_busy()
 
         def on_planned(rc: int):
-            self._append_log(f"[home] plan exit code = {rc}")
-            if rc != 0 or not out_csv.exists():
-                self._append_log(f"[home] {label}: 충돌-free 경로가 없어 움직이지 않는다.")
-                re_enable()
+            if self._gen_runner.cancelled:
+                self._append_log(f"[{tag}] {label}: planning cancelled - not moving.")
+                self._clear_busy()
                 return
-            self._append_log(f"[home] executing planned {label}: {out_csv}")
-            if not self._start_csv_execution(str(out_csv), tag="home", on_done=finished):
-                re_enable()
+            self._append_log(f"[{tag}] plan exit code = {rc}")
+            if rc != 0 or not out_csv.exists():
+                self._append_log(
+                    f"[{tag}] {label}: no collision-free route - not moving.")
+                self._clear_busy()
+                return
+            self._append_log(f"[{tag}] executing planned {label}: {out_csv}")
+            if not self._start_csv_execution(str(out_csv), tag=tag, on_done=finished):
+                self._clear_busy()
 
         # NB: --from/to-joints 는 =<v> (공백 아님). 관절 문자열은 첫 값이 음수면 '-1.5,...'
         # 로 시작하는데, argparse 의 음수 휴리스틱은 순수 숫자 하나("-1.5")만 값으로 봐주고
@@ -2643,10 +2828,168 @@ class PipelineWindow:
             f"--to-joints={','.join(f'{v:.6f}' for v in target_q)!r} "
             f"--output {str(out_csv)!r}"
         )
-        self._append_log(f"[home] {label}: 현재 자세에서 충돌-free 경로 계획 중…")
-        self._append_log("[home] $ " + shell)
+        self._append_log(
+            f"[{tag}] {label}: planning a collision-free route from the current pose...")
+        self._append_log(f"[{tag}] $ " + shell)
         self._gen_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
                                on_line=self._append_log, on_exit=on_planned)
+
+    # ------------------------------------------------------------------
+    # Tilt panel callbacks
+    # ------------------------------------------------------------------
+    def _tilt_index(self) -> int:
+        return max(0, int(self._get_field("tilt_index", int)))
+
+    def _tilt_viewpoints(self):
+        """Tilt 가 쓸 (h5 경로, object, viewpoint 수) — 없거나 못 읽으면 None.
+
+        입력은 Generate 와 완전히 같다: 위 패널에서 고른 viewpoints .h5 하나. 물체 이름과
+        viewpoint 수는 그 표준 경로에서 읽는다(data/{object}/viewpoint/{N}/...).
+        """
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[tilt] pick a viewpoints .h5 first (Browse...).")
+            return None
+        if not Path(h5).exists():
+            self._append_log(f"[tilt] h5 not found: {h5}")
+            return None
+        obj, n_vp = self._parse_h5_meta(h5)
+        if obj is None:
+            obj = (self._current_object or "").strip()
+        return h5, obj, n_vp
+
+    def _on_highlight_tilt_viewpoint(self):
+        """고른 중심 viewpoint 를 스테이지에서 크고 노랗게 표시한다(어느 점인지 확인용)."""
+        picked = self._tilt_viewpoints()
+        if picked is None:
+            return
+        h5 = picked[0]
+
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not target_prim or not target_prim.IsValid():
+            self._append_log("[tilt] no target object on stage - Load Object first.")
+            return
+        try:
+            points_local, wd_m = self._load_camera_viewpoint_points(h5)
+        except Exception as e:  # noqa: BLE001 — 파일/스키마 문제를 UI 로 보고
+            self._append_log(f"[tilt] viewpoint load failed: {e}")
+            return
+        index = self._tilt_index()
+        if index >= len(points_local):
+            self._append_log(
+                f"[tilt] center index {index} out of range - this file has "
+                f"{len(points_local)} viewpoints.")
+            return
+        self._draw_camera_viewpoint_points(points_local, highlight=index)
+        self._append_log(
+            f"[tilt] center = viewpoint #{index} / {len(points_local)} "
+            f"(yellow point, WD={wd_m * 1000:.1f} mm)")
+
+    def _tilt_output_path(self, obj: str, n_vp, index: int) -> Path:
+        """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙(trajectory_{역할}.csv)."""
+        from common import config as _config
+
+        role = f"tilt_vp{index:04d}"
+        if n_vp is not None:
+            return _config.get_trajectory_artifact_path(obj, n_vp, role=role)
+        return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}.csv"
+
+    def _on_generate_tilt(self):
+        """중심 viewpoint 하나를 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
+
+        _gen_runner 를 쓰므로 Generate 와 동시에 돌 수 없고, Cancel 버튼이 그대로 듣는다.
+        성공하면 CSV 경로가 공용 칸에 들어가고 프리뷰가 자동 로드된다 — Generate 와 동일.
+        """
+        if self._gen_runner.running:
+            self._append_log("[tilt] a generate/plan is already running")
+            return
+        picked = self._tilt_viewpoints()
+        if picked is None:
+            return
+        h5, obj, n_vp = picked
+        if not obj:
+            self._append_log(
+                "[tilt] couldn't read object from h5 path and no object is loaded.")
+            return
+        if self._current_object and obj != self._current_object:
+            self._append_log(
+                f"[tilt] WARNING: h5 object '{obj}' != loaded scene object "
+                f"'{self._current_object}'. Pose & collision mesh come from the SCENE "
+                "object - load the matching object or pick the matching h5.")
+
+        pose = self._read_object_world_pose()
+        if pose is None:
+            self._append_log(
+                "[tilt] no target object on stage - pick one in the Object dropdown "
+                "and click 'Load Object' first.")
+            return
+        pos_robot, quat_wxyz = pose
+
+        index = self._tilt_index()
+        out_csv = self._tilt_output_path(obj, n_vp, index)
+
+        # anchor = 로봇의 현재 자세. tilt 는 팔 분기를 자유롭게 고를 수 있어서, 지금 있는
+        # 자리에서 가장 가까운 분기로 시작해야 진입 이동(Move to Tilt Start)이 짧아진다.
+        anchor = ""
+        try:
+            current_q = self._sim_executor.current_joints()
+            anchor = " --anchor-joints=" + repr(",".join(f"{v:.6f}" for v in current_q))
+        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 anchor 없이 진행
+            self._append_log(
+                f"[tilt] no current joint state, continuing without an anchor: {exc}")
+
+        pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
+        quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
+        clamp = self._get_field("tilt_clamp", bool)
+        shell = (
+            f"{self._uv} run --no-sync scripts/core/trajectory/tilt_motion.py "
+            f"--object {obj!r} --viewpoints {h5!r} --viewpoint-index {index} "
+            f"--object-position {pos_s} --object-quat {quat_s} "
+            f"--pitch-min {float(self._get_field('tilt_pitch_min', float)):.3f} "
+            f"--pitch-max {float(self._get_field('tilt_pitch_max', float)):.3f} "
+            f"--pitch-n {max(2, int(self._get_field('tilt_pitch_n', int)))} "
+            f"--roll-min {float(self._get_field('tilt_roll_min', float)):.3f} "
+            f"--roll-max {float(self._get_field('tilt_roll_max', float)):.3f} "
+            f"--roll-n {max(2, int(self._get_field('tilt_roll_n', int)))} "
+            f"--num-seeds {max(1, int(self._get_field('tilt_num_seeds', int)))} "
+            f"--batch-size {max(1, int(self._get_field('tilt_batch_size', int)))}"
+            f"{'' if clamp else ' --no-clamp'}{anchor} "
+            f"--output {str(out_csv)!r}"
+        )
+
+        self._set_busy(self._btn_tilt_cancel)
+        self._append_log(f"[tilt] center viewpoint #{index} -> {out_csv}")
+        self._append_log("[tilt] $ " + shell)
+        generated_csv_path: list[str] = []
+
+        def on_line(line: str):
+            self._append_log(line)
+            m = CSV_PATH_RE.search(line)
+            if m:
+                csv = m.group(1)
+                if not Path(csv).is_absolute():
+                    csv = str(PROJECT_ROOT / csv)
+                self._csv_path_model.set_value(csv)
+                generated_csv_path[:] = [csv]
+                self._append_log(f"[tilt] captured CSV: {csv}")
+
+        def on_exit(rc: int):
+            self._append_log(
+                f"[tilt] cancelled" if self._gen_runner.cancelled
+                else f"[tilt] exit code = {rc}")
+            self._clear_busy()
+            if rc == 0 and generated_csv_path:
+                csv = generated_csv_path[0]
+                if self._preview.load(csv):
+                    self._update_slider_bounds()
+                    self._refresh_status()
+                    self._append_log(f"[preview] auto-loaded tilt CSV: {csv}")
+
+        self._gen_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
+                               on_line=on_line, on_exit=on_exit)
 
     def _on_cancel_generate(self):
         if self._gen_runner.running:
@@ -2826,17 +3169,14 @@ class PipelineWindow:
         if self._preview.loaded:
             self._preview.stop()
 
-        self._btn_publish.enabled = False
-        self._set_trajectory_buttons_enabled(False)
+        self._set_busy(self._btn_cancel_pub)
 
         def on_done(rc: int):
             self._append_log(f"[execute] exit code = {rc}")
-            self._btn_publish.enabled = True
-            self._set_trajectory_buttons_enabled(True)
+            self._clear_busy()
 
         if not self._start_csv_execution(csv, tag="execute", on_done=on_done):
-            self._btn_publish.enabled = True
-            self._set_trajectory_buttons_enabled(True)
+            self._clear_busy()
 
     def _start_csv_execution(self, csv: str, *, tag: str,
                              on_done: Callable[[int], None]) -> bool:
@@ -2866,10 +3206,15 @@ class PipelineWindow:
         return True
 
     def _on_cancel_execute(self):
+        # HOME/틸트 진입 이동은 plan -> execute 2단계다. 계획 단계면 그 러너를 멈춘다 —
+        # 사용자에게는 "지금 하고 있는 그 이동"을 멈추는 버튼 하나로 보여야 한다.
+        if self._gen_runner.running:
+            self._append_log("[execute] cancelling the motion plan...")
+            self._gen_runner.terminate()
+            return
         if self._sim_executor.running:
             self._sim_executor.cancel()
-            self._btn_publish.enabled = True
-            self._set_trajectory_buttons_enabled(True)
+            self._clear_busy()
             return
         if self._pub_runner.running:
             self._append_log("[execute] terminating trajectory sender...")
@@ -2912,14 +3257,16 @@ class PipelineWindow:
             self._lock_camera_prims()
         except Exception:  # noqa: BLE001
             pass
-        # While a trajectory is executing, lock BOTH mode combos so the user
-        # can't switch pipeline mode (would deactivate the inspection controller and
-        # abort the trajectory) OR run mode (sim/real) mid-execution.
-        executing = self._pub_runner.running or self._sim_executor.running
+        # While anything long-running is going (execute / generate / IK check), lock
+        # BOTH mode combos: switching pipeline mode would deactivate the inspection
+        # controller and abort the trajectory, and switching run mode (sim/real) would
+        # move the ground under a job that already picked its target.
+        busy = (self._pub_runner.running or self._sim_executor.running
+                or self._gen_runner.running or self._ik_runner.running)
         if self._pipeline_combo is not None:
-            self._pipeline_combo.enabled = not executing
+            self._pipeline_combo.enabled = not busy
         if self._mode_combo is not None:
-            self._mode_combo.enabled = not executing
+            self._mode_combo.enabled = not busy
         self.step_preview(dt)
 
 

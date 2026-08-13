@@ -128,10 +128,10 @@ def load_viewpoints_hdf5(path: str | Path) -> ViewpointData:
                     fov_height_m = float(cam_attrs["fov_height_mm"]) / 1000.0
         if missing:
             print(
-                f"WARNING: {source_path.name} 에 camera_spec {', '.join(missing)} 가 없다 — "
-                f"config 기본값(FOV {config.CAMERA_FOV_WIDTH_MM:.0f}×"
-                f"{config.CAMERA_FOV_HEIGHT_MM:.0f}mm, WD {config.CAMERA_WORKING_DISTANCE_MM:.0f}mm)"
-                f"을 대신 쓴다. 그 스펙으로 만든 파일이 아니라면 재생성할 것."
+                f"WARNING: {source_path.name} has no camera_spec {', '.join(missing)} - "
+                f"falling back to the config defaults (FOV {config.CAMERA_FOV_WIDTH_MM:.0f}x"
+                f"{config.CAMERA_FOV_HEIGHT_MM:.0f}mm, WD {config.CAMERA_WORKING_DISTANCE_MM:.0f}mm). "
+                f"Regenerate the file if it was not built with that spec."
             )
 
     return ViewpointData(

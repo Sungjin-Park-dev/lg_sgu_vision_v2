@@ -200,7 +200,8 @@ def build_collision_world(object_name: str):
                 dims=mesh.extents.tolist(),
             ))
             print(f"  Collision world: {len(cuboids)} cuboids "
-                  f"(target as box proxy {np.round(mesh.extents, 3).tolist()} m — 소형 mesh 충돌 오판 회피)")
+                  f"(target as box proxy {np.round(mesh.extents, 3).tolist()} m - avoids "
+                  "false mesh-collision hits on small meshes)")
         else:
             meshes.append(CuRoboMesh(
                 name="target_object",

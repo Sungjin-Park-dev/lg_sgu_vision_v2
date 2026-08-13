@@ -6,20 +6,20 @@
 
 1. `sim` 또는 mock hardware로 컨트롤러 연결을 확인한다.
 2. CSV의 시작 자세와 작업 공간을 확인한다.
-3. `Move to Scan Start`로 시작점 접근을 별도로 검증한다.
+3. `Move to Start`로 시작점 접근을 별도로 검증한다.
 4. `Execute Selected CSV`로 검사 구간을 실행한다.
 5. 종료 후 `Return to HOME`을 사용한다.
 
-실행 중에는 Run/Pipeline 모드를 바꾸지 않는다. `Cancel Execution`이 보이고 컨트롤러가 활성 상태인지 확인한다.
+실행 중에는 Run/Pipeline 모드를 바꾸지 않는다(작업 중에는 자동으로 잠긴다). `Cancel`이 활성 상태이고 컨트롤러가 살아 있는지 확인한다.
 
 ## 버튼
 
 | 버튼 | 동작 |
 |---|---|
-| `Move to Scan Start` | 현재 자세 → CSV 첫 행. 충돌-free 경로를 계획한 뒤 실행 |
+| `Move to Start` | 현재 자세 → CSV 첫 행. 충돌-free 경로를 계획한 뒤 실행. 스캔·틸트 CSV 공용 |
 | `Return to HOME` | 현재 자세 → `ROBOT_START_STATE`. 〃 |
 | `Execute Selected CSV` | 선택한 CSV 실행 |
-| `Cancel Execution` | 실행 중단 |
+| `Cancel` | 계획 단계와 실행 단계 모두 중단 |
 
 HOME 이동은 **현재 자세에서** 계획하므로 로봇이 어디 있든 전 구간이 검사된다. 계획에 수 초 걸리며, 물체가 스테이지에 로드돼 있어야 한다.
 

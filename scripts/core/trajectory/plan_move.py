@@ -117,7 +117,7 @@ def main() -> int:
         # 이미 목표 자세다. 실패가 아니므로 출력 계약(항상 CSV)을 지킨다 — 호출자가
         # "경로 없음" 과 "이동 없음" 을 분기할 필요가 없다. 플래너는 건너뛰지만 아래
         # 충돌 게이트는 그대로 지난다: 지금 자세가 이미 충돌 중이면 정직하게 실패한다.
-        print("  이미 목표 자세다 — 이동 없는 2행 궤적을 낸다.")
+        print("  already at the goal pose - emitting a 2-row, no-motion trajectory.")
         traj = selected
     else:
         planner = PT.build_reconfig_motion_planner(
@@ -130,9 +130,9 @@ def main() -> int:
         waypoints = segments.get(0)
         route = next((s.get("route") for s in stats if s.get("success")), None)
         if waypoints is None:
-            print("  ✗ 충돌-free 경로를 찾지 못했다 (direct/via 전부 실패).")
+            print("  x no collision-free route found (direct and via ladder both failed).")
             return 2
-        print(f"  ✓ planned via '{route}' — {len(waypoints)} raw waypoints")
+        print(f"  OK planned via '{route}' - {len(waypoints)} raw waypoints")
 
         # 이동 전체가 transit 이므로 마스크는 all-True. (2행 입력의 첫 노드를 scan 으로
         # 타이핑하는 interpolate_and_resample 의 기본 동작을 덮는다 — resample_seam 과 동일.)
@@ -150,7 +150,7 @@ def main() -> int:
         out_csv=args.output,
     )
     if not gate["collision_free"]:
-        print(f"  ✗ 충돌 게이트 실패: {gate['n_collisions']} collisions — 저장하지 않았다.")
+        print(f"  x collision gate failed: {gate['n_collisions']} collisions - not saved.")
         return 2
 
     # 끝점은 계획의 전제다 — 실행기가 CSV 첫 행과 현재 자세가 다르면 계획되지 않은 직선을

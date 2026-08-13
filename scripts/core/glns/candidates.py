@@ -93,7 +93,10 @@ def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg
 def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                                    num_seeds, batch_size, wrist3_fixed,
                                    lock_nominal_wrist3, joint_periods=None,
-                                   ik_seed=PT.IK_RANDOM_SEED):
+                                   ik_seed=PT.IK_RANDOM_SEED, dedup_rad=None):
+    # dedup_rad: L∞ 관절 임계값(rad). None 이면 기본 CANDIDATE_DEDUP_RAD, 음수면 dedup 끔
+    # (어떤 후보도 서로 임계 이내로 판정되지 않아 전부 남는다).
+    thr = PT.CANDIDATE_DEDUP_RAD if dedup_rad is None else float(dedup_rad)
     sols, success = PT.solve_ik_multi_seed(
         robot_cfg, world, targets["position"], targets["quaternion"],
         num_seeds=num_seeds, batch_size=batch_size, random_seed=ik_seed,
@@ -110,7 +113,7 @@ def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                 if lock_nominal_wrist3:
                     q[-1] = wrist3_fixed
                 if any(np.max(np.abs(periodic_joint_delta(q - prior, joint_periods)))
-                       <= PT.CANDIDATE_DEDUP_RAD for prior in kept):
+                       <= thr for prior in kept):
                     continue
                 kept.append(q)
                 fields["variant"].append(targets["variant"][pose_idx])

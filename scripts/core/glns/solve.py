@@ -35,6 +35,12 @@ from core.glns.candidates import (  # noqa: E402
     _solve_pose_variant_candidates,
     _tilt_magnitudes,
 )
+from core.glns.ik_store import (  # noqa: E402
+    build_settings,
+    ik_solutions_path,
+    load_ik_solutions,
+    save_ik_solutions,
+)
 from core.glns.problem import (  # noqa: E402
     build_gtsp_problem,
     effective_candidate_cap,
@@ -114,6 +120,13 @@ def _parse_args() -> argparse.Namespace:
                         help="[--tilt-augment] tilt magnitudes (default: 5 10)")
     parser.add_argument("--tilt-azimuths", type=int, default=8,
                         help="[--tilt-augment] evenly spaced nominal-XY tilt axes (default: 8)")
+    parser.add_argument("--no-dedup", dest="dedup", action="store_false",
+                        help="IK 후보 near-duplicate 제거를 끈다(전부 후보로 남긴다)")
+    parser.set_defaults(dedup=True)
+    parser.add_argument("--dedup-rad", type=float, default=PT.CANDIDATE_DEDUP_RAD,
+                        help=f"[dedup] L∞ 관절 임계 rad (default: {PT.CANDIDATE_DEDUP_RAD})")
+    parser.add_argument("--no-ik-reuse", action="store_true",
+                        help="저장된 IK(ik_*.h5) 재사용을 끄고 항상 새로 계산한다")
     parser.add_argument("--max-candidates-per-viewpoint", type=int,
                         default=DEFAULT_MAX_CANDIDATES)
     parser.add_argument("--matrix-target-mib", type=float, default=DEFAULT_MATRIX_TARGET_MIB,
@@ -314,12 +327,12 @@ def main() -> int:
     if args.delaunay_expand_hops > 1:
         graph_edges = expand_edges_by_hops(source_edges, n_viewpoints, args.delaunay_expand_hops)
         print(f"  Graph relaxed to {args.delaunay_expand_hops}-hop: "
-              f"{len(source_edges)} → {len(graph_edges)} edges "
-              f"(GLNS 순서 자유도↑)")
+              f"{len(source_edges)} -> {len(graph_edges)} edges "
+              f"(more ordering freedom for GLNS)")
     else:
         graph_edges = source_edges
 
-    print(f"[3/6] Computing fresh collision-aware IK candidates (seed={args.ik_seed})...")
+    print(f"[3/6] Resolving collision-aware IK candidates (seed={args.ik_seed})...")
     world_poses = PT.build_camera_poses(positions, normals, source["wd_m"])
     world = PT.build_collision_world(args.object)
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
@@ -331,21 +344,54 @@ def main() -> int:
     ]
     print(f"  Periodic joint lifting enabled: {periodic_names}")
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
-    targets = _build_pose_variants(
-        world_poses, source["wd_m"], roll_augment=args.roll_augment,
-        roll_step_deg=args.roll_step_deg, tilt_augment=args.tilt_augment,
-        tilt_angles_deg=args.tilt_angles_deg, tilt_azimuths=args.tilt_azimuths,
+    lock_nominal_wrist3 = not (args.roll_augment or args.tilt_augment)
+    # Check-and-Save-IK 가 같은 물체 pose·증강·dedup 으로 저장해둔 IK 가 있으면 그대로 쓰고,
+    # 아니면 새로 계산해 그 자리에 저장한다(다음 실행/모드가 재사용). ik_store 가 진실이다.
+    ik_settings = build_settings(
+        object_position=config.TARGET_OBJECT["position"],
+        object_quat_wxyz=config.TARGET_OBJECT["rotation"],
+        working_distance_m=source["wd_m"],
+        roll_augment=args.roll_augment, roll_step_deg=args.roll_step_deg,
+        tilt_augment=args.tilt_augment, tilt_angles_deg=args.tilt_angles_deg,
+        tilt_azimuths=args.tilt_azimuths, dedup=args.dedup, dedup_rad=args.dedup_rad,
+        num_seeds=args.num_seeds, ik_seed=args.ik_seed,
+        lock_nominal_wrist3=lock_nominal_wrist3,
     )
-    print(f"  Pose variants: {len(targets['position'])} total "
-          f"({len(targets['position']) / n_viewpoints:.0f}/viewpoint)")
-    representatives_raw, candidate_metadata_raw = _solve_pose_variant_candidates(
-        targets, n_viewpoints, world, robot_cfg, args.num_seeds, args.ik_batch_size,
-        wrist3_fixed, lock_nominal_wrist3=not (args.roll_augment or args.tilt_augment),
-        joint_periods=joint_periods, ik_seed=args.ik_seed,
-    )
-    removed_collision = _collision_filter_representatives(
-        representatives_raw, robot_cfg, world, candidate_metadata_raw,
-    )
+    ik_path = ik_solutions_path(source_path, roll_augment=args.roll_augment,
+                                tilt_augment=args.tilt_augment, dedup=args.dedup)
+    loaded = None if args.no_ik_reuse else load_ik_solutions(ik_path, ik_settings)
+    if loaded is not None and len(loaded[0]) != n_viewpoints:
+        print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path})")
+        loaded = None
+
+    if loaded is not None:
+        representatives_raw, candidate_metadata_raw = loaded
+        removed_collision = 0
+        total_loaded = int(sum(len(r) for r in representatives_raw))
+        print(f"  Reusing saved IK ({total_loaded} candidates, object pose + settings "
+              f"match): {ik_path}")
+    else:
+        targets = _build_pose_variants(
+            world_poses, source["wd_m"], roll_augment=args.roll_augment,
+            roll_step_deg=args.roll_step_deg, tilt_augment=args.tilt_augment,
+            tilt_angles_deg=args.tilt_angles_deg, tilt_azimuths=args.tilt_azimuths,
+        )
+        print(f"  Pose variants: {len(targets['position'])} total "
+              f"({len(targets['position']) / n_viewpoints:.0f}/viewpoint)")
+        representatives_raw, candidate_metadata_raw = _solve_pose_variant_candidates(
+            targets, n_viewpoints, world, robot_cfg, args.num_seeds, args.ik_batch_size,
+            wrist3_fixed, lock_nominal_wrist3=lock_nominal_wrist3,
+            joint_periods=joint_periods, ik_seed=args.ik_seed,
+            dedup_rad=ik_settings["dedup_rad"],
+        )
+        removed_collision = _collision_filter_representatives(
+            representatives_raw, robot_cfg, world, candidate_metadata_raw,
+        )
+        if not args.no_ik_reuse:
+            save_ik_solutions(ik_path, representatives_raw, candidate_metadata_raw,
+                              ik_settings, source_viewpoints=source_path,
+                              object_name=args.object)
+            print(f"  Saved IK for reuse -> {ik_path}")
     candidate_counts_raw = np.asarray(
         [len(reps) for reps in representatives_raw], dtype=np.int32,
     )
@@ -379,7 +425,7 @@ def main() -> int:
     if len(components):
         print("  Candidate caps: " + ", ".join(
             f"component {cid}=K{component_caps[cid]}" for cid in range(len(components))))
-    print(f"  Candidate pruning: {int(candidate_counts_raw.sum())} raw → "
+    print(f"  Candidate pruning: {int(candidate_counts_raw.sum())} raw -> "
           f"{int(candidate_counts.sum())} retained, {prune_seconds:.2f}s "
           f"({len(induced_edges)} undirected edges, no reverse recomputation)")
 
@@ -592,7 +638,7 @@ def main() -> int:
                             tilt_magnitudes_deg=_tilt_magnitudes(args.tilt_repair_max_deg),
                             n_azimuth=args.tilt_repair_azimuths, ik_seed=args.ik_seed)
                     except Exception as rexc:  # noqa: BLE001 — keep the valid un-repaired solve
-                        print(f"    [tilt-repair warning] {rexc} — keeping un-repaired path")
+                        print(f"    [tilt-repair warning] {rexc} - keeping un-repaired path")
                         repaired, dropped = [], []
                     if (repaired or dropped) and len(rep_sel) >= 1:
                         rep_wrapped = np.stack(rep_sel)
@@ -616,8 +662,8 @@ def main() -> int:
                         repaired_all.extend(int(v) for v, _ in repaired)
                         dropped_all.extend(int(v) for v in dropped)
                         print(f"    Tilt-repair: repaired {[(v, round(d, 1)) for v, d in repaired]}, "
-                              f"dropped {dropped} → base reconfigs "
-                              f"{int(is_reconfig_base.sum())}→{fields['num_reconfigurations_base']}")
+                              f"dropped {dropped} -> base reconfigs "
+                              f"{int(is_reconfig_base.sum())}->{fields['num_reconfigurations_base']}")
             except Exception as exc:  # preserve other components and diagnostics
                 base.update(status="solver_failed", reason=str(exc), matrix_mib=matrix_mib)
                 print(f"    FAILED: {exc}")
