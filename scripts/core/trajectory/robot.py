@@ -12,7 +12,7 @@ from curobo.kinematics import Kinematics, KinematicsCfg
 from curobo.scene import Cuboid, Mesh as CuRoboMesh, Scene
 from curobo.types import JointState
 
-from common import config
+from common import config, scene_config
 from common.math_utils import quaternion_to_rotation_matrix
 from .settings import COLLISION_EXCLUDE_LINKS
 
@@ -170,13 +170,26 @@ def build_collision_world(object_name: str):
 
     # TARGET_OBJECT may have been changed by a CLI override or a viewport gizmo.
     config.sync_support_to_target()
+
+    # 씬 장애물 → OBB. 회전은 씬이 준 값을 그대로 쓴다(예전엔 identity 하드코딩이었다).
+    # 비-cuboid 를 여기서 OBB 로 바꾸는 이유: cuRobo 0.8 의 load_from_scene_cfg 는
+    # cuboid/mesh/voxel 만 읽어서, Scene(cylinder=[...]) 은 예외도 경고도 없이 충돌 기하가
+    # 0개가 된다 — 통과할 수 있는 벽이 생긴다. viser/Isaac 도 같은 함수를 쓰므로
+    # 화면에 보이는 것이 곧 플래너가 푸는 것이다.
     cuboids = []
-    for obj in [config.TABLE, config.ROBOT_MOUNT] + config.WALLS:
+    approximated = []
+    for obj in config.OBSTACLES:
+        pos, quat, dims = scene_config.obstacle_obb(obj)
         cuboids.append(Cuboid(
             name=obj["name"],
-            pose=[*obj["position"].tolist(), 1, 0, 0, 0],
-            dims=obj["dimensions"].tolist(),
+            pose=[*pos.tolist(), *quat.tolist()],
+            dims=dims.tolist(),
         ))
+        if obj["type"] != "cuboid":
+            approximated.append(f"{obj['name']}({obj['type']})")
+    if approximated:
+        print(f"  Collision world: OBB approximation — {', '.join(approximated)} "
+              f"(cuRobo 0.8 does not feed sphere/cylinder/capsule into collision)")
 
     meshes = []
     mesh_path = config.get_mesh_path(object_name, mesh_type="source")

@@ -46,6 +46,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Reuse the core Isaac scene loaders — same workcell, robot, camera.
 from core.isaac import scene as urctl  # noqa: E402
+from common import config as _cfg_module  # noqa: E402
+from common import scene_config  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -66,6 +68,8 @@ CANDIDATE_DEDUP_RAD = 0.08
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
 GHOST_ROOT_PATH = "/World/UR20_preview"
+# prim 이름 → 씬 YAML 의 장애물 이름(USD prim 규칙: 영문/숫자/_).
+_SCENE_PRIM_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
 GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 
 # Trajectory controllers, gated by pipeline mode (only one active at a time):
@@ -517,7 +521,7 @@ class IsaacArticulationExecutor:
         """UR20 의 현재 관절값 (rad).
 
         **두 run-mode 모두 여기서 읽는다.** sim 은 Isaac 이 곧 로봇이고, real 은
-        /ActionGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
+        /RealRobotGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
         (apply_mode 참고) — 그래서 별도 ROS 구독 없이 실제 자세를 얻는다.
         """
         self._initialize()
@@ -572,7 +576,7 @@ class PreviewPlayer:
 
     The ghost USD is physics-free; this class only does USD-level pose
     writes. The real /World/UR20 articulation is never touched, so
-    ActionGraphSwitch and any external /joint_states publisher keep running
+    GraphTickSwitch and any external /joint_states publisher keep running
     independently.
     """
 
@@ -706,8 +710,12 @@ class PreviewPlayer:
 # Action Graph enable/disable — probe both API surfaces.
 # =============================================================================
 
-class ActionGraphSwitch:
-    """Disable OnPlaybackTick while preview is active so the graph stops writing."""
+class GraphTickSwitch:
+    """그래프의 OnPlaybackTick 을 껐다 켜서 그래프가 관절을 쓰는 것을 막는다.
+
+    /RealRobotGraph 와 /SimRobotGraph 에 하나씩 붙는다 — 둘 다 ArticulationController 를
+    갖고 있어서 동시에 tick 하면 같은 관절을 두고 싸운다. 정확히 하나만 돌게 하는 게 이 스위치다.
+    """
 
     def __init__(self, graph_path: str, log: Callable[[str], None]):
         self._graph_path = graph_path
@@ -781,15 +789,19 @@ class PipelineWindow:
     LOG_MAX_LINES = 500
 
     def __init__(self, ghost_root_prim: str, base_link_path: str,
-                 chain: "list[GhostJoint]", graph_path: str,
+                 chain: "list[GhostJoint]", real_graph_path: str,
                  default_object: str, initial_mode: str = "sim",
-                 moveit_graph_path: str = "/MoveItGraph",
+                 sim_graph_path: str = "/SimRobotGraph",
                  initial_pipeline_mode: str = "inspection",
-                 articulation_root: str = ""):
+                 articulation_root: str = "",
+                 scene: str = ""):
         import omni.ui as ui
 
         self._ui = ui
         self._mode = initial_mode  # "sim" (no live ROS) | "real" (ROS robot)
+        # 활성 씬 이름 — 서브프로세스(check_ik/solve/plan_move)에 그대로 넘긴다.
+        # 앱과 플래너가 다른 셀을 보면 조용히 틀린 궤적이 나온다.
+        self._scene = scene or _cfg_module.ACTIVE_SCENE
         # Top-level mode: "inspection" (this whole UI) | "moveit" (MoveIt drives robot).
         self._pipeline_mode = initial_pipeline_mode
         self._log_lines: list[str] = []
@@ -809,8 +821,9 @@ class PipelineWindow:
             "fov_h": float(_cfg.CAMERA_FOV_HEIGHT_MM),
             "wd": float(_cfg.CAMERA_WORKING_DISTANCE_MM),
         }
-        # _graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다.
-        self._graph_path = graph_path
+        # _real_graph_path 는 _apply_render_resolution 이 쓰므로 스펙 콜백보다 먼저 있어야 한다
+        # (검사 카메라 렌더 프로덕트가 RealRobotGraph 안에 있다).
+        self._real_graph_path = real_graph_path
         self._render_resolution = (_cfg.CAMERA_PUBLISH_W, _cfg.CAMERA_PUBLISH_H)
         #   preview -> InspectionCameraPreview (ghost, Preview panel)
         #   execute -> InspectionCamera        (real robot, Execute panel)
@@ -828,15 +841,15 @@ class PipelineWindow:
         self._pub_runner = SubprocessRunner()
         self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
         self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
-        # Keep ActionGraphSwitch around for the publish path. Preview no
+        # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
         # stable original idle behavior is preserved.
-        self._graph = ActionGraphSwitch(graph_path, self._append_log)
+        self._real_graph = GraphTickSwitch(real_graph_path, self._append_log)
         # Separate switch for the MoveIt bridge graph (/isaac_joint_commands).
-        # Only one of (_graph, _moveit_graph) ticks at a time — see apply_pipeline_mode.
-        self._moveit_graph = ActionGraphSwitch(moveit_graph_path, self._append_log)
-        self._moveit_graph_path = moveit_graph_path
+        # Only one of (_real_graph, _sim_graph) ticks at a time — see apply_mode.
+        self._sim_graph = GraphTickSwitch(sim_graph_path, self._append_log)
+        self._sim_graph_path = sim_graph_path
         self._articulation_root = articulation_root
         self._mode_applied: Optional[str] = None  # last run mode actually applied
         self._preview = PreviewPlayer(
@@ -920,6 +933,9 @@ class PipelineWindow:
                     self._build_panel_generate()
                     self._build_panel_preview()
                     self._build_panel_publish()
+                    # 워크플로(물체→생성→프리뷰→실행) 뒤, 로그 바로 위. 셀을 실측에 맞출 때만
+                    # 쓰는 도구라 기본 접힘으로 눈에 안 띄게 둔다.
+                    self._build_panel_scene()
                     self._build_log()
 
     def _lock(self, widget):
@@ -1014,9 +1030,10 @@ class PipelineWindow:
         # if the ROS stack isn't up yet.)
         if self._mode == "sim":
             # Inspection SIM executes directly through SingleArticulation and must
-            # not require ROS or allow the MoveIt graph to overwrite PD targets.
-            self._moveit_graph.set_active(mode == "moveit")
-            self._graph.set_active(False)
+            # not require ROS or allow /SimRobotGraph to overwrite PD targets.
+            # (그래서 sim × inspection 에서는 두 그래프 모두 꺼진다.)
+            self._sim_graph.set_active(mode == "moveit")
+            self._real_graph.set_active(False)
             if mode == "moveit":
                 # Relay forwarding is owned by apply_mode (stays True throughout sim);
                 # re-asserting it here is redundant and, at startup, double-starts the
@@ -1175,10 +1192,10 @@ class PipelineWindow:
     def apply_mode(self, mode: str):
         """Run mode = which robot drives the Isaac articulation:
 
-          sim  → Isaac IS the robot: /MoveItGraph drives from /isaac_joint_commands
-                 and publishes /isaac_joint_states + /clock; /ActionGraph mirror OFF.
-          real → Isaac MIRRORS the real robot: /ActionGraph ON (drive from real
-                 /joint_states + cameras); /MoveItGraph's driving + publishing nodes
+          sim  → Isaac IS the robot: /SimRobotGraph drives from /isaac_joint_commands
+                 and publishes /isaac_joint_states + /clock; /RealRobotGraph mirror OFF.
+          real → Isaac MIRRORS the real robot: /RealRobotGraph ON (drive from real
+                 /joint_states + cameras); /SimRobotGraph's driving + publishing nodes
                  OFF (so it neither moves Isaac nor feeds the twin loop).
 
         Cross-mode replay is stopped at the SOURCE: the relay (셸2) is the only thing
@@ -1192,21 +1209,21 @@ class PipelineWindow:
         """
         self._mode = mode
         if mode == "sim":
-            clear_artic_commands(self._moveit_graph_path)
-            self._graph.set_active(False)      # /ActionGraph mirror off
+            clear_artic_commands(self._sim_graph_path)
+            self._real_graph.set_active(False)      # /RealRobotGraph mirror off
             if self._pipeline_mode == "moveit":
                 self._set_relay_forwarding(True)
-                self._moveit_graph.set_active(True)
-                which = "/MoveItGraph drives (live /isaac_joint_commands)"
+                self._sim_graph.set_active(True)
+                which = "/SimRobotGraph drives (live /isaac_joint_commands)"
             else:
-                self._moveit_graph.set_active(False)
+                self._sim_graph.set_active(False)
                 which = "in-process executor drives Isaac UR20 (ROS-free)"
         else:  # real
             self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
-            self._moveit_graph.set_active(False)
-            clear_artic_commands(self._graph_path)
-            self._graph.set_active(True)       # /ActionGraph mirror on
-            which = "/ActionGraph mirrors real /joint_states (twin)"
+            self._sim_graph.set_active(False)
+            clear_artic_commands(self._real_graph_path)
+            self._real_graph.set_active(True)       # /RealRobotGraph mirror on
+            which = "/RealRobotGraph mirrors real /joint_states (twin)"
         self._mode_applied = mode
         self._sync_mode_ui()
         self._append_log(f"[run-mode] -> {mode.upper()} :: {which}")
@@ -1262,6 +1279,92 @@ class PipelineWindow:
         for button in (self._btn_home_approach, self._btn_home_return):
             if button is not None:
                 button.enabled = home_enabled
+
+    def _build_panel_scene(self):
+        """활성 셀(씬) 표시 + 뷰포트에서 잰 치수를 씬 YAML 조각으로 뽑는 보조 도구.
+
+        일상 워크플로가 아니다 — 씬을 실측에 맞출 때만 쓴다. 그래서 워크플로 패널들 뒤,
+        로그 바로 위에 **기본 접힘**으로 둔다.
+
+        기즈모로 옮긴 결과는 YAML 에 적어야 계획에 반영된다(스테이지는 플래너의 진실원이
+        아니다). 이 버튼은 그 숫자를 robot frame 으로 변환해 붙여넣기 좋게 찍어줄 뿐,
+        파일은 쓰지 않는다.
+        """
+        ui = self._ui
+        frame = ui.CollapsableFrame("Scene (obstacles)", height=0, collapsed=True)
+        self._inspection_frames.append(frame)
+        with frame:
+            with ui.VStack(spacing=4):
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Active scene", width=110)
+                    ui.Label(f"{self._scene}  (workcell/scenes/{self._scene}.yaml)")
+                with ui.HStack(height=28, spacing=6):
+                    self._lock(ui.Button("Log Selected Prim as YAML",
+                                         clicked_fn=self._on_log_selected_prim_yaml))
+
+    def _on_log_selected_prim_yaml(self):
+        """뷰포트에서 고른 prim 의 pose/치수를 씬 YAML 조각으로 로그에 찍는다(파일은 안 쓴다).
+
+        파일을 쓰지 않는 이유: 씬 YAML 은 손으로 쓴 근거 주석을 달고 있어서 writer 가 그걸
+        날린다. 실측값은 사람이 보고 넣는 게 맞다.
+        """
+        import omni.usd
+        from pxr import Gf, Usd, UsdGeom
+
+        try:
+            selection = omni.usd.get_context().get_selection()
+            paths = list(selection.get_selected_prim_paths())
+        except Exception as exc:      # Kit 버전마다 selection API 가 다르다 — 죽지 않고 안내만
+            self._append_log(f"[scene] selection API unavailable ({exc}) — check the Stage tree")
+            return
+        if not paths:
+            self._append_log("[scene] select a prim in the viewport or Stage tree first.")
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        # BBoxCache 는 참조된 USD(테이블 등) 같은 임의 prim 에도 동작한다. Xformable 의
+        # 행렬에서 ExtractRotationQuat 를 쓰면 스케일이 섞인 행렬에서 회전이 오염되므로
+        # 쓰지 않는다 — 여기서는 bbox 행렬의 basis 행을 정규화해 회전과 크기를 분리한다.
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                  [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+                                  useExtentsHint=True)
+        for path in paths:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                self._append_log(f"[scene] {path}: not a valid prim")
+                continue
+            bound = cache.ComputeWorldBound(prim)
+            rng = bound.GetRange()
+            if rng.IsEmpty():
+                self._append_log(f"[scene] {path}: no bbox (Xform-only prim?)")
+                continue
+
+            m = bound.GetMatrix()
+            # bbox 행렬의 basis 행 노름 = 축별 스케일. 그걸 빼내야 (a) 치수가 실제 크기가 되고
+            # (b) 남은 정규직교 행렬에서 회전을 깨끗하게 뽑을 수 있다.
+            basis = [np.array([m[r][0], m[r][1], m[r][2]], dtype=float) for r in range(3)]
+            scales = [float(np.linalg.norm(b)) or 1.0 for b in basis]
+            dims = [float(s) * k for s, k in zip(rng.GetSize(), scales)]
+            center_world = m.Transform(rng.GetMidpoint())
+            position = [float(center_world[0]), float(center_world[1]),
+                        float(center_world[2]) - urctl.MOUNT_HEIGHT]
+
+            rot = Gf.Matrix4d()
+            for r, (b, s) in enumerate(zip(basis, scales)):
+                rot.SetRow3(r, Gf.Vec3d(*(b / s)))
+            quat = rot.ExtractRotationQuat().GetNormalized()
+            rotation = [float(quat.GetReal()), *(float(v) for v in quat.GetImaginary())]
+
+            name = _SCENE_PRIM_NAME_RE.sub("_", prim.GetName()).strip("_").lower() or "obstacle"
+            snippet = scene_config.obstacle_yaml_snippet(name, position, dims, rotation)
+            if np.any(np.asarray(dims) <= 0.0):
+                self._append_log(f"[scene] {path}: zero-sized — prim may have no geometry")
+            if urctl._is_under_root(str(path), urctl.STAGE_PATH) or \
+                    urctl._is_under_root(str(path), GHOST_ROOT_PATH):
+                self._append_log(f"[scene] note: {path} is part of the robot, not an obstacle")
+            self._append_log(
+                f"[scene] {path} → paste into obstacles: in workcell/scenes/{self._scene}.yaml\n"
+                f"{snippet}")
 
     def _build_panel_object(self):
         """검사 대상 정의 — 물체, 그 물체의 viewpoint h5, 그리고 카메라 스펙.
@@ -1770,6 +1873,7 @@ class PipelineWindow:
             cmd += ["--num-viewpoints", str(n_vp)]
         cmd += self._ik_candidate_tokens()
         cmd += ["--batch-size", str(self._ik_batch())]
+        cmd += ["--scene", self._scene]
         cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
         cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
 
@@ -2329,7 +2433,7 @@ class PipelineWindow:
         if wh == self._render_resolution:
             return                      # 스펙 편집마다 그래프를 건드리지 않는다
         try:
-            urctl.set_render_resolution(self._graph_path, wh[0], wh[1])
+            urctl.set_render_resolution(self._real_graph_path, wh[0], wh[1])
         except Exception as e:  # noqa: BLE001 — RP 노드가 없을 수 있다(카메라 없이 그래프 생성)
             self._append_log(f"[cam] render product resize skipped: {e}")
             return
@@ -2658,6 +2762,7 @@ class PipelineWindow:
         shell = (
             f"{self._uv} run --no-sync scripts/core/glns/solve.py "
             f"--object {obj!r} --viewpoints {h5!r} "
+            f"--scene {self._scene!r} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
@@ -2822,6 +2927,7 @@ class PipelineWindow:
         shell = (
             f"{self._uv} run --no-sync scripts/core/trajectory/plan_move.py "
             f"--object {obj!r} "
+            f"--scene {self._scene!r} "
             f"--object-position {' '.join(f'{v:.6f}' for v in pos_robot)} "
             f"--object-quat {' '.join(f'{v:.6f}' for v in quat_wxyz)} "
             f"--from-joints={','.join(f'{v:.6f}' for v in current_q)!r} "
@@ -3279,6 +3385,9 @@ def main():
     if not args.usd_path.exists():
         sys.exit(f"Robot USD not found: {args.usd_path}")
 
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
+    scene_config.apply_cli(args, _cfg_module)
+
     simulation_app = urctl.start_sim(headless=False)
 
     from isaacsim.core.api import SimulationContext
@@ -3295,12 +3404,12 @@ def main():
     if inspection_cam is not None:
         simulation_app.update()
 
-    graph_path = urctl.build_action_graph(articulation_root, inspection_cam)
+    real_graph_path = urctl.build_real_robot_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
     # Separate MoveIt bridge graph (/isaac_joint_commands → robot, robot → /isaac_joint_states).
     # Gated independently from the inspection graph by the top-level pipeline mode.
-    moveit_graph_path = urctl.build_moveit_graph(articulation_root)
+    sim_graph_path = urctl.build_sim_robot_graph(articulation_root)
     simulation_app.update()
 
     # Physics-free ghost overlay for trajectory preview. Built once offline
@@ -3336,12 +3445,13 @@ def main():
         ghost_root_prim=GHOST_ROOT_PATH,
         base_link_path=base_link,
         chain=chain,
-        graph_path=graph_path,
+        real_graph_path=real_graph_path,
         default_object=(args.object or "sample"),
         initial_mode=args.mode,
-        moveit_graph_path=moveit_graph_path,
+        sim_graph_path=sim_graph_path,
         initial_pipeline_mode=args.pipeline_mode,
         articulation_root=articulation_root,
+        scene=_cfg_module.ACTIVE_SCENE,
     )
 
     simulation_context.initialize_physics()
@@ -3389,10 +3499,10 @@ def main():
         is_playing = simulation_context.is_playing()
         if is_playing != was_playing:
             # Clear stale commands before the next step so they aren't re-applied.
-            clear_artic_commands(graph_path, moveit_graph_path)
+            clear_artic_commands(real_graph_path, sim_graph_path)
             if is_playing:
                 # Restore start pose only in sim (Isaac is the robot). In real mode
-                # the /ActionGraph mirror re-drives Isaac from the live /joint_states,
+                # the /RealRobotGraph mirror re-drives Isaac from the live /joint_states,
                 # so forcing a start pose would just fight the twin.
                 restore_pending = (window._mode == "sim")
                 window._append_log(

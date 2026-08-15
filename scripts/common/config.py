@@ -1,6 +1,13 @@
  #!/usr/bin/env python3
+import sys
+
 import numpy as np
 from pathlib import Path
+
+from common import scene_config
+
+# 씬 로더가 이 모듈의 심볼을 in-place 로 갱신한다(scene_config.apply_to).
+_self = sys.modules[__name__]
 
 # ============================================================================
 # 프로젝트 경로
@@ -90,71 +97,75 @@ ROBOT_START_STATE = np.array([1.5, -1.5, 2.0, -0.5, 1.5, 0.0])
 MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 
 
-# ============================================================================
-# 월드 설정 (Isaac Sim 좌표계, 미터 단위)
-# ============================================================================
 
+# ============================================================================
+# 월드 설정 (robot base_link frame, 미터 단위)
+# ============================================================================
+#
+# 값은 이 파일이 아니라 **씬 YAML(workcell/scenes/{name}.yaml)** 이 소유한다.
+# 스키마·검증은 common/scene_config.py 가 소유하고, 이 모듈은 소비자가 이미 import 하는
+# façade 로 남는다 — 어떤 소비자도 YAML 을 직접 파싱하지 않는다.
+#
 # 좌표계 주의:
-# 본 config의 위치/치수는 모두 robot base_link frame 기준 (cuRobo 충돌 입력용).
-# Isaac Sim visual 은 world frame (floor=0) 이며, robot base = world z=MOUNT_HEIGHT(0.805m).
-# 따라서 robot frame z = world z - 0.805.
-
-# 대상 객체 설정 — visual: world (-0.1, 1.1, 0.795), robot frame z = 0.795-0.805 = -0.010
-# rotation = identity: 물체 방향은 config가 아니라 **메시에 베이크**한다
-# (setup/prepare_object_mesh.py reorient).
-# 그래야 viser(로컬 프레임)와 Isaac(월드 프레임)이 회전 차이 없이 동일하게 보임.
-# (이전 [0.7071,0,0,0.7071]은 순수 z-yaw였음 → identity로 바꿔도 bottom 필터는 불변, sample은 90° yaw만 풀림.)
-TARGET_OBJECT = {
-    "name": "target_object",
-    "position": np.array([-0.1, 1.1, -0.010], dtype=np.float64),
-    "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),  # 쿼터니언: w, x, y, z (identity)
-}
+# 위치/치수는 모두 robot base_link frame 기준 (cuRobo 충돌 입력용).
+# Isaac Sim visual 은 world frame (floor=0) 이며, robot base = world z=MOUNT_HEIGHT.
+# 따라서 robot frame z = world z - MOUNT_HEIGHT.
+#
+# ⚠️ 아래 컨테이너들은 모듈 수명 동안 **같은 객체**로 유지된다. load_scene() 은 rebind 하지
+#    않고 내용만 갈아끼운다(scene_config.apply_to 참고). sync_support_to_target() 이 WALLS
+#    안의 support dict 를 제자리에서 바꾸고, build_collision_world 와 trajectory_studio 가
+#    그 참조를 들고 있기 때문이다.
 
 # robot base_link 가 world z=MOUNT_HEIGHT 에 있다 → robot frame z = world z - MOUNT_HEIGHT.
+# 씬이 아니라 로봇/프레임 규약이다: ROBOT_MOUNT 치수, mount USD 스케일, 로봇/고스트 스폰 z,
+# 문서의 프레임 정의가 전부 이 값에 얽혀 있어서 씬 파일이 단독으로 바꿀 수 없다.
 MOUNT_HEIGHT = 0.805
 
-# 물체별 배치 (robot base_link frame). 도달성/스캔성을 최대화하는 위치·방향으로 측정 결정.
-# 표에 없는 물체는 TARGET_OBJECT 기본값을 그대로 쓴다. position 은 robot frame [x,y,z](m),
-# rotation 은 쿼터니언 [w,x,y,z]. rotation 생략 시 identity. apply_object_placement() 로 반영.
-# 주의: rotation 을 여기서 주면 mesh-bake 와 달리 viewer 마다 적용이 필요 — viewpoint_studio /
-# Isaac scene 은 config rotation 을 반영하도록 맞춰져 있다(둘 다 동일 외형). z-yaw 는 bottom-filter
-# 가 불변이라 기존 viewpoint h5 재생성 불필요(비-z 회전은 재생성 필요).
-# 아래 값은 기존 GLNS 배치 스윕에서 얻은 min-reconfig best.
-# 실제 joined motion reconfig = scan reconfig + seam(=solved component 수-1) 을 최소화(1~2개 미커버 허용).
-# 전부 base reconfig=0. 근거 자료는 docs/reference/placement-sweep/{object}/summary.csv
-# (coverage-우선 best 는 커밋 이력/summary 참고)
-OBJECT_PLACEMENTS = {
-    # curved: 99/100, base0, scan reconfig2, 1 component(seam0) → 실제 ~2. (coverage-best 는 100/100·reconfig6)
-    "curved_structure": {
-        # "position": np.array([-0.175, 0.725, 0.19], dtype=np.float64),
-        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
-        
-        # "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-        "rotation": np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float64),  # z-yaw 90°
-    },
-    # cylinder: 22/22, base0, reconfig2, 1 component. 근접 y 경계(0.95) → 더 가까이면 유리할 수 있음.
-    "cylinder_sample": {
-        # "position": np.array([-0.025, 0.95, -0.010], dtype=np.float64),
-        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
-        "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-    },
-    # sample: 72/74, base0, scan reconfig0, 3 component(seam2) → 실제 ~2 + z-yaw90(scan-collision 회피).
-    "sample": {
-        # "position": np.array([-0.1, 0.8, -0.010], dtype=np.float64),
-        "position": np.array([-0.15, 0.741, 0.19], dtype=np.float64),
-        "rotation": np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float64),  # z-yaw 90°
-    },
-    # square: 70/71, base0, reconfig3, 1 component. 격자 전역 평평(reconfig3 바닥) → 근접 y/높은 z 확장 시 개선.
-    "square_structure": {
-        # "position": np.array([-0.175, 1.1, -0.010], dtype=np.float64),
-        # "rotation": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-        
-        "position": np.array([-0.121, 0.743, 0.359], dtype=np.float64),
-        "rotation": np.array([0.92387953, 0.0, 0.0, 0.38268343], dtype=np.float64),  # z-yaw 45°
-    },
-}
+DEFAULT_SCENE = scene_config.DEFAULT_SCENE
+ACTIVE_SCENE = None          # 현재 로드된 씬 이름
+ACTIVE_SCENE_PATH = None     # 그 씬의 파일 경로 (스냅샷 재현 시 None)
 
-# 충돌 검사용 물체 형상 override (build_collision_world 가 참조).
+TARGET_OBJECT: dict = {}     # 대상 물체 pose (name/position/rotation)
+# 씬이 준 물체 기본 pose 의 **불변 사본**. TARGET_OBJECT 는 배치/기즈모/CLI 가 계속
+# 덮어쓰므로, 미등록 물체를 기본값으로 되돌리려면 별도 보관이 필요하다.
+_SCENE_TARGET_DEFAULT: dict = {}
+OBJECT_PLACEMENTS: dict = {}  # 물체별 배치 override
+OBSTACLES: list = []         # 씬 순서 그대로의 전체 장애물 — 신규 정식 API
+TABLE: dict = {}             # OBSTACLES 안의 그 dict 자체 (별칭)
+ROBOT_MOUNT: dict = {}       # 〃
+WALLS: list = []             # OBSTACLES - {table, robot_mount}. 기존 소비자 호환용 별칭
+
+
+def load_scene(name_or_path=None) -> str:
+    """씬 YAML 을 로드해 이 모듈의 월드 심볼을 갱신한다. 활성 씬 이름을 돌려준다."""
+    global ACTIVE_SCENE_PATH
+    scene = scene_config.load_scene(name_or_path)
+    scene_config.apply_to(_self, scene)
+    ACTIVE_SCENE_PATH = scene["path"]
+    return ACTIVE_SCENE
+
+
+def load_scene_snapshot(snap: dict) -> str:
+    """h5 에 박제된 스냅샷으로 월드를 재현한다(파일을 읽지 않는다)."""
+    global ACTIVE_SCENE_PATH
+    scene = scene_config.load_snapshot(snap)
+    scene_config.apply_to(_self, scene)
+    ACTIVE_SCENE_PATH = None
+    return ACTIVE_SCENE
+
+
+def scene_snapshot() -> dict:
+    """현재 월드를 JSON 직렬화 가능한 스냅샷으로. 해 h5 에 박제해 재현에 쓴다."""
+    return scene_config.snapshot({
+        "name": ACTIVE_SCENE,
+        "target_object": TARGET_OBJECT,
+        "obstacles": OBSTACLES,
+        "object_placements": OBJECT_PLACEMENTS,
+    })
+
+
+# 물체별 충돌 형상 override (build_collision_world 가 참조).
+# 씬이 아니라 **물체 자체의 속성**이라 셀을 바꿔도 안 변한다 — 그래서 씬 YAML 로 옮기지 않는다.
 # cuRobo mesh 충돌은 최소 bbox 치수 ≲5cm 인 작은 메시를 **모든** 로봇 자세에 대해 충돌로 오판한다
 # (0.5m 떨어진 home 자세조차 충돌 → IK 후보 전멸 → "No reachable viewpoints"). 해당 물체는
 # mesh 대신 analytic primitive 로 충돌을 표현한다. "box" = mesh bbox 를 Cuboid(obb)로 — 모든 충돌
@@ -190,10 +201,20 @@ def apply_object_placement(object_name):
     """object_name 의 배치를 TARGET_OBJECT/support 에 in-place 반영(robot frame).
 
     각 진입점에서 CLI override 전에 호출 → 다운스트림(build_camera_poses / build_collision_world /
-    isaac scene)이 read 시점에 per-object 배치를 본다. 표에 없으면 기본값 유지하고 False 반환.
+    isaac scene)이 read 시점에 per-object 배치를 본다.
+
+    표에 없는 물체는 **씬의 target_object 기본값으로 되돌리고** False 를 반환한다. 예전에는
+    아무것도 안 하고 False 만 돌려줬는데, 그러면 TARGET_OBJECT 가 직전 물체 pose 로 오염된 채
+    남는다 — studio 에서 물체를 갈아끼우면 미등록 물체가 앞 물체의 자리에 놓였다. 반환값 계약
+    (표에 있었나?)은 그대로라 호출부 9곳의 로그 로직은 안 바뀐다.
     """
     p = OBJECT_PLACEMENTS.get(object_name)
     if p is None:
+        TARGET_OBJECT["position"] = np.asarray(
+            _SCENE_TARGET_DEFAULT["position"], dtype=np.float64).copy()
+        TARGET_OBJECT["rotation"] = np.asarray(
+            _SCENE_TARGET_DEFAULT["rotation"], dtype=np.float64).copy()
+        sync_support_to_target()
         return False
     if "position" in p:
         TARGET_OBJECT["position"] = np.asarray(p["position"], dtype=np.float64).copy()
@@ -207,45 +228,6 @@ def target_object_world_position():
     """TARGET_OBJECT position(robot frame) → Isaac world frame(z += MOUNT_HEIGHT)."""
     return np.asarray(TARGET_OBJECT["position"], dtype=np.float64) + np.array([0.0, 0.0, MOUNT_HEIGHT])
 
-# 테이블 직육면체 설정 — thor_table.usd 측정값 매칭
-# visual: world center (-0.2, 1.1, 0.315), size 0.910×0.768×0.630
-# robot frame z = 0.315 - 0.805 = -0.490
-TABLE = {
-    "name": "table",
-    "position": np.array([-0.2, 0.7, -0.490], dtype=np.float64),
-    "dimensions": np.array([0.910, 0.768, 0.630], dtype=np.float64),
-}
-
-# 벽(펜스) 직육면체 설정 - 작업 공간을 둘러싼 4개의 벽
-WALLS = [
-    {
-        "name": "wall_front",
-        "position": np.array([0.0, 1.6, 0.5], dtype=np.float64),
-        "dimensions": np.array([2.2, 0.1, 3.0], dtype=np.float64),
-    },
-    {
-        "name": "wall_back",
-        "position": np.array([0.0, -1.0, 0.5], dtype=np.float64),
-        "dimensions": np.array([2.2, 0.1, 3.0], dtype=np.float64),
-    },
-    {
-        "name": "wall_left",
-        "position": np.array([-1.0, 0.25, 0.5], dtype=np.float64),
-        "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
-    },
-    {
-        "name": "wall_right",
-        "position": np.array([1.0, 0.25, 0.5], dtype=np.float64),
-        "dimensions": np.array([0.1, 2.7, 3.0], dtype=np.float64),
-    },
-    {
-        # Target object 받침대. 위치와 높이는 apply_object_placement()에서 물체별로 갱신.
-        "name": "support",
-        "position": np.array([-0.1, 1.1, -0.0925], dtype=np.float64),
-        "dimensions": np.array([0.05, 0.05, 0.165], dtype=np.float64),
-    },
-]
-
 
 def sync_support_to_target():
     """Support가 테이블 상면과 물체 바닥 사이를 채우도록 배치한다."""
@@ -255,8 +237,9 @@ def sync_support_to_target():
     height = object_bottom_z - table_top_z
     if height <= 0.0:
         raise ValueError(
-            f"Target object bottom z ({object_bottom_z:.4f}) must be above "
-            f"table top z ({table_top_z:.4f})"
+            f"[scene '{ACTIVE_SCENE}'] Target object bottom z ({object_bottom_z:.4f}) must be "
+            f"above table top z ({table_top_z:.4f}) — check the scene's "
+            f"object_placements or table height"
         )
 
     support["position"] = np.array([
@@ -271,14 +254,8 @@ def sync_support_to_target():
     ], dtype=np.float64)
     return support
 
-# 로봇 마운트(베이스) 설정 — ur10_mount.usd visual 매칭
-# visual: world center (0, 0, 0.4025), size 0.54×0.54×0.805 (XY 2배 스케일 적용 후)
-# robot frame z = 0.4025 - 0.805 = -0.4025, top at robot frame z=0 (= robot base)
-ROBOT_MOUNT = {
-    "name": "robot_mount",
-    "position": np.array([0.0, 0.0, -0.4025], dtype=np.float64),
-    "dimensions": np.array([0.54, 0.54, 0.805], dtype=np.float64),
-}
+
+load_scene(DEFAULT_SCENE)
 
 
 # ============================================================================
@@ -406,7 +383,7 @@ def get_mesh_path(object_name: str, filename: str = None, mesh_type: str = "targ
                 return target_ply
             filename = "target.obj"
         else:
-            raise ValueError(f"잘못된 mesh_type: '{mesh_type}'. 'source' 또는 'target'이어야 합니다")
+            raise ValueError(f"invalid mesh_type: '{mesh_type}'. Expected 'source' or 'target'")
 
     return DATA_ROOT / object_name / "mesh" / filename
 

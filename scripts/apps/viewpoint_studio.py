@@ -54,7 +54,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # -> scripts/
-from common import config
+from common import config, scene_config
 from core.viewpoint import (
     DEFAULT_DELAUNAY_DISTANCE_FACTOR,
     DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
@@ -957,6 +957,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--object", type=str, default=None,
                         help="Initial object to select (default: first discovered).")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--viewpoints", type=Path, default=None,
                         help="Load this viewpoints*.h5 on startup.")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
@@ -967,6 +968,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    # 씬을 먼저 — 물체 배치(rotation)가 bottom-filter 판정에 쓰인다.
+    scene_config.apply_cli(args, config)
     data_root = args.data_root.resolve()
     objects = discover_objects(data_root)
     if not objects:

@@ -1,0 +1,84 @@
+# 검사 셀 씬 — cuRobo 충돌 월드와 Isaac 시각화의 단일 진실원.
+#
+# 좌표계: 모든 position 은 robot base_link frame [x, y, z] (m).
+#         Isaac world z = robot z + config.MOUNT_HEIGHT(0.805).
+# rotation 은 쿼터니언 [w, x, y, z]. 생략하면 identity.
+#
+# ⚠️ cuRobo 0.8 은 sphere/cylinder/capsule 을 충돌 검사에 넣지 않는다(조용히 무시).
+#    그래서 scene_config.obstacle_obb() 가 우리 손으로 OBB 로 바꾼다. 플래너·viser·Isaac 이
+#    모두 그 함수를 쓰므로 화면에 보이는 것이 곧 플래너가 푸는 것이다.
+#
+# 예약 이름: table / robot_mount / support — config.sync_support_to_target() 과
+#            core/isaac/scene.py 가 이 이름으로 찾는다. 바꾸지 말 것.
+version: 1
+name: sim_default
+
+# 물체 기본 pose. object_placements 에 없는 물체는 이 값을 쓴다.
+# rotation 은 보통 identity — 물체 방향은 config 가 아니라 **메시에 베이크**한다
+# (setup/prepare_object_mesh.py reorient). 그래야 viser(로컬 프레임)와 Isaac(월드 프레임)이
+# 회전 차이 없이 같아 보인다.
+target_object:
+  name: target_object
+  position: [-0.1, 1.1, -0.010]      # visual world (-0.1, 1.1, 0.795) → robot z = 0.795-0.805
+  rotation: [1.0, 0.0, 0.0, 0.0]
+
+# 순서가 곧 cuRobo cuboid 순서다.
+obstacles:
+  # 테이블 — thor_table.usd 측정값 매칭. visual world center (-0.2, 1.1, 0.315).
+  # ⚠️ 회전 불가(identity 강제): sync_support_to_target() 이 상면 높이를
+  #    position[2] + dimensions[2]/2 로 구한다 — 축정렬일 때만 맞는 식이다.
+  - name: table
+    type: cuboid
+    position:   [-0.2, 0.7, -0.490]
+    dimensions: [0.910, 0.768, 0.630]
+    isaac_visual: usd_table
+
+  # 로봇 마운트 — ur10_mount.usd visual 매칭 (XY 2배 스케일 적용 후).
+  # 상면이 robot frame z=0 (= robot base) 에 온다.
+  - name: robot_mount
+    type: cuboid
+    position:   [0.0, 0.0, -0.4025]
+    dimensions: [0.54, 0.54, 0.805]
+    isaac_visual: usd_mount
+
+  # 작업 공간을 둘러싼 펜스 4개. 충돌 전용이라 Isaac 에서는 숨긴다(프림은 만든다 —
+  # Stage 트리에서 켜면 플래너가 보는 것을 눈으로 확인할 수 있다).
+  - {name: wall_front, type: cuboid, position: [0.0, 1.6, 0.5],   dimensions: [2.2, 0.1, 3.0], isaac_visual: hidden}
+  - {name: wall_back,  type: cuboid, position: [0.0, -1.0, 0.5],  dimensions: [2.2, 0.1, 3.0], isaac_visual: hidden}
+  - {name: wall_left,  type: cuboid, position: [-1.0, 0.25, 0.5], dimensions: [0.1, 2.7, 3.0], isaac_visual: hidden}
+  - {name: wall_right, type: cuboid, position: [1.0, 0.25, 0.5],  dimensions: [0.1, 2.7, 3.0], isaac_visual: hidden}
+
+  # 물체 받침대. position 과 dimensions[2] 는 sync_support_to_target() 이 물체 배치에서
+  # 런타임에 다시 계산한다(테이블 상면 ↔ 물체 바닥을 채운다). 아래 값은 물체 로드 전 시드다.
+  # dimensions[0:2] (받침대 단면)는 실제로 쓰이는 값이다.
+  - name: support
+    type: cuboid
+    position:   [-0.1, 1.1, -0.0925]
+    dimensions: [0.05, 0.05, 0.165]
+    isaac_visual: primitive
+
+# 물체별 배치 (robot base_link frame). 도달성/스캔성을 최대화하는 위치·방향으로 측정 결정.
+# 표에 없는 물체는 위 target_object 기본값을 쓴다.
+# 실제 joined motion reconfig = scan reconfig + seam(=solved component 수-1) 을 최소화
+# (1~2개 미커버 허용). 전부 base reconfig=0.
+# 근거 자료: docs/reference/placement-sweep/{object}/summary.csv
+object_placements:
+  # 99/100, base0, scan reconfig2, 1 component(seam0) → 실제 ~2
+  curved_structure:
+    position: [-0.15, 0.741, 0.19]
+    rotation: [0.70710678, 0.0, 0.0, 0.70710678]   # z-yaw 90°
+
+  # 22/22, base0, reconfig2, 1 component
+  cylinder_sample:
+    position: [-0.15, 0.741, 0.19]
+    rotation: [1.0, 0.0, 0.0, 0.0]
+
+  # 72/74, base0, scan reconfig0, 3 component(seam2) → 실제 ~2 + z-yaw90(scan-collision 회피)
+  sample:
+    position: [-0.15, 0.741, 0.19]
+    rotation: [0.70710678, 0.0, 0.0, 0.70710678]   # z-yaw 90°
+
+  # 70/71, base0, reconfig3, 1 component
+  square_structure:
+    position: [-0.121, 0.743, 0.359]
+    rotation: [0.92387953, 0.0, 0.0, 0.38268343]   # z-yaw 45°

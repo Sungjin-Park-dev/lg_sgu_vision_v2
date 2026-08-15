@@ -39,7 +39,8 @@ Module API (used by isaac_pipeline.py):
     find_articulation_root() -> str
     set_start_pose(articulation_root, joint_names, positions) -> None
     setup_inspection_camera(root_path, camera_name) -> str | None
-    build_action_graph(articulation_root, inspection_cam) -> str   # graph path
+    build_real_robot_graph(articulation_root, inspection_cam) -> str  # graph path
+    build_sim_robot_graph(articulation_root) -> str                   # graph path
 """
 
 import argparse
@@ -53,6 +54,7 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config as _config  # noqa: E402
+from common import scene_config as _scene_config  # noqa: E402
 
 ROBOT_DIR = PROJECT_ROOT / "workcell" / "robot"
 ENV_DIR   = PROJECT_ROOT / "workcell" / "environment"
@@ -66,12 +68,23 @@ STAGE_PATH = "/World/UR20"
 MOUNT_PATH = "/World/Mount"
 TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
-ACTION_GRAPH_PATH = "/ActionGraph"
-MOVEIT_GRAPH_PATH = "/MoveItGraph"
+# 씬 YAML 장애물은 전부 이 스코프 아래로 간다. 예약 경로와 겹치지 않고, 스코프 하나만
+# 지우면 정리된다. 스코프 이름은 isaac_pipeline 이 스테이지 전체에서 이름으로 지우는
+# 스코프들(CuRoboCollisionSpheres 등)과 겹치면 안 된다 — scene_config 가 검증한다.
+OBSTACLES_SCOPE = "/World/SceneObstacles"
+ISAAC_VISUAL_TOKENS = frozenset({"primitive", "hidden", "usd_table", "usd_mount"})
+# Isaac 의 UR20 을 무엇이 움직이는가로 갈린다. 동시에 하나만 tick 한다 —
+# 두 그래프 모두 ArticulationController 를 갖고 있어서, 같이 돌면 같은 관절을 두고 싸운다.
+#   RealRobotGraph : 실로봇 /joint_states → Isaac (Isaac 은 트윈 화면) + 검사 카메라 발행
+#   SimRobotGraph  : /isaac_joint_commands → Isaac, /isaac_joint_states·/clock 발행
+#                    (Isaac 이 ros2_control 의 하드웨어 대역을 한다)
+# ⚠️ sim × inspection 에서는 **둘 다 안 돈다** — in-process executor 가 직접 구동한다.
+REAL_ROBOT_GRAPH_PATH = "/RealRobotGraph"
+SIM_ROBOT_GRAPH_PATH = "/SimRobotGraph"
 CAMERA_MOUNT_NAME = "camera_mount"
 CAMERA_OPTICAL_FRAME_NAME = "camera_optical_frame"
 INSPECTION_CAMERA_NAME = "InspectionCamera"
-# 렌더 프로덕트 노드의 그래프 내 이름. build_action_graph 의 노드 키와 반드시 같아야 한다
+# 렌더 프로덕트 노드의 그래프 내 이름. build_real_robot_graph 의 노드 키와 반드시 같아야 한다
 # (같은 파일이라 rename 은 이 파일 grep 하나로 끝난다). 바깥에서 해상도를 바꿀 때는 이 이름을
 # 직접 쓰지 말고 set_render_resolution() 을 부른다 — 그래프 스키마는 이 모듈이 소유한다.
 RENDER_PRODUCT_NODE = "RP"
@@ -86,8 +99,11 @@ def _is_under_root(path: str, root: str) -> bool:
     """
     return path == root or path.startswith(root + "/")
 
+# robot base 높이는 config 가 소유한다 — 여기서 재정의하면 조용히 갈라진다.
+# (isaac_pipeline 이 urctl.MOUNT_HEIGHT 로 읽으므로 재수출은 유지한다.)
+MOUNT_HEIGHT = _config.MOUNT_HEIGHT
+
 # 워크셀 USD에서 측정한 치수
-MOUNT_HEIGHT = 0.805
 MOUNT_USD_INTRINSIC_Z = 0.515
 TABLE_USD_INTRINSIC_X = 0.910
 TABLE_USD_INTRINSIC_Y = 0.768
@@ -104,6 +120,7 @@ def parse_args(argv=None):
                         help=f"Robot USD path (default: {DEFAULT_USD.relative_to(PROJECT_ROOT)})")
     parser.add_argument("--object", type=str, default=None,
                         help="Object name to load workcell (e.g. 'sample')")
+    _scene_config.add_cli_argument(parser)
     parser.add_argument("--mode", choices=["sim", "real"], default="sim",
                         help="sim = Isaac-only, no live ROS traffic (default); "
                              "real = mirror /joint_states + publish to the robot")
@@ -133,10 +150,10 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
     # extension-enable (which is fragile after play() in Isaac 6.0).
     if enable_ros_bridge:
         extensions.enable_extension("isaacsim.ros2.bridge")
-    # In GUI mode, also load the OmniGraph editor window so the /ActionGraph is
+    # In GUI mode, also load the OmniGraph editor window so the graphs are
     # inspectable via Window > Graph Editors > Action Graph. SimulationApp's
     # minimal app does NOT auto-enable editor UI: the graph runtime works (and
-    # /ActionGraph shows in Stage), but the editor menu/window are absent until
+    # they show in Stage), but the editor menu/window are absent until
     # this extension is on.
     if not headless:
         extensions.enable_extension("omni.graph.window.action")
@@ -150,7 +167,7 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
 
 
 def load_workcell(usd_path: Path) -> None:
-    """Place environment + mount + table + robot + support cuboid on stage."""
+    """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다."""
     from isaacsim.core.utils import prims
 
     prims.create_prim(
@@ -178,7 +195,7 @@ def load_workcell(usd_path: Path) -> None:
         usd_path=str(usd_path),
     )
 
-    _create_support(_config)
+    spawn_scene_obstacles(_config)
 
 
 def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
@@ -208,24 +225,59 @@ def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
     return position, scale
 
 
-def _create_support(config_module) -> None:
-    """Create or replace the visual support using the current collision config."""
-    from isaacsim.core.api.objects import VisualCuboid
+def spawn_scene_obstacles(config_module=_config) -> None:
+    """씬 YAML 의 장애물을 스테이지에 그린다. 재호출 안전(스코프째 지우고 다시 만든다).
+
+    플래너가 푸는 것과 같은 OBB(scene_config.obstacle_obb)를 그린다 — cuRobo 가 비-cuboid 를
+    OBB 로만 받기 때문이다. 그래서 화면에 보이는 것이 곧 충돌 월드다.
+
+    isaac_visual 토큰(어휘의 소유자는 이 모듈이다):
+      usd_table / usd_mount  전용 USD 자산이 이미 load_workcell 에서 배치된다 → 여기선 건너뛴다
+      hidden                 프림은 만들되 invisible. Stage 트리에서 켜면 플래너가 보는 벽이 보인다
+      primitive              반투명 박스로 그린다
+    """
+    from pxr import Gf, UsdGeom
+    import omni.usd
     from isaacsim.core.utils import prims
 
-    prim_path = "/World/Support"
-    if prims.is_prim_path_valid(prim_path):
-        prims.delete_prim(prim_path)
+    if prims.is_prim_path_valid(OBSTACLES_SCOPE):
+        prims.delete_prim(OBSTACLES_SCOPE)
 
-    support = next(w for w in config_module.WALLS if w["name"] == "support")
-    VisualCuboid(
-        prim_path=prim_path,
-        name="support",
-        position=support["position"] + np.array([0.0, 0.0, MOUNT_HEIGHT]),
-        size=1.0,
-        scale=support["dimensions"],
-        color=np.array([0.5, 0.5, 0.5]),
-    )
+    stage = omni.usd.get_context().get_stage()
+    UsdGeom.Xform.Define(stage, OBSTACLES_SCOPE)
+
+    for obstacle in config_module.OBSTACLES:
+        token = obstacle.get("isaac_visual", "primitive")
+        if token not in ISAAC_VISUAL_TOKENS:
+            raise ValueError(
+                f"obstacle '{obstacle['name']}': unknown isaac_visual {token!r} — "
+                f"expected one of {sorted(ISAAC_VISUAL_TOKENS)}")
+        if token in ("usd_table", "usd_mount"):
+            continue   # load_workcell 이 전용 USD 로 이미 배치했다
+
+        pos, quat, dims = _scene_config.obstacle_obb(obstacle)
+        prim_path = f"{OBSTACLES_SCOPE}/{obstacle['name']}"
+        cube = UsdGeom.Cube.Define(stage, prim_path)
+        cube.CreateSizeAttr(1.0)
+        cube.CreateDisplayColorAttr([Gf.Vec3f(0.5, 0.5, 0.5)])
+        cube.CreateDisplayOpacityAttr([0.35])
+
+        # position/scale 을 create_prim 이나 VisualCuboid 로 주면 XFormPrim → physics/Fabric
+        # 경로를 타서 **재생 중**에는 어긋난다(load_target_object 의 주석 참고 — 같은 버그를
+        # 타깃 물체에서 이미 겪었다). 로컬 USD op 를 직접 저작하면 재생 상태와 무관하다.
+        # USD 는 row-vector 규약이라 스케일이 먼저다.
+        S = Gf.Matrix4d().SetScale(Gf.Vec3d(*(float(v) for v in dims)))
+        RT = Gf.Matrix4d()
+        RT.SetTransform(
+            Gf.Rotation(Gf.Quatd(float(quat[0]), Gf.Vec3d(*(float(v) for v in quat[1:])))),
+            Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]) + MOUNT_HEIGHT),
+        )
+        xf = UsdGeom.Xformable(cube.GetPrim())
+        xf.ClearXformOpOrder()
+        xf.AddTransformOp().Set(S * RT)
+
+        if token == "hidden":
+            UsdGeom.Imageable(cube.GetPrim()).MakeInvisible()
 
 
 def load_target_object(object_name: str | None) -> None:
@@ -252,8 +304,9 @@ def load_target_object(object_name: str | None) -> None:
         )
         return
 
-    # Runtime object swap에서도 support visual을 새 물체 위치에 맞춘다.
-    _create_support(_config)
+    # Runtime object swap에서도 support visual을 새 물체 위치에 맞춘다
+    # (support 는 물체 배치에서 파생되므로 물체가 바뀌면 다시 그려야 한다).
+    spawn_scene_obstacles(_config)
 
     prim_path = f"/World/{_config.TARGET_OBJECT['name']}"
     if prims.is_prim_path_valid(prim_path):
@@ -427,18 +480,22 @@ def setup_inspection_camera(
     return inspection_cam_path
 
 
-def build_action_graph(articulation_root: str, inspection_cam: str | None) -> str:
-    """Create the ROS2 joint-state subscriber + optional camera publishers. Returns graph path."""
+def build_real_robot_graph(articulation_root: str, inspection_cam: str | None) -> str:
+    """실로봇 /joint_states 로 Isaac 을 구동(미러) + 검사 카메라 발행. graph path 반환.
+
+    단방향이다 — Isaac 은 관절 상태를 ROS 로 되돌려주지 않는다(카메라 이미지만 내보낸다).
+    run mode = real 에서만 tick 한다.
+    """
     import omni.graph.core as og
     import omni.usd
     from isaacsim.core.utils import prims
 
-    # Idempotency guard: ACTION_GRAPH_PATH is fixed, so re-running this would try
+    # Idempotency guard: REAL_ROBOT_GRAPH_PATH is fixed, so re-running this would try
     # to CREATE_NODES onto an existing graph (duplicate-node error). Tear any
     # existing graph down first so the function is safe to call more than once.
     stage = omni.usd.get_context().get_stage()
-    if stage is not None and stage.GetPrimAtPath(ACTION_GRAPH_PATH).IsValid():
-        prims.delete_prim(ACTION_GRAPH_PATH)
+    if stage is not None and stage.GetPrimAtPath(REAL_ROBOT_GRAPH_PATH).IsValid():
+        prims.delete_prim(REAL_ROBOT_GRAPH_PATH)
 
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
@@ -494,7 +551,7 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
 
     try:
         og.Controller.edit(
-            {"graph_path": ACTION_GRAPH_PATH, "evaluator_name": "execution"},
+            {"graph_path": REAL_ROBOT_GRAPH_PATH, "evaluator_name": "execution"},
             {
                 og.Controller.Keys.CREATE_NODES: create_nodes,
                 og.Controller.Keys.CONNECT: connect,
@@ -504,7 +561,7 @@ def build_action_graph(articulation_root: str, inspection_cam: str | None) -> st
     except Exception as e:
         print(e)
 
-    return ACTION_GRAPH_PATH
+    return REAL_ROBOT_GRAPH_PATH
 
 
 def set_render_resolution(graph_path: str, width: int, height: int) -> None:
@@ -524,25 +581,25 @@ def set_render_resolution(graph_path: str, width: int, height: int) -> None:
             f"{graph_path}/{RENDER_PRODUCT_NODE}.inputs:{name}").set(int(value))
 
 
-def build_moveit_graph(articulation_root: str) -> str:
+def build_sim_robot_graph(articulation_root: str) -> str:
     """Create the MoveIt(cuMotion) bridge graph. Returns graph path.
 
-    Mirrors build_action_graph but wired for the isaac_ros_cumotion / MoveIt
+    Mirrors build_real_robot_graph but wired for the isaac_ros_cumotion / MoveIt
     TopicBasedSystem convention (ur.ros2_control.xacro):
       - subscribe MOVEIT_JOINT_COMMANDS_TOPIC (/isaac_joint_commands) → drive robot
       - publish   MOVEIT_JOINT_STATES_TOPIC   (/isaac_joint_states)   ← robot state
 
-    Built as a SEPARATE graph from /ActionGraph so the two can be gated
+    Built as a SEPARATE graph from /RealRobotGraph so the two can be gated
     independently (the pipeline UI keeps only one ticking at a time).
     """
     import omni.graph.core as og
     import omni.usd
     from isaacsim.core.utils import prims
 
-    # Idempotency guard (see build_action_graph).
+    # Idempotency guard (see build_real_robot_graph).
     stage = omni.usd.get_context().get_stage()
-    if stage is not None and stage.GetPrimAtPath(MOVEIT_GRAPH_PATH).IsValid():
-        prims.delete_prim(MOVEIT_GRAPH_PATH)
+    if stage is not None and stage.GetPrimAtPath(SIM_ROBOT_GRAPH_PATH).IsValid():
+        prims.delete_prim(SIM_ROBOT_GRAPH_PATH)
 
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
@@ -586,7 +643,7 @@ def build_moveit_graph(articulation_root: str) -> str:
 
     try:
         og.Controller.edit(
-            {"graph_path": MOVEIT_GRAPH_PATH, "evaluator_name": "execution"},
+            {"graph_path": SIM_ROBOT_GRAPH_PATH, "evaluator_name": "execution"},
             {
                 og.Controller.Keys.CREATE_NODES: create_nodes,
                 og.Controller.Keys.CONNECT: connect,
@@ -596,7 +653,7 @@ def build_moveit_graph(articulation_root: str) -> str:
     except Exception as e:
         print(e)
 
-    return MOVEIT_GRAPH_PATH
+    return SIM_ROBOT_GRAPH_PATH
 
 
 def main():
@@ -608,6 +665,9 @@ def main():
             f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD\n"
             f"to workcell/robot/ur20_with_camera.usd"
         )
+
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
+    _scene_config.apply_cli(args, _config)
 
     simulation_app = start_sim(headless=False)
 
@@ -627,7 +687,7 @@ def main():
     if inspection_cam is not None:
         simulation_app.update()
 
-    build_action_graph(articulation_root, inspection_cam)
+    build_real_robot_graph(articulation_root, inspection_cam)
     simulation_app.update()
 
     simulation_context.initialize_physics()

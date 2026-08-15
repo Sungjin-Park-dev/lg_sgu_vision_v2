@@ -39,7 +39,7 @@ import numpy as np
 SCRIPTS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 
 # 엣지가 하나뿐이라 큰 배치는 낭비다. warmup 버퍼가 배치 슬롯당 ~375MB 라 기본값(24)이면
@@ -56,9 +56,9 @@ def _joints(text: str) -> np.ndarray:
     try:
         q = np.array([float(v) for v in values], dtype=np.float64)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"숫자로 못 읽음 ({exc})")
+        raise argparse.ArgumentTypeError(f"could not parse as numbers ({exc})")
     if q.shape != (6,):
-        raise argparse.ArgumentTypeError(f"관절값 6개가 필요하다 (받은 값 {len(values)}개)")
+        raise argparse.ArgumentTypeError(f"expected 6 joint values (got {len(values)})")
     return q
 
 
@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--to-joints", required=True, type=_joints,
                    help='목표 관절값 "q0,...,q5" [rad]')
     p.add_argument("--object", required=True, help="충돌 세계에 놓을 물체 이름")
+    scene_config.add_cli_argument(p)
     p.add_argument("--object-position", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    default=None, help="물체 위치 (robot base_link frame, m)")
     p.add_argument("--object-quat", type=float, nargs=4, metavar=("W", "X", "Y", "Z"),
@@ -99,6 +100,8 @@ def main() -> int:
 
     # 물체 배치: 기본값 → CLI override. build_collision_world 가 호출 시점에 읽으므로
     # 여기서 config 를 덮어쓰면 그대로 반영된다(pipeline.py / solve.py 와 같은 관례).
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     config.apply_object_placement(args.object)
     if args.object_position is not None:
         config.TARGET_OBJECT["position"] = np.array(args.object_position, dtype=np.float64)

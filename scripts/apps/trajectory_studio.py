@@ -49,7 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns import read_result_hdf5  # noqa: E402
 from core.trajectory.live_ik import (  # noqa: E402
@@ -399,13 +399,15 @@ class TrajectoryStudio:
             handle.remove()
         self.layers["obstacles"].clear()
         config.sync_support_to_target()
-        for obstacle in [config.TABLE, config.ROBOT_MOUNT] + list(config.WALLS):
-            box = trimesh.creation.box(extents=np.asarray(obstacle["dimensions"], dtype=float))
+        # 플래너가 푸는 것과 같은 OBB 를 그린다(scene_config.obstacle_obb) — 회전을 빼먹으면
+        # 화면과 충돌 월드가 조용히 어긋난다.
+        for obstacle in config.OBSTACLES:
+            box, position, wxyz = scene_config.obstacle_trimesh(obstacle)
             self.layers["obstacles"].append(self.server.scene.add_mesh_simple(
                 f"/studio/obstacles/{obstacle['name']}",
                 np.asarray(box.vertices), np.asarray(box.faces),
                 color=COLOR_OBSTACLE, opacity=0.18, side="double",
-                position=np.asarray(obstacle["position"], dtype=float),
+                position=position, wxyz=wxyz,
             ))
         self._apply_visibility()
 
@@ -697,6 +699,7 @@ class TrajectoryStudio:
         shell = (
             f"uv run --no-sync scripts/core/glns/solve.py "
             f"--object {obj} --viewpoints '{vp}' "
+            f"--scene {config.ACTIVE_SCENE} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--delaunay-expand-hops {hops}{augment}{ik_options} --output '{det_h5}'"
         )
@@ -808,6 +811,11 @@ class TrajectoryStudio:
         object_name = str(_decode_attr(metadata["object"]))
         object_position = np.asarray(_decode_attr(metadata["object_position"]), dtype=np.float64)
         object_quat = np.asarray(_decode_attr(metadata["object_quat_wxyz"]), dtype=np.float64)
+        # 해가 풀린 셀을 그대로 되살린다 — 안 하면 다른 씬으로 띄운 studio 가 그 해를
+        # 엉뚱한 장애물 배치 위에 그린다. 순서 주의: 씬 로드가 TARGET_OBJECT 를 되돌린다.
+        snap = _decode_attr(metadata["scene"]) if "scene" in metadata else None
+        if snap is not None and _decode_attr(metadata.get("scene_name")) != config.ACTIVE_SCENE:
+            config.load_scene_snapshot(snap)
         config.TARGET_OBJECT["position"] = object_position
         config.TARGET_OBJECT["rotation"] = object_quat
         if object_name != self.backend.object_name:
@@ -1123,6 +1131,7 @@ class TrajectoryStudio:
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified viser trajectory studio (GLNS)")
     parser.add_argument("--object", type=str, default=None, help="object name (data/{object}/...)")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--result", type=Path, default=None, help="optional solution.h5 to open")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8081)
@@ -1137,6 +1146,10 @@ def main():
     initial_object = args.object if args.object in objects else objects[0]
     if args.object and args.object not in objects:
         print(f"  '{args.object}' 없음 → '{initial_object}' 사용. 가능: {objects}")
+
+    # 씬을 먼저 — 물체 배치가 씬 소유이고, IKBackend 의 collision_cache 가
+    # 씬의 cuboid 개수로 잡히므로 백엔드 생성 전에 확정돼야 한다.
+    scene_config.apply_cli(args, config)
 
     # 물체 배치를 config 에 반영(IKBackend/gizmo 가 이 pose 를 캡처하므로 그 전에).
     if config.apply_object_placement(initial_object):

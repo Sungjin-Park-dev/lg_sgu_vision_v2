@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns.candidates import (  # noqa: E402
     _build_pose_variants,
@@ -154,6 +154,7 @@ def _parse_args() -> argparse.Namespace:
                         help="Refuse a component whose dense Int64 matrix exceeds this size")
     parser.add_argument("--keep-glns-files", action="store_true",
                         help="Keep generated .gtsp and GLNS tour files beside the result")
+    scene_config.add_cli_argument(parser)
     parser.add_argument("--object-position", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"))
     parser.add_argument("--object-quat", type=float, nargs=4, default=None,
@@ -284,6 +285,8 @@ def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) 
 
 def main() -> int:
     args = _parse_args()
+    # 씬을 먼저 반영한다 — 물체 배치(object_placements)가 이제 씬 소유다.
+    scene_config.apply_cli(args, config)
     if config.apply_object_placement(args.object):
         print(f"  Per-object placement: pos={config.TARGET_OBJECT['position']}, "
               f"quat={config.TARGET_OBJECT['rotation']}")
@@ -687,6 +690,11 @@ def main() -> int:
         "working_distance_m": float(source["wd_m"]),
         "object_position": config.TARGET_OBJECT["position"].astype(float).tolist(),
         "object_quat_wxyz": config.TARGET_OBJECT["rotation"].astype(float).tolist(),
+        # 씬을 이름이 아니라 **해결된 스냅샷**으로 박는다. 이름만 넣으면 solve 이후 YAML 이
+        # 편집됐을 때 verify 가 다른 월드로 검증한다 — 실측 셀을 맞추는 동안 매일 편집한다.
+        # storage.write_result_hdf5 가 dict 를 자동으로 json.dumps 하므로 저장 계층은 그대로다.
+        "scene_name": config.ACTIVE_SCENE,
+        "scene": config.scene_snapshot(),
         "robot_config": PT.ROBOT_CONFIG,
         "num_ik_seeds": args.num_seeds,
         "ik_batch_size": args.ik_batch_size,

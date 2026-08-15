@@ -662,8 +662,9 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
 
     if len(kept) < 2:
         raise RuntimeError(
-            "안전하게 연속인 구간이 viewpoint 2개 미만입니다 — 모든 인접 전이가 "
-            "이을 수 없는 reconfig. 물체 배치/작업거리 조정으로 reconfig를 줄여야 합니다."
+            "Fewer than 2 viewpoints in a safely-continuous run — every adjacent "
+            "transition is an unbridgeable reconfig. Reduce reconfigs by adjusting the "
+            "object placement or working distance."
         )
 
     if mode not in ("ee", "joint"):

@@ -253,7 +253,7 @@ class TrajectoryPublisher(Node):
 class IsaacStreamPublisher(Node):
     """--target isaac: /isaac_joint_commands 로 JointState를 시간에 맞춰 직접 스트리밍.
 
-    셸2 없이 Isaac sim 로봇(/MoveItGraph가 /isaac_joint_commands 구독)을 구동한다.
+    셸2 없이 Isaac sim 로봇(/SimRobotGraph 가 /isaac_joint_commands 구독)을 구동한다.
     현재 자세는 Isaac이 발행하는 /isaac_joint_states에서 읽는다.
     """
 
@@ -349,7 +349,7 @@ def main():
         csv_path = args.csv
         if not Path(csv_path).exists():
             print(f"Error: CSV not found: {csv_path}")
-            print("  generate a trajectory first: glns/solve.py -> glns/verify.py")
+            print("  Generate a trajectory first: glns/solve.py -> glns/verify.py")
             return
 
         print(f"Loading trajectory from {csv_path}...")
