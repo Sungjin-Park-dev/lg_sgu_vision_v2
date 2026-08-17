@@ -92,6 +92,25 @@ CAMERA_RANGE_GRID = 7  # N×N rays across the FOV
 CAMERA_RANGE_RAY_WIDTH_M = 0.0012
 CAMERA_RANGE_HIT_WIDTH_M = 0.003
 CAMERA_RANGE_UPDATE_DT = 0.05  # s between live re-casts (rays follow the camera)
+# Tilt 부채꼴 시각화. 물체의 로컬 프레임에 그린다(viewpoint 점들과 같은 자리) — 그러면
+# 기즈모로 물체를 옮겨도 USD 가 알아서 따라오고, robot/world 프레임 변환이 아예 필요 없다.
+TILT_FAN_SCOPE_NAME = "TiltFan"
+TILT_FAN_ARC_WIDTH_M = 0.0025
+TILT_FAN_WAYPOINT_WIDTH_M = 0.005
+TILT_FAN_RAY_WIDTH_M = 0.0010
+TILT_FAN_CENTER_WIDTH_M = 0.014
+# 시선을 waypoint 마다 그리면 부채꼴이 뭉개진다 — leg 당 이만큼만, 최대각은 반드시 포함.
+TILT_FAN_RAYS_PER_LEG = 7
+# leg 4개를 색으로 구분한다. 기존 씬 색과 뜻이 겹치지 않게 골랐다(viewpoint=cyan,
+# FOV=주황/노랑, range=초록, hit=빨강).
+TILT_LEG_COLORS = {
+    "up": (1.00, 0.85, 0.10),
+    "down": (0.60, 0.40, 1.00),
+    "left": (0.20, 0.70, 1.00),
+    "right": (1.00, 0.35, 0.60),
+}
+TILT_CENTER_COLOR = (1.00, 1.00, 1.00)
+
 CAMERA_COLLISION_LINKS = {
     "tool0",
     "camera_cable_frame",
@@ -862,6 +881,8 @@ class PipelineWindow:
         self._btn_cancel_pub = None
         self._btn_tilt_generate = None
         self._btn_tilt_cancel = None
+        self._btn_tilt_fan = None
+        self._tilt_fan_on = False
         # 장시간 작업이 도는 동안 유일하게 살아 있는 위젯(그 작업의 Cancel). None = 유휴.
         self._busy_cancel = None
         self._slider_model: Optional["ui.SimpleFloatModel"] = None
@@ -1363,6 +1384,10 @@ class PipelineWindow:
                             self._fields["tilt_roll_max"] = self._num_field(20.0)
                             ui.Label("n", width=12)
                             self._fields["tilt_roll_n"] = self._num_field(40, width=50)
+                        for key in ("tilt_index", "tilt_pitch_min", "tilt_pitch_max",
+                                    "tilt_pitch_n", "tilt_roll_min", "tilt_roll_max",
+                                    "tilt_roll_n"):
+                            self._fields[key].add_value_changed_fn(self._refresh_tilt_fan)
                         self._fields["tilt_num_seeds"] = self._row("num-seeds", 32)
                         self._fields["tilt_batch_size"] = self._row("ik-batch-size", 128)
                         self._fields["tilt_clamp"] = self._checkbox_row(
@@ -1372,6 +1397,11 @@ class PipelineWindow:
                         "Generate Tilt Motion", clicked_fn=self._on_generate_tilt))
                     self._btn_tilt_cancel = self._lock(ui.Button(
                         "Cancel", clicked_fn=self._on_cancel_generate))
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_tilt_fan = self._lock(ui.Button(
+                        "Show Tilt Fan", clicked_fn=self._on_toggle_tilt_fan))
+                    self._lock(ui.Button("Clear Tilt Fan",
+                                         clicked_fn=self._on_clear_tilt_fan))
 
     def _build_panel_preview(self):
         ui = self._ui
@@ -2887,6 +2917,169 @@ class PipelineWindow:
         self._append_log(
             f"[tilt] center = viewpoint #{index} / {len(points_local)} "
             f"(yellow point, WD={wd_m * 1000:.1f} mm)")
+
+    # ---- Tilt 부채꼴 시각화 -------------------------------------------------
+    @staticmethod
+    def _even_subset(n: int, k: int) -> list:
+        """0..n-1 에서 k 개를 균등하게 고른다. 마지막(=최대각)은 반드시 포함."""
+        if n <= 0:
+            return []
+        if n <= k:
+            return list(range(n))
+        step = (n - 1) / float(max(k - 1, 1))
+        return sorted({int(round(i * step)) for i in range(k)} | {n - 1})
+
+    def _tilt_fan(self):
+        """지금 패널 설정대로의 부채꼴 → (target, legs, center_pose) — 물체 로컬 프레임.
+
+        object_pose 를 단위행렬로 주면 포즈가 물체 로컬로 나온다. 그 좌표로 물체 프림 아래에
+        그리면 USD 가 물체 변환을 적용해 주므로, 기즈모로 옮겨도 부채꼴이 따라온다.
+        기하는 CLI(tilt_motion.py)와 같은 common.tilt_geometry 를 쓴다 — 화면의 부채꼴이
+        실제로 생성될 포즈와 어긋날 수 없다.
+        """
+        from common.tilt_geometry import camera_pose, tilt_legs
+        from core.viewpoint.storage import load_viewpoints_hdf5
+
+        picked = self._tilt_viewpoints()
+        if picked is None:
+            return None
+        viewpoint = load_viewpoints_hdf5(picked[0])
+        index = self._tilt_index()
+        if index >= viewpoint.count:
+            self._append_log(
+                f"[tilt-fan] center index {index} out of range - this file has "
+                f"{viewpoint.count} viewpoints.")
+            return None
+
+        wd_m = viewpoint.working_distance_m
+        center = camera_pose(viewpoint.positions[index], viewpoint.normals[index],
+                             wd_m, np.eye(4))
+        target, legs = tilt_legs(
+            center, wd_m,
+            pitch_min=float(self._get_field("tilt_pitch_min", float)),
+            pitch_max=float(self._get_field("tilt_pitch_max", float)),
+            pitch_n=max(2, int(self._get_field("tilt_pitch_n", int))),
+            roll_min=float(self._get_field("tilt_roll_min", float)),
+            roll_max=float(self._get_field("tilt_roll_max", float)),
+            roll_n=max(2, int(self._get_field("tilt_roll_n", int))))
+        if not legs:
+            self._append_log("[tilt-fan] every leg angle is 0 deg - nothing to draw.")
+            return None
+        return target, legs, center
+
+    def _delete_tilt_fan(self, log: bool):
+        from isaacsim.core.utils import prims
+
+        scope = f"{TARGET_OBJECT_PRIM}/{TILT_FAN_SCOPE_NAME}"
+        if prims.is_prim_path_valid(scope):
+            prims.delete_prim(scope)
+            if log:
+                self._append_log(f"[tilt-fan] cleared {scope}")
+        elif log:
+            self._append_log("[tilt-fan] nothing to clear")
+
+    def _draw_tilt_fan(self) -> bool:
+        """부채꼴을 그린다: leg 별 호(arc) + waypoint 점 + 주시점으로 모이는 시선."""
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not target_prim or not target_prim.IsValid():
+            self._append_log("[tilt-fan] no target object on stage - Load Object first.")
+            return False
+        try:
+            fan = self._tilt_fan()
+        except Exception as e:  # noqa: BLE001 — 파일/스키마 문제를 UI 로 보고
+            self._append_log(f"[tilt-fan] failed: {e}")
+            return False
+        if fan is None:
+            return False
+        target, legs, center = fan
+
+        self._delete_tilt_fan(log=False)
+        scope_path = f"{TARGET_OBJECT_PRIM}/{TILT_FAN_SCOPE_NAME}"
+        UsdGeom.Xform.Define(stage, scope_path)
+
+        def vec(p):
+            return Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
+
+        centre_cam = vec(center[:3, 3])
+        focus = vec(target)
+
+        arc_pts, arc_counts, arc_colors = [], [], []
+        wp_pts, wp_colors = [centre_cam], [Gf.Vec3f(*TILT_CENTER_COLOR)]
+        ray_pts, ray_counts, ray_colors = [focus, centre_cam], [2], \
+            [Gf.Vec3f(*TILT_CENTER_COLOR)]
+        summary = []
+        for label, poses, angles in legs:
+            colour = Gf.Vec3f(*TILT_LEG_COLORS.get(label, TILT_CENTER_COLOR))
+            cams = [vec(p[:3, 3]) for p in poses]
+            # 호는 중심에서 시작해 그 leg 의 끝까지 — 카메라가 실제로 지나가는 자리다.
+            arc_pts.extend([centre_cam] + cams)
+            arc_counts.append(len(cams) + 1)
+            arc_colors.append(colour)
+            wp_pts.extend(cams)
+            wp_colors.extend([colour] * len(cams))
+            for i in self._even_subset(len(cams), TILT_FAN_RAYS_PER_LEG):
+                ray_pts.extend([focus, cams[i]])
+                ray_counts.append(2)
+                ray_colors.append(colour)
+            summary.append(f"{label} {float(angles[-1]):+.1f}")
+
+        arcs = UsdGeom.BasisCurves.Define(stage, f"{scope_path}/Arcs")
+        arcs.CreateTypeAttr(UsdGeom.Tokens.linear)
+        arcs.CreateCurveVertexCountsAttr(Vt.IntArray(arc_counts))
+        arcs.CreatePointsAttr(Vt.Vec3fArray(arc_pts))
+        arcs.CreateWidthsAttr(Vt.FloatArray([TILT_FAN_ARC_WIDTH_M]))
+        arcs.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        # uniform = 커브 하나당 색 하나 → 호가 어느 leg 인지 색으로 읽힌다.
+        arcs.CreateDisplayColorPrimvar(UsdGeom.Tokens.uniform).Set(Vt.Vec3fArray(arc_colors))
+
+        rays = UsdGeom.BasisCurves.Define(stage, f"{scope_path}/ViewRays")
+        rays.CreateTypeAttr(UsdGeom.Tokens.linear)
+        rays.CreateCurveVertexCountsAttr(Vt.IntArray(ray_counts))
+        rays.CreatePointsAttr(Vt.Vec3fArray(ray_pts))
+        rays.CreateWidthsAttr(Vt.FloatArray([TILT_FAN_RAY_WIDTH_M]))
+        rays.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        rays.CreateDisplayColorPrimvar(UsdGeom.Tokens.uniform).Set(Vt.Vec3fArray(ray_colors))
+        rays.CreateDisplayOpacityAttr(Vt.FloatArray([0.55]))
+
+        waypoints = UsdGeom.Points.Define(stage, f"{scope_path}/Waypoints")
+        waypoints.CreatePointsAttr(Vt.Vec3fArray(wp_pts))
+        waypoints.CreateWidthsAttr(Vt.FloatArray([TILT_FAN_WAYPOINT_WIDTH_M] * len(wp_pts)))
+        waypoints.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex).Set(Vt.Vec3fArray(wp_colors))
+
+        centre_marker = UsdGeom.Points.Define(stage, f"{scope_path}/SurfacePoint")
+        centre_marker.CreatePointsAttr(Vt.Vec3fArray([focus]))
+        centre_marker.CreateWidthsAttr(Vt.FloatArray([TILT_FAN_CENTER_WIDTH_M]))
+        centre_marker.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.15, 0.15)]))
+
+        self._append_log(
+            f"[tilt-fan] viewpoint #{self._tilt_index()}: {len(wp_pts)} waypoints, "
+            f"{len(ray_counts)} view rays, deg [{', '.join(summary)}] under {scope_path}")
+        return True
+
+    def _refresh_tilt_fan(self, *_args):
+        """설정이 바뀌면 켜져 있는 부채꼴만 다시 그린다(각도를 만지면 바로 보이게)."""
+        if self._tilt_fan_on:
+            self._draw_tilt_fan()
+
+    def _on_clear_tilt_fan(self):
+        self._delete_tilt_fan(log=True)
+        self._tilt_fan_on = False
+        if self._btn_tilt_fan is not None:
+            self._btn_tilt_fan.text = "Show Tilt Fan"
+
+    def _on_toggle_tilt_fan(self):
+        if self._tilt_fan_on:
+            self._delete_tilt_fan(log=True)
+            self._tilt_fan_on = False
+        elif self._draw_tilt_fan():
+            self._tilt_fan_on = True
+        if self._btn_tilt_fan is not None:
+            self._btn_tilt_fan.text = (
+                "Hide Tilt Fan" if self._tilt_fan_on else "Show Tilt Fan")
 
     def _tilt_output_path(self, obj: str, n_vp, index: int) -> Path:
         """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙(trajectory_{역할}.csv)."""
