@@ -41,12 +41,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config  # noqa: E402
+from common.math_utils import quaternion_to_rotation_matrix  # noqa: E402
+from common.tilt_geometry import camera_pose, tilt_legs  # noqa: E402
 from core import trajectory as PT  # noqa: E402
 from core.glns.candidates import (  # noqa: E402
     _collision_filter_representatives,
@@ -55,23 +56,9 @@ from core.glns.candidates import (  # noqa: E402
 from core.glns.problem import periodic_joint_delta  # noqa: E402
 from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 
-# 왕복 순서. (축, 라벨, 각도인자) — 축은 카메라 로컬 축이고 참조 스크립트의 명명을 따른다:
-#   pitch = 카메라 y축 둘레 공전 → 화면상 상/하
-#   roll  = 카메라 x축 둘레 공전 → 화면상 좌/우
-TILT_LEGS = (
-    ("pitch", "up", "pitch_max"),
-    ("pitch", "down", "pitch_min"),
-    ("roll", "left", "roll_min"),
-    ("roll", "right", "roll_max"),
-)
-
 # 분기 전환(같은 포즈의 다른 팔 자세) 억제용 DP 페널티. 인접 waypoint 사이 L∞ 가
-# reconfig 임계를 넘으면 붙는다 — tilt 는 연속 모션이라 분기가 갈리면 안 된다.
+# reconfig 임계를 넘으면 붙는다 - tilt 는 연속 모션이라 분기가 갈리면 안 된다.
 BRANCH_SWITCH_PENALTY = 1e3
-
-# 광축이 up 벡터와 거의 나란해지면 카메라 x축이 정의되지 않는다. ±45° 이내 tilt 에서는
-# 걸릴 일이 없지만, 인자로 큰 각을 받을 수 있으므로 대체 up 을 둔다.
-_PARALLEL_COS = 0.99
 
 
 def _joints(text: str) -> np.ndarray:
@@ -134,54 +121,6 @@ def parse_args() -> argparse.Namespace:
     if args.num_seeds <= 0 or args.batch_size <= 0:
         p.error("--num-seeds / --batch-size must be > 0")
     return args
-
-
-# =============================================================================
-# Orbit 포즈 생성 — 표면점(주시점)과 WD 를 고정한 채 시선만 기울인다
-# =============================================================================
-
-def _normalize(v: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(v))
-    if n < 1e-12:
-        raise ValueError("cannot normalize a zero vector")
-    return v / n
-
-
-def _orbit_pose(cam_pos, R0, target, axis_world, theta_rad) -> np.ndarray:
-    """target 둘레로 카메라를 axis 축 theta 만큼 공전시킨 4x4 pose (world).
-
-    위치는 회전시키고, 자세는 '항상 target 을 본다'로 다시 만든다 — 그래서 공전 중에도
-    주시점과 작업거리가 정확히 보존된다.
-    """
-    R_axis = Rotation.from_rotvec(_normalize(axis_world) * float(theta_rad)).as_matrix()
-    c = target + R_axis @ (cam_pos - target)
-
-    z_c = _normalize(target - c)
-    up = R0[:, 1]
-    if abs(float(np.dot(_normalize(up), z_c))) > _PARALLEL_COS:
-        up = np.array([0.0, 0.0, 1.0])
-        if abs(float(np.dot(up, z_c))) > _PARALLEL_COS:
-            up = np.array([0.0, 1.0, 0.0])
-    x_c = _normalize(np.cross(up, z_c))
-    y_c = np.cross(z_c, x_c)
-
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = np.column_stack([x_c, y_c, z_c])
-    T[:3, 3] = c
-    return T
-
-
-def _leg_poses(cam_pos, R0, target, axis_name, angle_deg, n_samples):
-    """0 → angle_deg 를 n_samples 등분한 orbit 포즈들 (중심(0°) 제외).
-
-    Returns: (poses (n-1,4,4), angles_deg (n-1,)) — 중심에서 먼 순서로 정렬된다.
-    """
-    axis = R0[:, 0] if axis_name == "roll" else R0[:, 1]
-    angles = np.linspace(0.0, float(angle_deg), int(n_samples))[1:]
-    poses = np.stack([
-        _orbit_pose(cam_pos, R0, target, axis, np.deg2rad(a)) for a in angles
-    ])
-    return poses, angles
 
 
 # =============================================================================
@@ -313,31 +252,26 @@ def main() -> int:
     print(f"  roll left/right: {args.roll_min:+.1f} / {args.roll_max:+.1f} deg  x{args.roll_n}")
 
     # 중심 포즈 — 스캔 궤적이 이 viewpoint 를 볼 때 쓰는 바로 그 카메라 포즈다.
-    index = np.array([args.viewpoint_index])
-    center_pose = PT.build_camera_poses(
-        viewpoint.positions[index], viewpoint.normals[index], wd_m)[0]
-    cam_pos = center_pose[:3, 3].copy()
-    R0 = center_pose[:3, :3].copy()
-    target = cam_pos + R0[:, 2] * wd_m       # 주시점 = 표면점 (world)
-    print(f"  camera    : pos={np.round(cam_pos, 4).tolist()} -> "
-          f"surface={np.round(target, 4).tolist()}")
+    # 물체 배치는 robot base frame(config.TARGET_OBJECT) → 아래 포즈도 전부 robot frame.
+    object_pose = np.eye(4, dtype=np.float64)
+    object_pose[:3, :3] = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
+    object_pose[:3, 3] = config.TARGET_OBJECT["position"]
+    center_pose = camera_pose(
+        viewpoint.positions[args.viewpoint_index],
+        viewpoint.normals[args.viewpoint_index], wd_m, object_pose)
+    print(f"  camera    : pos={np.round(center_pose[:3, 3], 4).tolist()} -> "
+          f"surface={np.round(center_pose[:3, 3] + center_pose[:3, 2] * wd_m, 4).tolist()}")
 
     # ---- 포즈 생성: 중심 1개 + leg 별 (n-1)개 -------------------------------
-    leg_specs = {
-        "pitch_max": (args.pitch_max, args.pitch_n),
-        "pitch_min": (args.pitch_min, args.pitch_n),
-        "roll_min": (args.roll_min, args.roll_n),
-        "roll_max": (args.roll_max, args.roll_n),
-    }
+    # 기하는 common.tilt_geometry 한 벌뿐이다 — Isaac UI 의 부채꼴 미리보기가 같은 함수를
+    # 쓰므로, 화면에 보이는 부채꼴과 여기서 IK 를 푸는 포즈가 어긋날 수 없다.
+    target, raw_legs = tilt_legs(
+        center_pose, wd_m,
+        pitch_min=args.pitch_min, pitch_max=args.pitch_max, pitch_n=args.pitch_n,
+        roll_min=args.roll_min, roll_max=args.roll_max, roll_n=args.roll_n)
     poses = [center_pose]
     legs = []                                  # (라벨, [pose_idx...], [angle...])
-    for axis_name, label, key in TILT_LEGS:
-        angle_deg, n_samples = leg_specs[key]
-        if abs(angle_deg) < 1e-9:
-            print(f"  leg {label}: angle is 0 deg - skipped")
-            continue
-        leg_poses, leg_angles = _leg_poses(cam_pos, R0, target, axis_name,
-                                           angle_deg, n_samples)
+    for label, leg_poses, leg_angles in raw_legs:
         start = len(poses)
         poses.extend(leg_poses)
         legs.append((label, list(range(start, start + len(leg_poses))), leg_angles))
@@ -441,6 +375,7 @@ def main() -> int:
             "roll_deg": [float(args.roll_min), float(args.roll_max)],
             "samples": {"pitch": int(args.pitch_n), "roll": int(args.roll_n)},
             "clamped_legs": clamped,
+            "surface_point": np.asarray(target, dtype=float).tolist(),
             "object_position": config.TARGET_OBJECT["position"].astype(float).tolist(),
             "object_quat_wxyz": config.TARGET_OBJECT["rotation"].astype(float).tolist(),
         },
