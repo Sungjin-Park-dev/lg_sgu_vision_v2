@@ -67,8 +67,27 @@ def recenter(mesh: trimesh.Trimesh) -> None:
     mesh.apply_translation(-bottom_center(mesh.bounds))
 
 
+def keep_largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Drop every connected component but the largest one.
+
+    CAD exports often carry a few stray 2-face slivers alongside the real body.
+    They are invisible but not harmless: they widen the bounding box (which drives
+    the collision proxy and the support pedestal) and they get surface-sampled, so
+    viewpoints appear on geometry that is not the object.
+    """
+    components = mesh.split(only_watertight=False)
+    if len(components) <= 1:
+        return mesh
+    largest = max(components, key=lambda c: len(c.faces))
+    dropped = len(mesh.faces) - len(largest.faces)
+    print(f"  components:  {len(components)} → 1 (dropped {dropped} faces)")
+    return largest
+
+
 def normalize(args: argparse.Namespace) -> trimesh.Trimesh:
     mesh = load_mesh(mesh_path(args.object, args.input)).copy()
+    if args.largest_component:
+        mesh = keep_largest_component(mesh)
     mesh.apply_scale(args.scale)
     recenter(mesh)
     return mesh
@@ -140,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--input", type=Path, required=True)
     normalize_parser.add_argument("--output", type=Path, default=Path("source.obj"))
     normalize_parser.add_argument("--scale", type=float, default=0.001)
+    normalize_parser.add_argument(
+        "--largest-component", action="store_true",
+        help="keep only the largest connected component (drops stray export slivers)",
+    )
     normalize_parser.add_argument("--dry-run", action="store_true")
     normalize_parser.set_defaults(handler=normalize)
 
