@@ -41,13 +41,19 @@ workcell/robot/ur20_with_camera_curobo.urdf                  ← 운동학의 �
 | `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의 | MoveIt/cuMotion launch |
 | `scripts/common/config.py` | WD·FOV 등 **운용 파라미터** | 파이프라인 전역 |
 
-### 주의: 같은 이름의 낡은 파일
+### URDF 는 `_curobo` 하나뿐이다
 
-- **`workcell/robot/ur20_with_camera.urdf`** (`_curobo` 없는 쪽) — cuRobo 는 **읽지 않는다.**
-  MorphIt 스피어 피팅용 원본이며 카메라 표현이 낡았다(프록시 박스 + `camera.stl`,
-  `camera_optical_joint` 도 다른 값). 운동학 수정 시 기준으로 삼지 말 것.
-- **`config.DEFAULT_URDF_PATH`** — 어디서도 참조되지 않는 죽은 상수. 컨테이너 내부 경로라
-  현재 해석 경로와 무관하다.
+`workcell/robot/` 의 URDF 는 `ur20_with_camera_curobo.urdf` **하나**다. 헷갈릴 짝이 없다.
+
+예전에는 `_curobo` 없는 `ur20_with_camera.urdf` 와 `config.DEFAULT_URDF_PATH` 가 함께
+있었는데 **둘 다 삭제했다**(둘 다 참조하는 코드가 0곳). 그 파일은 카메라를 `tool0` 에
+프리미티브 박스·실린더로 붙인 옛 표현이었고 `camera_optical_joint` 도 `xyz="-0.212 0.03 0"`
+으로 현행 `0.141` 과 부호까지 달랐다 — 기준으로 삼으면 조용히 어긋나는 종류의 파일이다.
+명목상 역할이던 MorphIt 원본 기능도 실제로는 못 했다: 이 파일을 만든 `.urdf.xacro` 도,
+MorphIt 빌더도 리포에 없어서 재생성이 불가능했다.
+
+내용이 필요하면 git 이력에 있다(`git log --follow -- workcell/robot/ur20_with_camera.urdf`).
+**새 URDF 를 추가하지 말 것** — 운동학의 소유자는 `_curobo.urdf` 단 하나다.
 
 ## 3. 카메라 프레임 체인
 

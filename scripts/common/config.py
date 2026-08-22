@@ -262,9 +262,10 @@ load_scene(DEFAULT_SCENE)
 # 로봇 설정
 # ============================================================================
 
-# cuRobo와 EAIK에서 사용되는 로봇 설정 파일
+# cuRobo와 EAIK에서 사용되는 로봇 설정 파일.
+# URDF 경로는 여기 없다 — 이 yml 의 urdf_path 가 소유하고 robot.resolve_robot_config() 가
+# workcell/robot/ 절대경로로 푼다(현재 ur20_with_camera_curobo.urdf).
 DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
-DEFAULT_URDF_PATH = "/curobo/src/curobo/content/assets/robot/ur_description/ur20_with_camera.urdf"
 
 # mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
 # optical_frame = 카메라 몸체 앞면(body_face). CAD 실측 flange+141.0mm.
