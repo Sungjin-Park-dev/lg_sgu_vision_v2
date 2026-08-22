@@ -37,6 +37,7 @@ import xacro
 import yaml
 
 MOVEIT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
 # robot_description for move_group / cuMotion (ur_description ur20 kinematics; the
 # ros2_control tag inside is irrelevant here — execution goes via the controller
 # action to the driver, not through this description).
@@ -44,10 +45,32 @@ UR_URDF_XACRO = os.path.join(
     get_package_share_directory('isaac_ros_cumotion_examples'), 'ur_config', 'ur.urdf.xacro')
 
 
+def build_collision_scene(scene_name: str, output_file: str) -> str:
+    """씬 YAML → cuMotion 이 읽는 .scene 을 만들고 경로를 돌려준다 (빈 이름이면 skip).
+
+    이 파일이 없으면 MoveIt/cuMotion 은 **장애물 0개인 빈 월드**로 계획한다 — 그런데
+    StaticPlanningSceneServer 가 조용히 넘어가서 그 사실이 드러나지 않는다.
+    (다른 월드 입구인 nvblox ESDF 는 아래에서 의도적으로 꺼둔다.)
+
+    생성물을 리포에 두지 않고 매번 만드는 것은 위 URDF 덤프와 같은 이유다: 씬 YAML 이
+    단일 진실원이어야 하고, 고친 뒤 재생성을 잊으면 MoveIt 만 옛 셀을 보게 된다.
+    """
+    if not scene_name:
+        return ''
+    import importlib.util
+    builder = os.path.join(PROJECT_SCRIPTS, 'setup', 'build_moveit_scene.py')
+    spec = importlib.util.spec_from_file_location('build_moveit_scene', builder)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.write_scene_file(scene_name, output_file)
+
+
 def launch_setup(context: LaunchContext, *args, **kwargs):
     del args, kwargs
     ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type')))
     xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path')))
+    scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
+    scene_file = build_collision_scene(scene_name, '/tmp/lg_cell_real.scene')
 
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
     ur_control = IncludeLaunchDescription(
@@ -115,6 +138,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         launch_arguments={
             'cumotion_action_server.urdf_file_path': urdf_path,
             'cumotion_action_server.xrdf_file_path': xrdf_path,
+            'cumotion_action_server.moveit_collision_objects_scene_file': scene_file,
             'cumotion_action_server.read_esdf_world': 'False',
             'cumotion_action_server.update_esdf_on_request': 'False',
             'cumotion_action_server.joint_states_topic': '/joint_states',
@@ -149,6 +173,11 @@ def generate_launch_description():
                               description='Robot IP (ignored for mock_hardware).'),
         DeclareLaunchArgument('use_mock_hardware', default_value='true',
                               description='true = ur_robot_driver mock (no real robot).'),
+        DeclareLaunchArgument(
+            'scene', default_value='sim_default',
+            description='워크셀 씬 이름(workcell/scenes/<name>.yaml). '
+                        '빈 문자열이면 장애물 없이 계획한다.',
+        ),
         DeclareLaunchArgument('xrdf_path', default_value=os.path.join(MOVEIT_DIR, 'ur20.xrdf')),
     ]
     return LaunchDescription(launch_args + [OpaqueFunction(function=launch_setup)])
