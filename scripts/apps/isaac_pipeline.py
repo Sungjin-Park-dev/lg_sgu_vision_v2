@@ -1558,6 +1558,11 @@ class PipelineWindow:
                     self._btn_home_return = self._lock(ui.Button(
                         "Return to HOME",
                         clicked_fn=lambda: self._on_plan_home_transition("return")))
+                    # 같은 줄에 둔 이유: 이 세 버튼이 모두 '지금 로봇이 있는 자리'를
+                    # 입력으로 쓴다. 두 이동은 그 값으로 계획하고, Log Joints 는 그 값을
+                    # 보여준다 — 어디로 갈지 정하기 전에 어디에 있는지 읽는 자리.
+                    self._lock(ui.Button(
+                        "Log Joints", width=100, clicked_fn=self._on_log_joints))
                     self._btn_home_approach.enabled = True
                     self._btn_home_return.enabled = True
                 with ui.HStack(height=28, spacing=6):
@@ -2863,6 +2868,41 @@ class PipelineWindow:
         if n_vp is not None:
             return target_q, label, _config.get_trajectory_path(obj, n_vp, filename=name)
         return target_q, label, _config.DATA_ROOT / obj / "trajectory" / name
+
+    def _on_log_joints(self):
+        """로봇의 현재 관절값을 로그에 찍는다 — run-mode 와 무관하게 '진짜 지금 자세'.
+
+        Move to Start / Return to HOME / Generate Tilt 가 계획 입력으로 쓰는 값과 **같은
+        소스**다(IsaacArticulationExecutor.current_joints). 그 셋은 이 값을 CLI 인자로만
+        흘려보내서 사람이 볼 데가 없었다 — 확인만 하고 싶을 때 여기서 읽는다.
+        """
+        from common import config as _config
+
+        try:
+            q = self._sim_executor.current_joints()
+        except Exception as exc:  # noqa: BLE001 — 로봇 미로드 / 시뮬 정지 / real 미러 부재
+            self._append_log(f"[joints] could not read the current joint state: {exc}")
+            return
+
+        deg = np.rad2deg(q)
+        source = ("Isaac articulation (sim = the robot)" if self._mode == "sim"
+                  else "real robot, mirrored into Isaac by /RealRobotGraph")
+        home = np.asarray(_config.ROBOT_START_STATE, dtype=np.float64)
+        home_gap_deg = float(np.max(np.abs(np.rad2deg(q - home))))
+
+        lines = [f"[joints] source = {source}"]
+        lines += [f"[joints]   {name:<20} {q[i]:+9.6f} rad  {deg[i]:+8.2f} deg"
+                  for i, name in enumerate(JOINT_NAMES)]
+        lines.append("[joints] rad = [" + ", ".join(f"{v:.6f}" for v in q) + "]")
+        lines.append("[joints] deg = [" + ", ".join(f"{v:.2f}" for v in deg) + "]")
+        lines.append(
+            f"[joints] max |Δ| vs HOME (config.ROBOT_START_STATE) = {home_gap_deg:.2f} deg"
+            + ("  → at HOME" if home_gap_deg < 0.05 else ""))
+        # 붙여넣기용. publish.py 가 --joint-target 을 '=' 형태로 받는 이유는
+        # _plan_and_execute_move 의 argparse 음수 휴리스틱 주석 참고.
+        lines.append("[joints] publish.py --joint-target="
+                     + repr(",".join(f"{v:.6f}" for v in q)))
+        self._append_log("\n".join(lines))
 
     def _on_plan_home_transition(self, transition: str):
         """HOME↔스캔시작을 **충돌-free 로 계획한 뒤** 실행한다.
