@@ -198,13 +198,17 @@ def parse_scene(data: dict, source: str) -> dict:
                 f"core/isaac/scene.py look it up by this name")
 
     table = next(o for o in obstacles if o["name"] == "table")
-    if table["type"] != "cuboid" or not np.allclose(table["rotation"], _IDENTITY_QUAT):
-        # sync_support_to_target() 은 table_top_z = position[2] + dimensions[2]/2 로
-        # 상면을 구한다. 축정렬 cuboid 일 때만 맞는 식이라, 회전을 허용하면 support 높이가
-        # 조용히 틀린다. 틀린 값을 만드는 대신 여기서 거절한다.
+    # sync_support_to_target() 은 table_top_z = position[2] + dimensions[2]/2 로 상면을
+    # 구한다. z-yaw 는 상자의 **연직 방향 크기를 안 바꾸므로** 이 식이 그대로 맞다 —
+    # 식을 깨는 것은 x/y 축 회전(기울이기)뿐이다. 셀 전체를 로봇 base Z 둘레로 돌리는 것은
+    # 정당한 조작이라(로봇 기준 배치를 실제 셀에 맞추는 유일한 방법) z-yaw 는 허용한다.
+    _, qx, qy, _ = (float(v) for v in table["rotation"])
+    if table["type"] != "cuboid" or not (abs(qx) < 1e-9 and abs(qy) < 1e-9):
         raise ValueError(
-            f"{source}: 'table' must be an axis-aligned (identity-rotation) cuboid — "
-            f"config.sync_support_to_target() assumes that when deriving the top surface")
+            f"{source}: 'table' must be a cuboid whose rotation is a pure z-yaw "
+            f"(quat x/y must be 0, got x={qx:g} y={qy:g}) — "
+            f"config.sync_support_to_target() derives the top surface from "
+            f"position[2] + dimensions[2]/2, which tilting would silently break")
 
     placements = {}
     for key, raw in (data.get("object_placements") or {}).items():

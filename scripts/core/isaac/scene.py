@@ -170,9 +170,13 @@ def load_workcell(usd_path: Path) -> None:
     """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다."""
     from isaacsim.core.utils import prims
 
+    # 환경(실험실 방)은 테이블과 한 덩어리인 셀이다. 셀이 로봇 기준으로 돌면 방도 같이
+    # 돌아야 한다 — 안 그러면 테이블만 옮겨가 벽을 뚫는다. 시각 전용이라 충돌엔 안 들어간다.
+    cell_yaw = _cell_yaw(_config)
     prims.create_prim(
         ENV_PATH, "Xform",
-        position=ENV_OFFSET,
+        position=np.array([*_yaw_xy(cell_yaw, ENV_OFFSET[:2]), ENV_OFFSET[2]]),
+        orientation=_yaw_quat(cell_yaw),
         usd_path=str(ENV_USD),
     )
     prims.create_prim(
@@ -182,10 +186,11 @@ def load_workcell(usd_path: Path) -> None:
                         MOUNT_HEIGHT / MOUNT_USD_INTRINSIC_Z]),
         usd_path=str(MOUNT_USD),
     )
-    table_position, table_scale = _table_prim_transform(_config)
+    table_position, table_scale, table_quat = _table_prim_transform(_config)
     prims.create_prim(
         TABLE_PATH, "Xform",
         position=table_position,
+        orientation=table_quat,
         scale=table_scale,
         usd_path=str(TABLE_USD),
     )
@@ -198,12 +203,39 @@ def load_workcell(usd_path: Path) -> None:
     spawn_scene_obstacles(_config)
 
 
-def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
+def _cell_yaw(config_module) -> float:
+    """셀이 robot base Z 둘레로 얼마나 돌아 있는지 (rad).
+
+    단일 출처는 **씬 YAML 의 table.rotation** 이다. 시각 전용 자산(환경 방, 테이블 메시)은
+    충돌 월드에 안 들어가서 YAML 이 직접 배치하지 않는데, 그렇다고 각도를 여기 또 적으면
+    YAML 과 조용히 어긋난다 — 그래서 적지 않고 읽는다.
+    (scene_config 가 table 을 순수 z-yaw 로 강제하므로 yaw 하나로 환원된다.)
+    """
+    quat = np.asarray(config_module.TABLE.get("rotation", (1.0, 0.0, 0.0, 0.0)),
+                      dtype=np.float64)
+    return float(2.0 * np.arctan2(quat[3], quat[0]))
+
+
+def _yaw_quat(yaw: float) -> np.ndarray:
+    return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)], dtype=np.float64)
+
+
+def _yaw_xy(yaw: float, xy) -> np.ndarray:
+    c, s = np.cos(yaw), np.sin(yaw)
+    x, y = float(xy[0]), float(xy[1])
+    return np.array([c * x - s * y, s * x + c * y], dtype=np.float64)
+
+
+def _table_prim_transform(config_module):
     """Convert config.TABLE (robot frame center/size) to the table USD Xform.
 
     ``thor_table.usd`` has an off-center XY origin and its Z origin on the top
     surface.  ``config.TABLE`` is a center pose in the robot-base frame, whose
     world origin is elevated by ``MOUNT_HEIGHT``.
+
+    Returns (position, scale, orientation_wxyz). The table carries a z-yaw when the
+    cell is laid out around the robot at an angle -- the off-center origin offset has
+    to be rotated by that same yaw, or the mesh lands beside its collision box.
     """
     table = config_module.TABLE
     center_robot = np.asarray(table["position"], dtype=np.float64)
@@ -216,13 +248,16 @@ def _table_prim_transform(config_module) -> tuple[np.ndarray, np.ndarray]:
     scale = dimensions / np.array([
         TABLE_USD_INTRINSIC_X, TABLE_USD_INTRINSIC_Y, TABLE_USD_INTRINSIC_Z,
     ], dtype=np.float64)
+    yaw = _cell_yaw(config_module)
+    off = _yaw_xy(yaw, (TABLE_USD_BBOX_CENTER_X * scale[0],
+                        TABLE_USD_BBOX_CENTER_Y * scale[1]))
     center_world = center_robot + np.array([0.0, 0.0, MOUNT_HEIGHT])
     position = np.array([
-        center_world[0] - TABLE_USD_BBOX_CENTER_X * scale[0],
-        center_world[1] - TABLE_USD_BBOX_CENTER_Y * scale[1],
+        center_world[0] - off[0],
+        center_world[1] - off[1],
         center_world[2] + dimensions[2] / 2.0,
     ], dtype=np.float64)
-    return position, scale
+    return position, scale, _yaw_quat(yaw)
 
 
 def spawn_scene_obstacles(config_module=_config) -> None:
