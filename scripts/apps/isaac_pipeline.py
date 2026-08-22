@@ -115,11 +115,9 @@ TILT_LEG_COLORS = {
 }
 TILT_CENTER_COLOR = (1.00, 1.00, 1.00)
 
+# 충돌 스피어 시각화에서 주황으로 칠할 링크(그 외는 초록). ur20_with_camera.yml 이
+# 스피어를 가진 링크만 의미가 있다 — 지금은 camera_link 하나다.
 CAMERA_COLLISION_LINKS = {
-    "tool0",
-    "camera_cable_frame",
-    "camera_frame_1",
-    "camera_frame_2",
     "camera_link",
 }
 
