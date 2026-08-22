@@ -37,8 +37,8 @@ workcell/robot/ur20_with_camera_curobo.urdf                  ← 운동학의 �
 | `workcell/robot/ur20_with_camera_curobo.urdf` | **링크·조인트 기하** (`camera_optical_joint` 포함) | cuRobo, yourdfpy(viser 렌더), isaac_pipeline 스피어 시각화 |
 | `workcell/robot/ur20_with_camera.usd` | Isaac Sim 실로봇 (물리·아티큘레이션) | `core/isaac/scene.py` |
 | `workcell/robot/ur20_with_camera_ghost.usd` | Isaac preview ghost (물리 제거) | `isaac_pipeline.py` |
-| `workcell/robot/camera/camera.usdc`, `camera_body.obj` | 카메라 몸체 메시(flange 프레임에 pre-bake) | 위 USD 2개, URDF visual/collision, MorphIt |
-| `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의 | MoveIt/cuMotion launch |
+| `workcell/robot/camera/camera.usdc`, `camera_body.obj` | 카메라 몸체 메시(mount=camera_link 프레임에 pre-bake) | 위 USD 2개, URDF visual/collision, MorphIt |
+| `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의(카메라 포함) | ⚠️ **현재 아무도 안 읽는다** — 아래 참고 |
 | `scripts/common/config.py` | WD·FOV 등 **운용 파라미터** | 파이프라인 전역 |
 
 ### URDF 는 `_curobo` 하나뿐이다
@@ -55,25 +55,65 @@ MorphIt 빌더도 리포에 없어서 재생성이 불가능했다.
 내용이 필요하면 git 이력에 있다(`git log --follow -- workcell/robot/ur20_with_camera.urdf`).
 **새 URDF 를 추가하지 말 것** — 운동학의 소유자는 `_curobo.urdf` 단 하나다.
 
+### ⚠️ MoveIt 은 이 폴더의 로봇을 안 쓴다 (카메라가 없다)
+
+`scripts/moveit/` 의 launch 둘은 `workcell/robot/` 를 전혀 참조하지 않는다:
+
+| launch | robot_description | xrdf |
+|---|---|---|
+| `ur20_isaac_state_synced.launch.py` | `scripts/moveit/ur_config/ur_gated.urdf.xacro` | `scripts/moveit/ur20.xrdf` |
+| `ur20_real_moveit.launch.py` | `isaac_ros_cumotion_examples/ur_config/ur.urdf.xacro` (외부 패키지) | 〃 |
+
+`ur_gated.urdf.xacro` 는 `ur_description/urdf/ur_macro.xacro`(순정 UR20) + `world` +
+ros2_control 이 전부고 **카메라 링크·조인트가 없다**. `scripts/moveit/ur20.xrdf` 도
+`camera` 문자열 0 회에 `tool_frames: ["tool0"]` 이다. 즉 **MoveIt/cuMotion 은 카메라가
+충돌 모델에 없는 맨 UR20 으로 계획한다.** 정작 카메라를 가진
+`workcell/robot/ur20_with_camera.xrdf`(camera_link 스피어, `tool_frames:
+camera_optical_frame`)는 어느 launch 의 기본값도 아니고 override 하는 코드도 없다.
+
+그래서 카메라 기하 변경(clocking·optical_frame 이동)은 **MoveIt 에 아무 영향이 없다** —
+반영할 카메라가 거기 없기 때문이다. 이 격차 자체는 따로 다뤄야 할 문제다.
+
+
 ## 3. 카메라 프레임 체인
 
 ```
 wrist_3_link
   └─(wrist_3-flange, fixed, rpy 0,-90°,-90°)→ flange
        ├─(flange-tool0, fixed)→ tool0
-       └─(camera_mount_joint, fixed, identity)→ camera_link   ← 메시가 flange 프레임에 pre-bake
+       └─(camera_mount_joint, fixed, rpy -90°,0,0)→ camera_link  ← 메시가 이 프레임에 pre-bake
             └─(camera_optical_joint, xyz="0.141 0 0", rpy 90°,0,90°)→ camera_optical_frame
 ```
 
-- `camera_mount_joint` 가 identity 이므로 **`camera_link` 좌표계 = `flange` 좌표계**다.
-  따라서 `camera_optical_joint` 의 `0.141` 은 그대로 flange 기준 광축 거리다.
+- `camera_mount_joint` 의 rpy 는 **카메라가 플랜지에 물린 clocking** 이다. roll 만 쓴다:
+  회전축이 툴 축(flange **+X** = 광축)이라 **광축 방향도 `camera_optical_frame` 원점도
+  움직이지 않는다**. 그래서 `0.141` 은 clocking 과 무관하게 flange 기준 광축 거리 그대로다.
+  바뀌는 것은 몸체가 어느 쪽으로 뻗는지와 이미지 회전뿐이다 —
+  flange 좌표 bbox 가 `y[-94.9,+50] z[-56,+56]` → `y[-56,+56] z[-50,+94.9] mm` 로 옮겨간다.
 - rpy(90°,0,90°) 가 flange **+X** 광축을 optical_frame **+Z** 광축으로 돌린다
   (플래너·USD 카메라 공통 규약).
+
 - `camera_optical_frame` 은 단순 표식이 아니라 **IK 목표 프레임 자체**다
   (`tool_frames[0]`, [ik.py](../../scripts/core/trajectory/ik.py) `solve_pose`,
   [robot.py](../../scripts/core/trajectory/robot.py) `compute_fk`).
   Isaac 의 `InspectionCamera` 도 이 prim 아래에 붙는다
   ([scene.py](../../scripts/core/isaac/scene.py) `setup_inspection_camera`).
+
+### clocking 을 바꿀 때 (≠ optical_frame 이동, §5 와 다른 작업)
+
+두 곳이 같은 값의 사본이고, 한쪽만 고치면 **계획(cuRobo/URDF)과 화면(USD)이 다른 로봇**이
+된다 — 어느 쪽도 에러를 내지 않는다.
+
+1. `ur20_with_camera_curobo.urdf` — `camera_mount_joint` 의 `origin rpy`
+2. `ur20_with_camera.usd` — `camera_mount` 의 `xformOp:rotateXYZ` (deg)
+3. `build_camera_mesh.py` — `CAMERA_MOUNT_RPY_DEG` (1·2 를 맞춰보는 기준값)
+4. ghost 재생성 — `uv run --no-sync scripts/setup/build_ghost_usd.py`
+   (ghost 는 로봇 USD 에서 만들어지는 산출물이다. 직접 고치지 말 것)
+5. 검증 — `uv run --no-sync scripts/setup/build_camera_mesh.py --verify-only --ghost`
+   가 URDF·USD·상수 셋을 대조한다.
+
+**h5 재생성은 필요 없다** — viewpoint 위치도 WD 기하도 안 건드린다. 대신 카메라 몸체가
+도는 만큼 **충돌 형상이 실제로 바뀌므로** 도달성/충돌은 다시 봐야 한다(`check_ik.py`).
 
 ## 4. 목표 자세가 계산되는 방식
 
@@ -154,8 +194,8 @@ h5 를 고르면(Browse 또는 Show Viewpoints) `_sync_camera_spec_from_h5` 가 
    ```
 
 `ur20_with_camera.yml` 과 `.xrdf` 는 좌표를 들고 있지 않다(링크 이름과 스피어만) —
-이번 종류의 변경에서는 손댈 필요가 없다. 스피어는 `camera_link`(=flange) 기준이라
-optical_frame 이동과 무관하다.
+이번 종류의 변경에서는 손댈 필요가 없다. 스피어는 `camera_link` 기준이라 optical_frame
+이동과도, clocking 회전과도 무관하다(프레임째 같이 돈다 — 재피팅 불필요).
 
 ## 6. cuRobo config 재생성
 

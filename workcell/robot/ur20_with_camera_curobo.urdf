@@ -532,7 +532,11 @@
   </link>
   <link name="camera_optical_frame" />
   <joint name="camera_mount_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <!-- rpy = 카메라가 플랜지에 물린 clocking. roll(-90deg)은 툴 축(flange +X = 광축)
+         둘레 회전이라 광축 방향도 camera_optical_frame 원점(0.141,0,0)도 그대로다 —
+         몸체가 어느 쪽으로 뻗는지와 이미지 회전만 바뀐다. 실기 대조로 확정(2026-08-22).
+         USD 쪽 짝: camera_mount 의 xformOp:rotateXYZ (build_camera_mesh.CAMERA_MOUNT_RPY_DEG). -->
+    <origin xyz="0 0 0" rpy="-1.5707963268 0 0" />
     <parent link="flange" />
     <child link="camera_link" />
   </joint>

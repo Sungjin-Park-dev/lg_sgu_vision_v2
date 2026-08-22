@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Bake a new camera CAD mesh into the flange frame -> camera.usdc + camera_body.obj.
+"""Bake a new camera CAD mesh into the mount frame -> camera.usdc + camera_body.obj.
 
-The camera body is authored **pre-baked in the flange frame** (meters): the USD mesh
-carries no xformOps and the URDF attaches it to `flange` with an identity joint. This
-script is what enforces that convention when the CAD changes.
+The camera body is authored **pre-baked in the camera_mount frame** (meters): the USD
+mesh carries no xformOps and the URDF attaches it to `camera_link` with an identity
+visual/collision origin. This script is what enforces that convention when the CAD changes.
+
+`camera_mount` (= URDF `camera_link`) is the flange rotated by CAMERA_MOUNT_RPY_DEG --
+the clocking the camera is actually bolted on at. Until 2026-08-22 that was identity, so
+"mount frame" and "flange frame" were the same thing and the old naming said flange.
 
 Pipeline:
     camera.obj  (Blender export, meters, optical axis +Z; supplied with --source)
-      -> rotate by R so the optical axis becomes flange +X
+      -> rotate by R so the optical axis becomes mount +X
       -> quadric-decimate (open3d; trimesh's backend `fast_simplification` is absent)
-      -> assert the bbox landed on the flange-frame convention
+      -> assert the bbox landed on the mount-frame convention
       -> write BOTH camera.usdc and camera_body.obj from the same float32 arrays
 
 Both outputs come from one in-memory geometry on purpose: camera_body.obj is not an
@@ -49,18 +53,28 @@ OUT_OBJ = CAMERA_DIR / "camera_body.obj"
 ROBOT_USD = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
 GHOST_USD = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_ghost.usd"
 
-FLANGE_PRIM = "/Root/UR20/wrist_3_link/flange"
-CAMERA_BODY_PRIM = f"{FLANGE_PRIM}/camera_mount/camera_body"
-OPTICAL_PRIM = f"{FLANGE_PRIM}/camera_mount/camera_optical_frame"
+CUROBO_URDF = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_curobo.urdf"
 
-# new-mesh (optical axis +Z) -> flange frame (optical axis +X). det = +1; no translation.
+FLANGE_PRIM = "/Root/UR20/wrist_3_link/flange"
+MOUNT_PRIM = f"{FLANGE_PRIM}/camera_mount"
+CAMERA_BODY_PRIM = f"{MOUNT_PRIM}/camera_body"
+OPTICAL_PRIM = f"{MOUNT_PRIM}/camera_optical_frame"
+
+# 카메라가 플랜지에 물린 clocking (deg). USD `camera_mount` 의 xformOp:rotateXYZ 와
+# URDF `camera_mount_joint` 의 rpy 가 이 값의 두 사본이고, verify 가 셋을 맞춰본다.
+# roll 만 쓴다: 툴 축(flange +X = 광축) 둘레라 광축 방향도 optical_frame 원점(0.141,0,0)도
+# 움직이지 않는다 -- 몸체가 어느 쪽으로 뻗는지와 이미지 회전만 바뀐다. 실기 대조로 확정.
+CAMERA_MOUNT_RPY_DEG = (-90.0, 0.0, 0.0)
+
+# new-mesh (optical axis +Z) -> mount frame (optical axis +X). det = +1; no translation.
 #   old_x = new_z ,  old_y = -new_x ,  old_z = -new_y      == USD rotateXYZ(-90, 0, -90)
 # The sign pair is pinned by det: the (+new_y) variant is a mirror (det = -1).
-R_NEW_TO_FLANGE = np.array([[0, 0, 1],
+R_NEW_TO_MOUNT = np.array([[0, 0, 1],
                             [-1, 0, 0],
                             [0, -1, 0]], dtype=np.float64)
 
-# Flange-frame bbox the baked mesh must land on. x_max is the lens-barrel tip.
+# Mount-frame bbox the baked mesh must land on. x_max is the lens-barrel tip.
+# x 는 툴 축이라 clocking(roll) 이 바뀌어도 그대로다. y/z 는 mount 프레임 기준이다.
 EXPECT_LO = np.array([-0.001, -0.0949, -0.056])
 EXPECT_HI = np.array([0.21877, 0.05, 0.056])
 BBOX_TOL = 1e-4
@@ -92,10 +106,10 @@ def sha256(path: Path) -> str:
 
 
 def load_and_rotate(src: Path) -> trimesh.Trimesh:
-    """Load the OBJ and bake the flange-frame rotation into the vertices."""
+    """Load the OBJ and bake the mount-frame rotation into the vertices."""
     raw = trimesh.load(src, process=False, force="mesh")
     # `f v//vn` splits every corner into its own vertex; process=True welds them back.
-    mesh = trimesh.Trimesh(raw.vertices @ R_NEW_TO_FLANGE.T, raw.faces, process=True)
+    mesh = trimesh.Trimesh(raw.vertices @ R_NEW_TO_MOUNT.T, raw.faces, process=True)
     print(f"  loaded {src.name}: {len(raw.vertices)} raw v -> {len(mesh.vertices)} welded v, "
           f"{len(mesh.faces)} f")
     return mesh
@@ -116,7 +130,7 @@ def decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     return dec
 
 
-def assert_flange_bbox(points: np.ndarray, what: str) -> None:
+def assert_mount_bbox(points: np.ndarray, what: str) -> None:
     lo, hi = points.min(axis=0), points.max(axis=0)
     np.testing.assert_allclose(lo, EXPECT_LO, atol=BBOX_TOL, err_msg=f"{what}: bbox min")
     np.testing.assert_allclose(hi, EXPECT_HI, atol=BBOX_TOL, err_msg=f"{what}: bbox max")
@@ -156,7 +170,7 @@ def write_obj(path: Path, verts32: np.ndarray, faces: np.ndarray, src: Path, n_s
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w") as f:
-        f.write(f"# camera body mesh (camera_asm_wo_light) baked in flange frame (meters), "
+        f.write(f"# camera body mesh (camera_asm_wo_light) baked in mount frame (meters), "
                 f"decimated {n_src_faces} -> {len(faces)} tris\n")
         source_label = os.path.relpath(src.resolve(), PROJECT_ROOT.resolve())
         f.write(f"# source: {source_label} (untracked)  sha256 {sha256(src)}\n")
@@ -208,6 +222,31 @@ def write_usdc(path: Path, verts32: np.ndarray, faces: np.ndarray, normals_fv: n
     print(f"  wrote {path.relative_to(PROJECT_ROOT)} ({path.stat().st_size / 1e6:.1f} MB)")
 
 
+def usd_mount_rpy_deg(stage) -> np.ndarray:
+    """USD `camera_mount` 의 xformOp:rotateXYZ (deg)."""
+    prim = stage.GetPrimAtPath(MOUNT_PRIM)
+    assert prim and prim.IsValid(), f"{MOUNT_PRIM} missing"
+    ops = {op.GetOpName(): op for op in UsdGeom.Xformable(prim).GetOrderedXformOps()}
+    op = ops.get("xformOp:rotateXYZ")
+    assert op is not None, f"{MOUNT_PRIM}: xformOp:rotateXYZ missing"
+    return np.asarray(op.Get(), dtype=np.float64)
+
+
+def urdf_mount_rpy_deg() -> np.ndarray:
+    """cuRobo URDF `camera_mount_joint` 의 origin rpy (deg)."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(CUROBO_URDF).getroot()
+    joint = next((j for j in root.findall("joint")
+                  if j.get("name") == "camera_mount_joint"), None)
+    assert joint is not None, f"{CUROBO_URDF.name}: camera_mount_joint missing"
+    # NB: `joint.find(...) or {}` 는 쓸 수 없다 -- 자식 없는 Element 는 falsy 라
+    #     origin 을 찾아놓고도 조용히 버리고 "0 0 0" 을 읽는다.
+    origin = joint.find("origin")
+    rpy = "0 0 0" if origin is None else origin.get("rpy", "0 0 0")
+    return np.rad2deg(np.asarray([float(v) for v in rpy.split()], dtype=np.float64))
+
+
 def verify_composed(usd_path: Path) -> None:
     """Assert against the *composed* robot stage. This is the 0c85601 guard.
 
@@ -225,14 +264,24 @@ def verify_composed(usd_path: Path) -> None:
     pts = np.asarray(mesh.GetPointsAttr().Get())
     idx = mesh.GetFaceVertexIndicesAttr().Get()
     assert len(pts) and idx, f"{usd_path.name}: camera_body mesh is empty"
-    assert_flange_bbox(pts, f"{usd_path.name} composed mesh")
+    assert_mount_bbox(pts, f"{usd_path.name} composed mesh")
 
-    # The mesh is pre-baked, so mesh-local == flange-local exactly.
+    # The mesh is pre-baked, so mesh-local == camera_mount-local exactly.
     xc = UsdGeom.XformCache()
     rel = (xc.GetLocalToWorldTransform(meshes[0])
-           * xc.GetLocalToWorldTransform(stage.GetPrimAtPath(FLANGE_PRIM)).GetInverse())
+           * xc.GetLocalToWorldTransform(stage.GetPrimAtPath(MOUNT_PRIM)).GetInverse())
     assert np.allclose(np.asarray(rel), np.eye(4), atol=1e-9), \
-        f"{usd_path.name}: mesh->flange is not identity:\n{np.asarray(rel)}"
+        f"{usd_path.name}: mesh->camera_mount is not identity:\n{np.asarray(rel)}"
+
+    # clocking 은 이 스테이지와 URDF 두 곳에 산다. 한쪽만 고치면 계획(cuRobo/URDF)과
+    # 화면(USD)이 서로 다른 로봇이 되는데, 어느 쪽도 에러를 내지 않는다 -- 그래서 여기서 맞춰본다.
+    mount_rot = usd_mount_rpy_deg(stage)
+    assert np.allclose(mount_rot, CAMERA_MOUNT_RPY_DEG, atol=1e-6), \
+        f"{usd_path.name}: camera_mount rotateXYZ={mount_rot} != {CAMERA_MOUNT_RPY_DEG}"
+    urdf_rot = urdf_mount_rpy_deg()
+    assert np.allclose(urdf_rot, CAMERA_MOUNT_RPY_DEG, atol=1e-6), \
+        (f"{CUROBO_URDF.name}: camera_mount_joint rpy={urdf_rot} deg != "
+         f"{CAMERA_MOUNT_RPY_DEG} -- URDF 와 USD 의 clocking 이 어긋났다")
 
     optical = stage.GetPrimAtPath(OPTICAL_PRIM)
     assert optical and optical.IsValid(), f"{usd_path.name}: camera_optical_frame missing"
@@ -241,7 +290,8 @@ def verify_composed(usd_path: Path) -> None:
         f"{usd_path.name}: camera_optical_frame moved to {tuple(tx)}"
 
     print(f"  {usd_path.name}: 1 Mesh, {len(pts)} pts, {len(idx) // 3} f, "
-          f"mesh->flange identity, optical_frame x={tx[0]}  OK")
+          f"mesh->mount identity, mount rpy=({', '.join(f'{v:g}' for v in mount_rot)}) deg == URDF, "
+          f"optical_frame x={tx[0]}  OK")
 
 
 def main() -> None:
@@ -259,18 +309,18 @@ def main() -> None:
             ap.error("--source is required unless --verify-only is used")
         if not args.source.exists():
             ap.error(f"source OBJ not found: {args.source}")
-        print(f"[1/4] Loading + rotating into flange frame")
+        print(f"[1/4] Loading + rotating into mount frame")
         mesh = load_and_rotate(args.source)
         n_src_faces = len(mesh.faces)
-        assert_flange_bbox(mesh.vertices, "baked (full res)")
+        assert_mount_bbox(mesh.vertices, "baked (full res)")
 
         print(f"[2/4] Decimating to {args.faces} tris")
         dec = decimate(mesh, args.faces)
-        assert_flange_bbox(dec.vertices, "decimated")
+        assert_mount_bbox(dec.vertices, "decimated")
 
         print(f"[3/4] Writing outputs")
         verts32 = dec.vertices.astype(np.float32)
-        assert_flange_bbox(verts32.astype(np.float64), "float32 points")
+        assert_mount_bbox(verts32.astype(np.float64), "float32 points")
         normals_fv = crease_normals(dec)
         if args.dry_run:
             print("  --dry-run: nothing written")
