@@ -67,6 +67,86 @@ CANDIDATE_DEDUP_RAD = 0.08
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
+
+def rotvec_to_quat(rv) -> np.ndarray:
+    """회전벡터(축각, rad) → quaternion (w,x,y,z).
+
+    아루코/UR 이 자세를 이 형식으로 준다. **성분 하나를 각도로 떼어 쓸 수 없다** —
+    rz 는 rx=ry=0 일 때만 yaw 와 같다. 그래서 여기서 제대로 변환한다.
+    scipy 를 쓰지 않는 것은 Isaac 번들 파이썬에서 도는 코드이기 때문이다.
+    """
+    v = np.asarray(rv, dtype=np.float64).reshape(3)
+    theta = float(np.linalg.norm(v))
+    if theta < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    axis = v / theta
+    s = np.sin(theta / 2.0)
+    return np.array([np.cos(theta / 2.0), *(axis * s)])
+
+
+def quat_mul(a, b) -> np.ndarray:
+    """quaternion 곱 (w,x,y,z). a 를 b 에 왼쪽에서 합성한다."""
+    w1, x1, y1, z1 = (float(v) for v in a)
+    w2, x2, y2, z2 = (float(v) for v in b)
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ])
+
+
+# UR 컨트롤러의 'base' 프레임 ↔ URDF 의 'base_link' 프레임: **Z 축 180° 차이**.
+# 우리가 만든 게 아니라 UR 공식 ur_description(ur_macro.xacro 의
+# base_link-base_fixed_joint)이 정의한 것이다 — base_link 는 REP-103 정렬
+# (X+ 앞/Y+ 왼쪽/Z+ 위)이고 base 는 펜던트·RTDE·URScript 가 쓰는 UR 규약이다.
+# 둘 다 "로봇 베이스 (0,0,0) 기준"이라 부르므로 말로는 구분되지 않는다 — 값을 그대로
+# 넣으면 물체가 정확히 반대편에 놓인다.
+_Z180_QUAT = np.array([0.0, 0.0, 0.0, 1.0])      # Rz(180°) as (w,x,y,z)
+
+
+def swap_ur_base_frame(pos, quat):
+    """UR 'base' ↔ URDF 'base_link' pose 변환. Z 축 180° 는 자기 역이라 양방향 같은 함수다.
+
+    위치는 x,y 부호가 뒤집히고 z 는 그대로. 회전은 Rz(180°) 를 합성한다 —
+    **회전벡터 성분의 부호를 뒤집는 것으로는 안 된다**(축각은 성분별 연산이 성립하지 않는다).
+    """
+    p = np.asarray(pos, dtype=np.float64).reshape(3)
+    return np.array([-p[0], -p[1], p[2]]), quat_mul(_Z180_QUAT, quat)
+
+
+def flatten_to_yaw(quat) -> np.ndarray:
+    """기울기를 버리고 z-yaw 만 남긴 quaternion.
+
+    물체가 평면에 평평히 놓인다면 측정에 섞인 기울기는 마커 부착/인식 오차다. 그대로 넣으면
+    viewpoint 가 전부 그만큼 틀어진 자세 기준으로 계산된다.
+    """
+    w, x, y, z = (float(v) for v in np.asarray(quat, dtype=np.float64).reshape(4))
+    yaw = np.arctan2(2.0 * (x * y + w * z), 1.0 - 2.0 * (y * y + z * z))
+    return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)])
+
+
+def quat_tilt_deg(quat) -> float:
+    """물체 +Z 가 연직에서 벗어난 각도(도). 평평히 놓였으면 0 에 가깝다."""
+    _, x, y, _ = (float(v) for v in np.asarray(quat, dtype=np.float64).reshape(4))
+    return float(np.degrees(np.arccos(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0))))
+
+
+def quat_to_rotvec(q) -> np.ndarray:
+    """quaternion (w,x,y,z) → 회전벡터 (rad). rotvec_to_quat 의 역."""
+    q = np.asarray(q, dtype=np.float64).reshape(4)
+    n = np.linalg.norm(q)
+    if n < 1e-12:
+        return np.zeros(3)
+    q = q / n
+    if q[0] < 0.0:                      # 최단 회전으로 정규화 (q 와 -q 는 같은 회전)
+        q = -q
+    s = float(np.linalg.norm(q[1:]))
+    if s < 1e-12:
+        return np.zeros(3)
+    theta = 2.0 * float(np.arctan2(s, q[0]))
+    return (q[1:] / s) * theta
+
 GHOST_ROOT_PATH = "/World/UR20_preview"
 # prim 이름 → 씬 YAML 의 장애물 이름(USD prim 규칙: 영문/숫자/_).
 _SCENE_PRIM_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
@@ -80,6 +160,11 @@ INSPECTION_CONTROLLER = "joint_trajectory_controller"
 
 # Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
+# Set Pose / Log Pose 가 값을 주고받을 프레임. 순서가 곧 ComboBox 인덱스다.
+#   base_link = URDF·씬 YAML·cuRobo·Isaac 이 쓰는 프레임 (ROS REP-103)
+#   base      = UR 펜던트·RTDE·URScript, 그리고 그걸 쓰는 아루코 측정이 주는 프레임
+POSE_FRAMES = ("base_link (scene/URDF)", "base (UR pendant/ArUco)")
+
 VIEWPOINTS_ROOT_PRIM = f"{TARGET_OBJECT_PRIM}/Viewpoints"
 VIEWPOINTS_POINTS_PRIM = f"{VIEWPOINTS_ROOT_PRIM}/CameraPoints"
 VIEWPOINT_POINT_WIDTH_M = 0.008
@@ -920,6 +1005,7 @@ class PipelineWindow:
         if not self._objects:
             self._objects = [default_object or "sample"]
         self._object_combo = None
+        self._pose_frame_combo = None
         self._build()
 
         # Dock into the right-hand panel instead of floating as a standalone
@@ -1405,6 +1491,51 @@ class PipelineWindow:
                     self._object_combo = self._lock(ui.ComboBox(default_idx, *self._objects))
                     self._lock(ui.Button("Load Object", width=110, clicked_fn=self._on_load_object))
                     self._lock(ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose))
+                    # 좌표 입력은 아루코 값을 넣을 때만 쓴다 — 평소엔 뷰포트 기즈모로 옮기므로
+                    # 접어둔다. 세 줄이나 차지해서 늘 펴두면 h5 선택이 아래로 밀린다.
+                    toggle = ui.CheckBox(width=20)
+                    toggle.model.set_value(False)
+                    toggle.model.add_value_changed_fn(
+                        lambda _m: self._toggle_pose_rows())
+                    self._lock(toggle)
+                    self._fields["obj_pose_rows"] = toggle.model
+                    ui.Label("Set pose by number", width=126)
+                # Log Pose(읽기)의 쓰기 짝. 아루코 출력 6개 값(x y z rx ry rz)을 **그대로**
+                # 받는다 — 측정이 로봇 베이스(0,0,0) 기준으로 오고 씬 YAML 도 같은 프레임이라
+                # 변환할 게 없다. world 로의 z 보정(+MOUNT_HEIGHT)은 여기서만 한다.
+                # 회전은 회전벡터(축각) 그대로 받는다: rz 를 yaw 로 떼어 쓰는 것은 rx=ry=0
+                # 일 때만 맞고, 마커가 조금만 기울어도 틀린다. 파이프라인(poses.py,
+                # _parse_placement)은 임의 자세를 이미 받으므로 여기서 버릴 이유가 없다.
+                with ui.HStack(height=22, spacing=6) as row_pos:
+                    ui.Label("Pose (robot frame)", width=110)
+                    ui.Label("x", width=10)
+                    self._fields["obj_x"] = self._num_field(0.0, width=64)
+                    ui.Label("y", width=10)
+                    self._fields["obj_y"] = self._num_field(0.0, width=64)
+                    ui.Label("z", width=10)
+                    self._fields["obj_z"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as row_rot:
+                    ui.Label("Rotvec (rad)", width=110)
+                    ui.Label("rx", width=16)
+                    self._fields["obj_rx"] = self._num_field(0.0, width=64)
+                    ui.Label("ry", width=16)
+                    self._fields["obj_ry"] = self._num_field(0.0, width=64)
+                    ui.Label("rz", width=16)
+                    self._fields["obj_rz"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as row_frame:
+                    ui.Label("Input frame", width=110)
+                    # 순서 = POSE_FRAMES. 기본은 base_link(씬/URDF 와 같은 프레임)라
+                    # 체크 안 하고 쓰던 흐름이 그대로 유지된다.
+                    self._pose_frame_combo = self._lock(ui.ComboBox(0, *POSE_FRAMES))
+                    flat = ui.CheckBox(width=20)
+                    flat.model.set_value(True)
+                    self._lock(flat)
+                    self._fields["obj_flat"] = flat.model
+                    ui.Label("flat (drop tilt)", width=96)
+                    self._lock(ui.Button("Set Pose", width=80,
+                                         clicked_fn=self._on_set_object_pose))
+                self._pose_rows = [row_pos, row_rot, row_frame]
+                self._toggle_pose_rows()
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
                     self._lock(ui.StringField(model=self._h5_path_model))
@@ -1649,8 +1780,129 @@ class PipelineWindow:
             return
         self._current_object = obj
         self._range_trimesh = None  # new geometry — force range re-extract
+        # 입력칸을 방금 놓인 자리로 채운다 — 사용자가 현재 값에서 조금씩 고칠 수 있게.
+        self._sync_pose_fields_from_stage()
         self._append_log(
-            f"[object] loaded '{obj}'. Move it with the viewport gizmo (W/E), then Generate.")
+            f"[object] loaded '{obj}'. 뷰포트 기즈모(W/E)로 옮기거나, "
+            f"'Pose (robot frame)' 에 값을 넣고 Set Pose. 그다음 Generate.")
+
+    def _toggle_pose_rows(self):
+        """'Set pose by number' 체크에 따라 좌표 입력 세 줄을 보이거나 숨긴다.
+
+        펼 때 스테이지의 현재 pose 로 채워준다 — 빈 0 에서 시작하면 Set Pose 를 잘못 눌러
+        물체가 원점으로 날아간다.
+        """
+        show = bool(self._fields["obj_pose_rows"].get_value_as_bool())
+        for row in getattr(self, "_pose_rows", []):
+            try:
+                row.visible = show
+            except Exception:  # noqa: BLE001 — best-effort, UI 갱신 실패가 치명적이지 않다
+                pass
+        if show:
+            self._sync_pose_fields_from_stage()
+
+    def _sync_pose_fields_from_stage(self):
+        """스테이지의 현재 물체 pose 를 입력칸에 채운다 (robot frame, 아루코와 같은 형식).
+
+        읽기(Log Pose)와 쓰기(Set Pose)가 같은 값을 보게 해서, 기즈모로 대충 맞춘 뒤
+        숫자로 미세조정하는 흐름이 가능하다. 회전벡터로 채우므로 왕복이 무손실이다.
+        """
+        pose = self._read_object_world_pose()
+        if pose is None:
+            return
+        (px, py, pz), quat = pose
+        if self._pose_frame_is_ur_base():        # 표시도 입력과 같은 프레임으로 (왕복 일치)
+            (px, py, pz), quat = swap_ur_base_frame((px, py, pz), quat)
+        rotvec = quat_to_rotvec(quat)
+        for key, value in (("obj_x", px), ("obj_y", py), ("obj_z", pz),
+                           ("obj_rx", rotvec[0]), ("obj_ry", rotvec[1]),
+                           ("obj_rz", rotvec[2])):
+            self._fields[key].set_value(float(value))
+
+    def _pose_frame_is_ur_base(self) -> bool:
+        """입력/표시 프레임이 UR 'base' 인가 (아니면 base_link)."""
+        if self._pose_frame_combo is None:
+            return False
+        idx = self._pose_frame_combo.model.get_item_value_model().get_value_as_int()
+        return idx == 1
+
+    def _on_set_object_pose(self):
+        """입력칸의 pose 를 /World/target_object 에 적용한다.
+
+        입력 프레임은 콤보가 정한다 — 아루코/펜던트 값을 쓸 때 'base' 를 고르면 6개 값을
+        그대로 붙여넣을 수 있고, Z 축 180° 변환은 여기서 한다(손으로 부호를 뒤집는 것은
+        회전에서 틀린다 — swap_ur_base_frame 주석 참고).
+        """
+        import omni.usd
+        from pxr import Gf, UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not prim or not prim.IsValid():
+            self._append_log(
+                "[object] no target prim on stage - click 'Load Object' first.")
+            return
+
+        px = self._get_field("obj_x", float)
+        py = self._get_field("obj_y", float)
+        pz = self._get_field("obj_z", float)
+        rotvec_in = np.array([self._get_field("obj_rx", float),
+                              self._get_field("obj_ry", float),
+                              self._get_field("obj_rz", float)], dtype=np.float64)
+        pos_in = np.array([px, py, pz], dtype=np.float64)
+        quat = rotvec_to_quat(rotvec_in)
+
+        from_ur = self._pose_frame_is_ur_base()
+        pos_bl, quat_bl = (swap_ur_base_frame(pos_in, quat) if from_ur else (pos_in, quat))
+        pos_in, quat = pos_bl, quat_bl
+        raw_tilt = quat_tilt_deg(quat)
+        if self._get_field("obj_flat", bool):
+            quat = flatten_to_yaw(quat)
+        px, py, pz = (float(v) for v in pos_in)
+
+        # world 로 올리는 것은 z 하나뿐이다 (config.py 프레임 규약).
+        wz = pz + urctl.MOUNT_HEIGHT
+        # XFormPrim 경로(create_prim position=/orientation=)를 쓰지 않는 이유는
+        # scene.load_target_object 주석 참고 — 재생 중에는 physics/Fabric 을 타서 어긋난다.
+        M = Gf.Matrix4d()
+        M.SetTransform(
+            Gf.Rotation(Gf.Quatd(*(float(v) for v in quat))),
+            Gf.Vec3d(float(px), float(py), float(wz)),
+        )
+        xf = UsdGeom.Xformable(prim)
+        xf.ClearXformOpOrder()
+        xf.AddTransformOp().Set(M)
+
+        # support 기둥은 물체 배치에서 파생된다 — config 를 맞춘 뒤 다시 그려야 화면이
+        # 플래너와 같아진다(생성 서브프로세스는 스테이지 pose 를 인자로 따로 받는다).
+        try:
+            _cfg_module.TARGET_OBJECT["position"] = np.array([px, py, pz], dtype=np.float64)
+            _cfg_module.TARGET_OBJECT["rotation"] = np.asarray(quat, dtype=np.float64)
+            urctl.spawn_scene_obstacles(_cfg_module)
+        except Exception as exc:  # noqa: BLE001 — 시각 갱신 실패가 배치를 막지는 않는다
+            self._append_log(f"[object] support visual refresh skipped: {exc}")
+
+        rotvec_out = quat_to_rotvec(quat)
+        yaw_deg = float(np.degrees(2.0 * np.arctan2(quat[3], quat[0])))
+        src = POSE_FRAMES[1] if from_ur else POSE_FRAMES[0]
+        lines = [f"[object] input ({src}) = "
+                 + " ".join(f"{v:.4f}" for v in (
+                     self._get_field("obj_x", float), self._get_field("obj_y", float),
+                     self._get_field("obj_z", float)))
+                 + "  rotvec " + " ".join(f"{v:.4f}" for v in rotvec_in)]
+        if from_ur:
+            lines.append("[object]   -> base_link (Z 180deg): "
+                         + " ".join(f"{v:.4f}" for v in (px, py, pz))
+                         + "  rotvec " + " ".join(f"{v:.4f}" for v in rotvec_out))
+        # 기울기는 **평평화 전** 값을 보고한다 — 그게 마커/인식을 의심할 근거다.
+        lines.append(f"[object]   measured tilt from vertical = {raw_tilt:.2f}deg"
+                     + ("  (평평)" if raw_tilt < 0.5 else "  ⚠ 마커/인식 확인"))
+        if self._get_field("obj_flat", bool) and raw_tilt >= 0.5:
+            lines.append(f"[object]   flat 옵션으로 기울기 {raw_tilt:.2f}deg 를 버렸다 "
+                         f"(yaw 만 유지). 물체가 실제로 기울어 놓인다면 체크를 해제할 것.")
+        lines.append(f"[object] pose set (base_link) = {px:.4f} {py:.4f} {pz:.4f} · "
+                     f"yaw {yaw_deg:.2f}deg · world z = {wz:.4f}")
+        self._append_log("\n".join(lines))
 
     def _on_log_object_pose(self):
         """Print the current object world orientation for prepare_object_mesh.py."""
@@ -1659,6 +1911,8 @@ class PipelineWindow:
             self._append_log("[object] no target prim on stage - Load Object first.")
             return
         (rx, ry, rz), (w, x, y, z) = pose
+        # 기즈모로 옮긴 뒤 Log Pose 를 누르면 그 값이 입력칸에 들어온다 → 숫자로 미세조정.
+        self._sync_pose_fields_from_stage()
         obj = (self._current_object or "").strip() or "<name>"
         self._append_log(
             f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
