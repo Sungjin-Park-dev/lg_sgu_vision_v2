@@ -108,17 +108,21 @@ MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 #
 # 좌표계 주의:
 # 위치/치수는 모두 robot base_link frame 기준 (cuRobo 충돌 입력용).
-# Isaac Sim visual 은 world frame (floor=0) 이며, robot base = world z=MOUNT_HEIGHT.
-# 따라서 robot frame z = world z - MOUNT_HEIGHT.
+# **모든 좌표가 robot base_link frame 이다** — Isaac world 도 같다(2026-08-22).
+# 원점 = 로봇 베이스 판(마운트 기둥 상면), 바닥은 z = -MOUNT_HEIGHT.
+# 예외는 UR 컨트롤러의 'base' 프레임뿐이다(펜던트·RTDE·아루코). base_link 와 Z 축 180° 차이라
+# 값을 그대로 넣으면 정반대에 놓인다 — 입력 경계에서 한 번만 변환한다
+# (isaac_pipeline 의 Set Pose 프레임 토글).
 #
 # ⚠️ 아래 컨테이너들은 모듈 수명 동안 **같은 객체**로 유지된다. load_scene() 은 rebind 하지
 #    않고 내용만 갈아끼운다(scene_config.apply_to 참고). sync_support_to_target() 이 WALLS
 #    안의 support dict 를 제자리에서 바꾸고, build_collision_world 와 trajectory_studio 가
 #    그 참조를 들고 있기 때문이다.
 
-# robot base_link 가 world z=MOUNT_HEIGHT 에 있다 → robot frame z = world z - MOUNT_HEIGHT.
-# 씬이 아니라 로봇/프레임 규약이다: ROBOT_MOUNT 치수, mount USD 스케일, 로봇/고스트 스폰 z,
-# 문서의 프레임 정의가 전부 이 값에 얽혀 있어서 씬 파일이 단독으로 바꿀 수 없다.
+# 마운트 기둥 높이 (m). **프레임 오프셋이 아니다** — 좌표계는 base_link 하나뿐이다.
+# 이 값은 기둥의 치수로만 쓰인다: ROBOT_MOUNT 상자 높이, mount USD 의 z 스케일,
+# 그리고 바닥/환경을 원점 아래로 내리는 양(scene.ENV_OFFSET). 씬 파일이 단독으로
+# 바꿀 수 없는 로봇 쪽 값이라 여기 둔다.
 MOUNT_HEIGHT = 0.805
 
 DEFAULT_SCENE = scene_config.DEFAULT_SCENE
@@ -222,11 +226,6 @@ def apply_object_placement(object_name):
         p.get("rotation", [1.0, 0.0, 0.0, 0.0]), dtype=np.float64).copy()
     sync_support_to_target()
     return True
-
-
-def target_object_world_position():
-    """TARGET_OBJECT position(robot frame) → Isaac world frame(z += MOUNT_HEIGHT)."""
-    return np.asarray(TARGET_OBJECT["position"], dtype=np.float64) + np.array([0.0, 0.0, MOUNT_HEIGHT])
 
 
 def sync_support_to_target():

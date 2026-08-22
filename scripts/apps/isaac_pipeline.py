@@ -1451,8 +1451,7 @@ class PipelineWindow:
             scales = [float(np.linalg.norm(b)) or 1.0 for b in basis]
             dims = [float(s) * k for s, k in zip(rng.GetSize(), scales)]
             center_world = m.Transform(rng.GetMidpoint())
-            position = [float(center_world[0]), float(center_world[1]),
-                        float(center_world[2]) - urctl.MOUNT_HEIGHT]
+            position = [float(v) for v in center_world]   # world == base_link
 
             rot = Gf.Matrix4d()
             for r, (b, s) in enumerate(zip(basis, scales)):
@@ -1502,7 +1501,7 @@ class PipelineWindow:
                     ui.Label("Set pose by number", width=126)
                 # Log Pose(읽기)의 쓰기 짝. 아루코 출력 6개 값(x y z rx ry rz)을 **그대로**
                 # 받는다 — 측정이 로봇 베이스(0,0,0) 기준으로 오고 씬 YAML 도 같은 프레임이라
-                # 변환할 게 없다. world 로의 z 보정(+MOUNT_HEIGHT)은 여기서만 한다.
+                # 변환할 게 없다 — 스테이지 world 가 곧 base_link 다.
                 # 회전은 회전벡터(축각) 그대로 받는다: rz 를 yaw 로 떼어 쓰는 것은 rx=ry=0
                 # 일 때만 맞고, 마커가 조금만 기울어도 틀린다. 파이프라인(poses.py,
                 # _parse_placement)은 임의 자세를 이미 받으므로 여기서 버릴 이유가 없다.
@@ -1860,14 +1859,12 @@ class PipelineWindow:
             quat = flatten_to_yaw(quat)
         px, py, pz = (float(v) for v in pos_in)
 
-        # world 로 올리는 것은 z 하나뿐이다 (config.py 프레임 규약).
-        wz = pz + urctl.MOUNT_HEIGHT
         # XFormPrim 경로(create_prim position=/orientation=)를 쓰지 않는 이유는
         # scene.load_target_object 주석 참고 — 재생 중에는 physics/Fabric 을 타서 어긋난다.
         M = Gf.Matrix4d()
         M.SetTransform(
             Gf.Rotation(Gf.Quatd(*(float(v) for v in quat))),
-            Gf.Vec3d(float(px), float(py), float(wz)),
+            Gf.Vec3d(float(px), float(py), float(pz)),
         )
         xf = UsdGeom.Xformable(prim)
         xf.ClearXformOpOrder()
@@ -1901,7 +1898,7 @@ class PipelineWindow:
             lines.append(f"[object]   flat 옵션으로 기울기 {raw_tilt:.2f}deg 를 버렸다 "
                          f"(yaw 만 유지). 물체가 실제로 기울어 놓인다면 체크를 해제할 것.")
         lines.append(f"[object] pose set (base_link) = {px:.4f} {py:.4f} {pz:.4f} · "
-                     f"yaw {yaw_deg:.2f}deg · world z = {wz:.4f}")
+                     f"yaw {yaw_deg:.2f}deg")
         self._append_log("\n".join(lines))
 
     def _on_log_object_pose(self):
@@ -1916,8 +1913,7 @@ class PipelineWindow:
         obj = (self._current_object or "").strip() or "<name>"
         self._append_log(
             f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
-            f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}  "
-            f"(world z = {rz + urctl.MOUNT_HEIGHT:.4f})\n"
+            f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}\n"
             f"[object] bake upright: uv run scripts/setup/prepare_object_mesh.py "
             f"reorient --object {obj} "
             f"--world-target-quat {w:.6f} {x:.6f} {y:.6f} {z:.6f}")
@@ -1925,8 +1921,8 @@ class PipelineWindow:
     def _read_object_world_pose(self):
         """World pose of /World/target_object → (pos_robot (x,y,z), quat (w,x,y,z)) or None.
 
-        Reads the live transform (gizmo edits included) and converts world→robot
-        frame: x/y and rotation unchanged, z -= MOUNT_HEIGHT (config.py frame note).
+        스테이지 world 가 곧 base_link 라 변환이 없다 — 읽은 값이 그대로 robot frame 이다
+        (config.py 프레임 규약).
         """
         import omni.usd
         from pxr import UsdGeom
@@ -1940,7 +1936,7 @@ class PipelineWindow:
         q = m.ExtractRotationQuat()  # Gf.Quatd, (w,x,y,z) via GetReal/GetImaginary
         w = float(q.GetReal())
         x, y, z = (float(v) for v in q.GetImaginary())
-        pos_robot = (float(t[0]), float(t[1]), float(t[2]) - urctl.MOUNT_HEIGHT)
+        pos_robot = (float(t[0]), float(t[1]), float(t[2]))
         return pos_robot, (w, x, y, z)
 
     @staticmethod
@@ -3910,7 +3906,7 @@ def main():
     base_link, chain = spawn_preview_ghost(
         usd_path=ghost_usd_path,
         ghost_root=GHOST_ROOT_PATH,
-        position=np.array([0.0, 0.0, urctl.MOUNT_HEIGHT]),
+        position=np.zeros(3),          # world == base_link
         joint_order=JOINT_NAMES,
         log=print,
     )

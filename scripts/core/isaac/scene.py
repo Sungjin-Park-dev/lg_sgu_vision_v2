@@ -99,8 +99,10 @@ def _is_under_root(path: str, root: str) -> bool:
     """
     return path == root or path.startswith(root + "/")
 
-# robot base 높이는 config 가 소유한다 — 여기서 재정의하면 조용히 갈라진다.
-# (isaac_pipeline 이 urctl.MOUNT_HEIGHT 로 읽으므로 재수출은 유지한다.)
+# 마운트 기둥 높이. **프레임 오프셋이 아니다** — Isaac world 원점이 곧 robot base_link 라
+# 좌표 변환이 없다(2026-08-22). 이 값은 기둥의 치수로만 쓰인다: 마운트 USD 의 z 스케일과,
+# 바닥/환경을 기둥 높이만큼 내리는 ENV_OFFSET.
+# 소유자는 config 다 — 여기서 재정의하면 조용히 갈라진다.
 MOUNT_HEIGHT = _config.MOUNT_HEIGHT
 
 # 워크셀 USD에서 측정한 치수
@@ -111,7 +113,8 @@ TABLE_USD_INTRINSIC_Z = 0.795
 MOUNT_XY_SCALE = 2.0
 TABLE_USD_BBOX_CENTER_X = 0.270
 TABLE_USD_BBOX_CENTER_Y = -0.002
-ENV_OFFSET = np.array([2.0, 0.0, 0.0])
+# 실험실 방(바닥 포함) 배치. z 는 원점(=robot base)에서 바닥까지 = -기둥높이.
+ENV_OFFSET = np.array([2.0, 0.0, -MOUNT_HEIGHT])
 
 
 def parse_args(argv=None):
@@ -179,9 +182,10 @@ def load_workcell(usd_path: Path) -> None:
         orientation=_yaw_quat(cell_yaw),
         usd_path=str(ENV_USD),
     )
+    # 마운트 USD 는 원점이 상면이라 z=0(= robot base) 에 놓으면 아래로 뻗는다.
     prims.create_prim(
         MOUNT_PATH, "Xform",
-        position=np.array([0.0, 0.0, MOUNT_HEIGHT]),
+        position=np.zeros(3),
         scale=np.array([MOUNT_XY_SCALE, MOUNT_XY_SCALE,
                         MOUNT_HEIGHT / MOUNT_USD_INTRINSIC_Z]),
         usd_path=str(MOUNT_USD),
@@ -196,7 +200,7 @@ def load_workcell(usd_path: Path) -> None:
     )
     prims.create_prim(
         STAGE_PATH, "Xform",
-        position=np.array([0.0, 0.0, MOUNT_HEIGHT]),
+        position=np.zeros(3),          # world 원점 = base_link. 변환 없음.
         usd_path=str(usd_path),
     )
 
@@ -230,8 +234,8 @@ def _table_prim_transform(config_module):
     """Convert config.TABLE (robot frame center/size) to the table USD Xform.
 
     ``thor_table.usd`` has an off-center XY origin and its Z origin on the top
-    surface.  ``config.TABLE`` is a center pose in the robot-base frame, whose
-    world origin is elevated by ``MOUNT_HEIGHT``.
+    surface.  ``config.TABLE`` is a center pose in the robot-base frame, which is
+    also the Isaac world frame -- no coordinate promotion here.
 
     Returns (position, scale, orientation_wxyz). The table carries a z-yaw when the
     cell is laid out around the robot at an angle -- the off-center origin offset has
@@ -251,11 +255,11 @@ def _table_prim_transform(config_module):
     yaw = _cell_yaw(config_module)
     off = _yaw_xy(yaw, (TABLE_USD_BBOX_CENTER_X * scale[0],
                         TABLE_USD_BBOX_CENTER_Y * scale[1]))
-    center_world = center_robot + np.array([0.0, 0.0, MOUNT_HEIGHT])
+    # world == base_link 라 좌표 승격이 없다. z 는 상자 중심 → USD 원점(상면) 보정만.
     position = np.array([
-        center_world[0] - off[0],
-        center_world[1] - off[1],
-        center_world[2] + dimensions[2] / 2.0,
+        center_robot[0] - off[0],
+        center_robot[1] - off[1],
+        center_robot[2] + dimensions[2] / 2.0,
     ], dtype=np.float64)
     return position, scale, _yaw_quat(yaw)
 
@@ -305,7 +309,7 @@ def spawn_scene_obstacles(config_module=_config) -> None:
         RT = Gf.Matrix4d()
         RT.SetTransform(
             Gf.Rotation(Gf.Quatd(float(quat[0]), Gf.Vec3d(*(float(v) for v in quat[1:])))),
-            Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]) + MOUNT_HEIGHT),
+            Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])),
         )
         xf = UsdGeom.Xformable(cube.GetPrim())
         xf.ClearXformOpOrder()
@@ -361,7 +365,7 @@ def load_target_object(object_name: str | None) -> None:
     from pxr import Gf, UsdGeom
 
     q = _config.TARGET_OBJECT["rotation"]  # (w, x, y, z)
-    wp = _config.target_object_world_position()  # robot frame → world (z += MOUNT_HEIGHT)
+    wp = np.asarray(_config.TARGET_OBJECT["position"], dtype=np.float64)  # world == base_link
     M = Gf.Matrix4d()
     M.SetTransform(
         Gf.Rotation(Gf.Quatd(float(q[0]), float(q[1]), float(q[2]), float(q[3]))),

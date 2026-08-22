@@ -6,10 +6,9 @@ Isaac Sim 프로세스 안에서 도는데 `core.trajectory` 는 import 만으�
 오므로 거기서는 재사용할 수 없다 — 둘이 공유할 수 있는 유일한 층이 numpy-only 인 여기다.
 한 벌만 두면 UI 가 보여주는 그림이 실제 생성될 궤적과 어긋날 수 없다.
 
-**프레임**: 포즈는 ``object_pose`` 를 준 프레임 그대로 나온다.
-  - CLI 는 robot base frame 의 물체 배치(config.TARGET_OBJECT)를 준다 → robot frame 포즈.
-  - UI 는 스테이지에서 읽은 world 변환을 준다 → world 포즈(그대로 그리면 된다).
-robot frame z = world z - MOUNT_HEIGHT 라, 이 구분을 놓치면 그림이 0.8 m 어긋난다.
+**프레임**: 포즈는 ``object_pose`` 를 준 프레임 그대로 나온다. CLI 는 물체 배치
+(config.TARGET_OBJECT)를, UI 는 스테이지에서 읽은 변환을 주는데 **둘이 같은 프레임**이다 —
+Isaac world 원점이 robot base_link 이기 때문이다(2026-08-22 이전에는 z 가 0.805 어긋났다).
 """
 
 from __future__ import annotations
