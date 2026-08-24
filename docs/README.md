@@ -14,6 +14,7 @@
 | IK 확인·궤적 생성 | [궤적 계획하기](workflows/plan-trajectory.md) | Trajectory Studio |
 | Isaac에서 배치·재생 | [시뮬레이션과 미리보기](workflows/simulate-and-preview.md) | Isaac Pipeline |
 | URSim·MoveIt·로봇 실행 | [로봇에서 실행하기](workflows/execute-on-robot.md) | Isaac Pipeline, ROS2 |
+| 현장에서 실기 시운전 | [현장 시운전](workflows/field-commissioning.md) | Isaac Pipeline, ROS2 |
 
 ## 공통 가이드
 
