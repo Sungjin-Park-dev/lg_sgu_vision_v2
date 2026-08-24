@@ -96,6 +96,30 @@ def quat_mul(a, b) -> np.ndarray:
     ])
 
 
+def quat_rotate(quat, vector) -> np.ndarray:
+    """Rotate a 3-vector by a quaternion (w,x,y,z)."""
+    q = np.asarray(quat, dtype=np.float64).reshape(4)
+    q = q / np.linalg.norm(q)
+    v = np.asarray(vector, dtype=np.float64).reshape(3)
+    # Equivalent to q * (0, v) * conjugate(q), without constructing temporaries.
+    qv = q[1:]
+    return v + 2.0 * np.cross(qv, np.cross(qv, v) + q[0] * v)
+
+
+def compose_pose(parent_pos, parent_quat, child_pos, child_quat):
+    """Compose ``T_world_parent @ T_parent_child`` as position + quaternion.
+
+    ArUco placement uses this as ``T_base_link_marker @ T_marker_object``.
+    """
+    p_parent = np.asarray(parent_pos, dtype=np.float64).reshape(3)
+    q_parent = np.asarray(parent_quat, dtype=np.float64).reshape(4)
+    p_child = np.asarray(child_pos, dtype=np.float64).reshape(3)
+    q_child = np.asarray(child_quat, dtype=np.float64).reshape(4)
+    q = quat_mul(q_parent, q_child)
+    q /= np.linalg.norm(q)
+    return p_parent + quat_rotate(q_parent, p_child), q
+
+
 # UR 컨트롤러의 'base' 프레임 ↔ URDF 의 'base_link' 프레임: **Z 축 180° 차이**.
 # 우리가 만든 게 아니라 UR 공식 ur_description(ur_macro.xacro 의
 # base_link-base_fixed_joint)이 정의한 것이다 — base_link 는 REP-103 정렬
@@ -113,23 +137,6 @@ def swap_ur_base_frame(pos, quat):
     """
     p = np.asarray(pos, dtype=np.float64).reshape(3)
     return np.array([-p[0], -p[1], p[2]]), quat_mul(_Z180_QUAT, quat)
-
-
-def flatten_to_yaw(quat) -> np.ndarray:
-    """기울기를 버리고 z-yaw 만 남긴 quaternion.
-
-    물체가 평면에 평평히 놓인다면 측정에 섞인 기울기는 마커 부착/인식 오차다. 그대로 넣으면
-    viewpoint 가 전부 그만큼 틀어진 자세 기준으로 계산된다.
-    """
-    w, x, y, z = (float(v) for v in np.asarray(quat, dtype=np.float64).reshape(4))
-    yaw = np.arctan2(2.0 * (x * y + w * z), 1.0 - 2.0 * (y * y + z * z))
-    return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)])
-
-
-def quat_tilt_deg(quat) -> float:
-    """물체 +Z 가 연직에서 벗어난 각도(도). 평평히 놓였으면 0 에 가깝다."""
-    _, x, y, _ = (float(v) for v in np.asarray(quat, dtype=np.float64).reshape(4))
-    return float(np.degrees(np.arccos(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0))))
 
 
 def quat_to_rotvec(q) -> np.ndarray:
@@ -160,7 +167,10 @@ INSPECTION_CONTROLLER = "joint_trajectory_controller"
 
 # Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
-# Set Pose / Log Pose 가 값을 주고받을 프레임. 순서가 곧 ComboBox 인덱스다.
+ARUCO_MARKER_PRIM = "/World/ArUcoMarkerPreview"
+ARUCO_MARKER_DEFAULT_SIZE_M = 0.05
+ARUCO_MARKER_THICKNESS_M = 0.001
+# ArUco marker pose input frames. Order is the ComboBox index.
 #   base_link = URDF·씬 YAML·cuRobo·Isaac 이 쓰는 프레임 (ROS REP-103)
 #   base      = UR 펜던트·RTDE·URScript, 그리고 그걸 쓰는 아루코 측정이 주는 프레임
 POSE_FRAMES = ("base_link (scene/URDF)", "base (UR pendant/ArUco)")
@@ -1006,6 +1016,8 @@ class PipelineWindow:
             self._objects = [default_object or "sample"]
         self._object_combo = None
         self._pose_frame_combo = None
+        self._pose_frame_index = 0
+        self._marker_pose_initialized = False
         self._build()
 
         # Dock into the right-hand panel instead of floating as a standalone
@@ -1489,24 +1501,28 @@ class PipelineWindow:
                         if self._default_object in self._objects else 0
                     self._object_combo = self._lock(ui.ComboBox(default_idx, *self._objects))
                     self._lock(ui.Button("Load Object", width=110, clicked_fn=self._on_load_object))
-                    self._lock(ui.Button("Log Pose", width=90, clicked_fn=self._on_log_object_pose))
-                    # 좌표 입력은 아루코 값을 넣을 때만 쓴다 — 평소엔 뷰포트 기즈모로 옮기므로
-                    # 접어둔다. 세 줄이나 차지해서 늘 펴두면 h5 선택이 아래로 밀린다.
-                    toggle = ui.CheckBox(width=20)
-                    toggle.model.set_value(False)
-                    toggle.model.add_value_changed_fn(
-                        lambda _m: self._toggle_pose_rows())
-                    self._lock(toggle)
-                    self._fields["obj_pose_rows"] = toggle.model
-                    ui.Label("Set pose by number", width=126)
-                # Log Pose(읽기)의 쓰기 짝. 아루코 출력 6개 값(x y z rx ry rz)을 **그대로**
-                # 받는다 — 측정이 로봇 베이스(0,0,0) 기준으로 오고 씬 YAML 도 같은 프레임이라
-                # 변환할 게 없다 — 스테이지 world 가 곧 base_link 다.
-                # 회전은 회전벡터(축각) 그대로 받는다: rz 를 yaw 로 떼어 쓰는 것은 rx=ry=0
-                # 일 때만 맞고, 마커가 조금만 기울어도 틀린다. 파이프라인(poses.py,
-                # _parse_placement)은 임의 자세를 이미 받으므로 여기서 버릴 이유가 없다.
+                    self._lock(ui.Button("Read Pose", width=90,
+                                         clicked_fn=self._on_read_object_pose))
+                with ui.HStack(height=22, spacing=6):
+                    marker_toggle = ui.CheckBox(width=20)
+                    marker_toggle.model.set_value(False)
+                    marker_toggle.model.add_value_changed_fn(
+                        lambda _m: self._toggle_marker_pose_rows())
+                    self._lock(marker_toggle)
+                    self._fields["marker_pose_rows"] = marker_toggle.model
+                    ui.Label("Use ArUco marker", width=180)
+                # 프레임 선택은 두 모드 공통이다 — ArUco 를 켜든 끄든 "이 숫자가 어느
+                # 기준인가"는 항상 답이 필요한 질문이다. 끄면 아래 Object pose 가, 켜면
+                # Marker pose 가 이 프레임으로 해석된다("Object in marker" 는 마커 로컬이라
+                # 프레임과 무관하다). 스테이지 world 원점 = base_link 라 index 0 은 무변환.
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("Frame", width=110)
+                    self._pose_frame_combo = self._lock(ui.ComboBox(0, *POSE_FRAMES))
+                    self._pose_frame_combo.model.get_item_value_model()\
+                        .add_value_changed_fn(lambda _m: self._on_pose_frame_changed())
+                    self._pose_frame_index = 0
                 with ui.HStack(height=22, spacing=6) as row_pos:
-                    ui.Label("Pose (robot frame)", width=110)
+                    ui.Label("Object pose (m)", width=110)
                     ui.Label("x", width=10)
                     self._fields["obj_x"] = self._num_field(0.0, width=64)
                     ui.Label("y", width=10)
@@ -1514,27 +1530,67 @@ class PipelineWindow:
                     ui.Label("z", width=10)
                     self._fields["obj_z"] = self._num_field(0.0, width=64)
                 with ui.HStack(height=22, spacing=6) as row_rot:
-                    ui.Label("Rotvec (rad)", width=110)
+                    ui.Label("Object rotvec", width=110)
                     ui.Label("rx", width=16)
                     self._fields["obj_rx"] = self._num_field(0.0, width=64)
                     ui.Label("ry", width=16)
                     self._fields["obj_ry"] = self._num_field(0.0, width=64)
                     ui.Label("rz", width=16)
                     self._fields["obj_rz"] = self._num_field(0.0, width=64)
-                with ui.HStack(height=22, spacing=6) as row_frame:
-                    ui.Label("Input frame", width=110)
-                    # 순서 = POSE_FRAMES. 기본은 base_link(씬/URDF 와 같은 프레임)라
-                    # 체크 안 하고 쓰던 흐름이 그대로 유지된다.
-                    self._pose_frame_combo = self._lock(ui.ComboBox(0, *POSE_FRAMES))
-                    flat = ui.CheckBox(width=20)
-                    flat.model.set_value(True)
-                    self._lock(flat)
-                    self._fields["obj_flat"] = flat.model
-                    ui.Label("flat (drop tilt)", width=96)
-                    self._lock(ui.Button("Set Pose", width=80,
-                                         clicked_fn=self._on_set_object_pose))
-                self._pose_rows = [row_pos, row_rot, row_frame]
-                self._toggle_pose_rows()
+                self._pose_rows = [row_pos, row_rot]
+                # T_base_link_object = T_base_link_marker @ T_marker_object.
+                # 마커 pose 는 위의 공용 Frame 콤보로 해석된다(ArUco 측정은 보통 UR 'base').
+                with ui.HStack(height=22, spacing=6) as marker_pos_row:
+                    ui.Label("Marker pose (m)", width=110)
+                    ui.Label("x", width=10)
+                    self._fields["marker_x"] = self._num_field(0.0, width=64)
+                    ui.Label("y", width=10)
+                    self._fields["marker_y"] = self._num_field(0.0, width=64)
+                    ui.Label("z", width=10)
+                    self._fields["marker_z"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as marker_rot_row:
+                    ui.Label("Marker rotvec", width=110)
+                    ui.Label("rx", width=16)
+                    self._fields["marker_rx"] = self._num_field(0.0, width=64)
+                    ui.Label("ry", width=16)
+                    self._fields["marker_ry"] = self._num_field(0.0, width=64)
+                    ui.Label("rz", width=16)
+                    self._fields["marker_rz"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as marker_obj_pos_row:
+                    ui.Label("Object in marker (m)", width=110)
+                    ui.Label("x", width=10)
+                    self._fields["marker_obj_x"] = self._num_field(0.0, width=64)
+                    ui.Label("y", width=10)
+                    self._fields["marker_obj_y"] = self._num_field(0.0, width=64)
+                    ui.Label("z", width=10)
+                    self._fields["marker_obj_z"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as marker_obj_rot_row:
+                    ui.Label("Object rotvec", width=110)
+                    ui.Label("rx", width=16)
+                    self._fields["marker_obj_rx"] = self._num_field(0.0, width=64)
+                    ui.Label("ry", width=16)
+                    self._fields["marker_obj_ry"] = self._num_field(0.0, width=64)
+                    ui.Label("rz", width=16)
+                    self._fields["marker_obj_rz"] = self._num_field(0.0, width=64)
+                with ui.HStack(height=22, spacing=6) as marker_visual_row:
+                    ui.Label("Marker size (m)", width=110)
+                    self._fields["marker_size"] = self._num_field(
+                        ARUCO_MARKER_DEFAULT_SIZE_M, width=80)
+                    self._lock(ui.Button("Show Marker", width=110,
+                                         clicked_fn=self._on_show_aruco_marker))
+                    self._lock(ui.Button("Hide Marker", width=110,
+                                         clicked_fn=self._on_hide_aruco_marker))
+                self._marker_pose_rows = [
+                    marker_pos_row, marker_rot_row,
+                    marker_obj_pos_row, marker_obj_rot_row, marker_visual_row,
+                ]
+                self._toggle_marker_pose_rows()
+                # 배치 적용 버튼은 따로 없다 — "Load Object" 가 곧 적용이다. 예전에는
+                # "Set Object Pose" 가 별도로 있었지만 Load Object 가 그 함수를 그대로
+                # 호출해 기능이 완전히 겹쳤다(Load ⊃ Set).
+                # The app has already loaded the initial object before constructing
+                # this window. Seed direct World fields from that live stage pose.
+                self._sync_pose_fields_from_stage()
                 with ui.HStack(height=22, spacing=6):
                     ui.Label("Viewpoints (h5)", width=110)
                     self._lock(ui.StringField(model=self._h5_path_model))
@@ -1762,7 +1818,18 @@ class PipelineWindow:
         return toks
 
     def _on_load_object(self):
-        """Swap /World/target_object to the dropdown selection at its default pose."""
+        """Load/replace object geometry, then apply the selected placement mode.
+
+        이 버튼 하나가 "기하 로드"와 "배치 적용"을 다 한다 — 예전의 별도 "Set Object Pose"
+        는 여기서 부르는 것과 완전히 같은 함수라 중복이었다.
+
+        같은 물체를 다시 누를 때는 USD 재참조를 건너뛴다. ``load_target_object`` 는 물체
+        prim 을 delete 하고 다시 만드는데, viewpoint 오버레이가 그 prim **밑에**
+        (``/World/target_object/Viewpoints``) 살아서 숫자만 미세조정할 때마다 점이 통째로
+        지워졌다. 기하가 그대로면 재로드는 아무 이득이 없다.
+        """
+        import omni.usd
+
         idx = self._object_combo.model.get_item_value_model().get_value_as_int()
         obj = self._objects[idx]
         usd_path = PROJECT_ROOT / "data" / obj / "mesh" / "source.usd"
@@ -1771,47 +1838,81 @@ class PipelineWindow:
                 f"[object] '{obj}' has no source.usd - build it once, then retry:\n"
                 f"  uv run scripts/setup/build_object_usd.py --object {obj}")
             return
-        self._append_log(f"[object] loading '{obj}' ...")
-        try:
-            urctl.load_target_object(obj)
-        except Exception as e:
-            self._append_log(f"[object] load failed: {e}")
-            return
-        self._current_object = obj
-        self._range_trimesh = None  # new geometry — force range re-extract
-        # 입력칸을 방금 놓인 자리로 채운다 — 사용자가 현재 값에서 조금씩 고칠 수 있게.
-        self._sync_pose_fields_from_stage()
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
+        on_stage = bool(prim and prim.IsValid())
+        reload_geometry = not (on_stage and obj == self._current_object)
+
+        if reload_geometry:
+            self._append_log(f"[object] loading '{obj}' ...")
+            try:
+                urctl.load_target_object(obj)
+            except Exception as e:
+                self._append_log(f"[object] load failed: {e}")
+                return
+            self._current_object = obj
+            self._range_trimesh = None  # new geometry — force range re-extract
+
+        # Place it from the currently selected mode: direct base_link fields, or
+        # ArUco marker + marker-local object pose.
+        self._on_set_object_pose()
         self._append_log(
-            f"[object] loaded '{obj}'. 뷰포트 기즈모(W/E)로 옮기거나, "
-            f"'Pose (robot frame)' 에 값을 넣고 Set Pose. 그다음 Generate.")
+            f"[object] loaded '{obj}' and placed from the current fields."
+            if reload_geometry else
+            f"[object] '{obj}' already on stage - re-placed from the current fields "
+            "(geometry kept, viewpoints preserved).")
 
-    def _toggle_pose_rows(self):
-        """'Set pose by number' 체크에 따라 좌표 입력 세 줄을 보이거나 숨긴다.
-
-        펼 때 스테이지의 현재 pose 로 채워준다 — 빈 0 에서 시작하면 Set Pose 를 잘못 눌러
-        물체가 원점으로 날아간다.
-        """
-        show = bool(self._fields["obj_pose_rows"].get_value_as_bool())
+    def _toggle_marker_pose_rows(self):
+        """Switch between direct World pose and marker-relative placement."""
+        show = bool(self._fields["marker_pose_rows"].get_value_as_bool())
         for row in getattr(self, "_pose_rows", []):
             try:
-                row.visible = show
-            except Exception:  # noqa: BLE001 — best-effort, UI 갱신 실패가 치명적이지 않다
+                row.visible = not show
+            except Exception:  # noqa: BLE001 -- best-effort UI refresh
                 pass
-        if show:
-            self._sync_pose_fields_from_stage()
+        for row in getattr(self, "_marker_pose_rows", []):
+            try:
+                row.visible = show
+            except Exception:  # noqa: BLE001 -- best-effort UI refresh
+                pass
+        if show and not self._marker_pose_initialized:
+            self._sync_marker_fields_from_stage()
+        if not show:
+            self._on_hide_aruco_marker(log=False)
+
+    def _sync_marker_fields_from_stage(self):
+        """Seed marker pose from the object; marker->object starts as identity."""
+        pose = self._read_object_world_pose()
+        if pose is None:
+            return
+        pos, quat = pose
+        if self._pose_frame_is_ur_base():
+            pos, quat = swap_ur_base_frame(pos, quat)
+        rotvec = quat_to_rotvec(quat)
+        values = {
+            "marker_x": pos[0], "marker_y": pos[1], "marker_z": pos[2],
+            "marker_rx": rotvec[0], "marker_ry": rotvec[1], "marker_rz": rotvec[2],
+            "marker_obj_x": 0.0, "marker_obj_y": 0.0, "marker_obj_z": 0.0,
+            "marker_obj_rx": 0.0, "marker_obj_ry": 0.0, "marker_obj_rz": 0.0,
+        }
+        for key, value in values.items():
+            self._fields[key].set_value(float(value))
+        self._marker_pose_initialized = True
 
     def _sync_pose_fields_from_stage(self):
-        """스테이지의 현재 물체 pose 를 입력칸에 채운다 (robot frame, 아루코와 같은 형식).
+        """스테이지의 현재 물체 pose 를 직접 pose 입력칸에 채운다.
 
-        읽기(Log Pose)와 쓰기(Set Pose)가 같은 값을 보게 해서, 기즈모로 대충 맞춘 뒤
+        Read Pose와 Load Object(=배치 적용)가 같은 값을 보게 해서, 기즈모로 대충 맞춘 뒤
         숫자로 미세조정하는 흐름이 가능하다. 회전벡터로 채우므로 왕복이 무손실이다.
         """
         pose = self._read_object_world_pose()
         if pose is None:
             return
-        (px, py, pz), quat = pose
-        if self._pose_frame_is_ur_base():        # 표시도 입력과 같은 프레임으로 (왕복 일치)
-            (px, py, pz), quat = swap_ur_base_frame((px, py, pz), quat)
+        pos, quat = pose
+        if self._pose_frame_is_ur_base():      # 스테이지는 base_link — 표시 프레임으로 변환
+            pos, quat = swap_ur_base_frame(pos, quat)
+        px, py, pz = pos
         rotvec = quat_to_rotvec(quat)
         for key, value in (("obj_x", px), ("obj_y", py), ("obj_z", pz),
                            ("obj_rx", rotvec[0]), ("obj_ry", rotvec[1]),
@@ -1819,18 +1920,198 @@ class PipelineWindow:
             self._fields[key].set_value(float(value))
 
     def _pose_frame_is_ur_base(self) -> bool:
-        """입력/표시 프레임이 UR 'base' 인가 (아니면 base_link)."""
+        """Whether the pose input fields are expressed in UR ``base`` (not ``base_link``)."""
         if self._pose_frame_combo is None:
             return False
         idx = self._pose_frame_combo.model.get_item_value_model().get_value_as_int()
         return idx == 1
 
-    def _on_set_object_pose(self):
-        """입력칸의 pose 를 /World/target_object 에 적용한다.
+    def _on_pose_frame_changed(self):
+        """Re-express the entered numbers in the newly selected frame.
 
-        입력 프레임은 콤보가 정한다 — 아루코/펜던트 값을 쓸 때 'base' 를 고르면 6개 값을
-        그대로 붙여넣을 수 있고, Z 축 180° 변환은 여기서 한다(손으로 부호를 뒤집는 것은
-        회전에서 틀린다 — swap_ur_base_frame 주석 참고).
+        프레임만 바꿨을 때 칸의 숫자가 그대로면 **같은 숫자가 다른 물리 위치를 뜻하게**
+        된다 — 조용히 물체를 반대편으로 옮기는 실수다. 그래서 표시값을 변환해 물리적
+        pose 를 보존한다. base ↔ base_link 는 Rz(180°) 자기역이라 토글마다 한 번 swap 하면
+        된다. 마커 로컬 오브젝트 pose 는 프레임과 무관하므로 건드리지 않는다.
+        """
+        idx = self._pose_frame_combo.model.get_item_value_model().get_value_as_int()
+        if idx == self._pose_frame_index:
+            return
+        self._pose_frame_index = idx
+        for pos_keys, rot_keys in ((("obj_x", "obj_y", "obj_z"),
+                                    ("obj_rx", "obj_ry", "obj_rz")),
+                                   (("marker_x", "marker_y", "marker_z"),
+                                    ("marker_rx", "marker_ry", "marker_rz"))):
+            pos = np.array([self._get_field(k, float) for k in pos_keys], dtype=np.float64)
+            rotvec = np.array([self._get_field(k, float) for k in rot_keys], dtype=np.float64)
+            pos, quat = swap_ur_base_frame(pos, rotvec_to_quat(rotvec))
+            rotvec = quat_to_rotvec(quat)
+            for key, value in zip(pos_keys + rot_keys, (*pos, *rotvec)):
+                self._fields[key].set_value(float(value))
+        from isaacsim.core.utils import prims
+        if prims.is_prim_path_valid(ARUCO_MARKER_PRIM):
+            self._on_show_aruco_marker(log=False)
+        self._append_log(f"[object] pose input frame = {POSE_FRAMES[idx]} "
+                         "(entered values converted, physical pose unchanged)")
+
+    def _marker_pose_base_link_from_fields(self):
+        """Read marker UI fields and return its pose in stage/base_link coordinates."""
+        marker_pos = np.array([
+            self._get_field("marker_x", float),
+            self._get_field("marker_y", float),
+            self._get_field("marker_z", float),
+        ], dtype=np.float64)
+        marker_rotvec = np.array([
+            self._get_field("marker_rx", float),
+            self._get_field("marker_ry", float),
+            self._get_field("marker_rz", float),
+        ], dtype=np.float64)
+        marker_quat = rotvec_to_quat(marker_rotvec)
+        if self._pose_frame_is_ur_base():
+            return (*swap_ur_base_frame(marker_pos, marker_quat), marker_pos, marker_rotvec)
+        return marker_pos, marker_quat, marker_pos, marker_rotvec
+
+    def _on_show_aruco_marker(self, log: bool = True):
+        """Draw a square marker and XYZ axes at the entered marker pose."""
+        import omni.usd
+        from isaacsim.core.utils import prims
+        from pxr import Gf, UsdGeom, Vt
+
+        size = self._get_field("marker_size", float)
+        if not np.isfinite(size) or size <= 0.0:
+            self._append_log("[aruco] marker size must be a positive value in meters.")
+            return
+        marker_pos_bl, marker_quat_bl, _, _ = self._marker_pose_base_link_from_fields()
+        if prims.is_prim_path_valid(ARUCO_MARKER_PRIM):
+            prims.delete_prim(ARUCO_MARKER_PRIM)
+
+        stage = omni.usd.get_context().get_stage()
+        root = UsdGeom.Xform.Define(stage, ARUCO_MARKER_PRIM)
+        root_matrix = Gf.Matrix4d()
+        root_matrix.SetTransform(
+            Gf.Rotation(Gf.Quatd(*(float(v) for v in marker_quat_bl))),
+            Gf.Vec3d(*(float(v) for v in marker_pos_bl)),
+        )
+        root_xf = UsdGeom.Xformable(root.GetPrim())
+        root_xf.ClearXformOpOrder()
+        root_xf.AddTransformOp().Set(root_matrix)
+
+        # Marker local XY is its printed plane; +Z is the marker normal.
+        plate = UsdGeom.Cube.Define(stage, f"{ARUCO_MARKER_PRIM}/Plate")
+        plate.CreateSizeAttr(1.0)
+        plate.CreateDisplayColorAttr([Gf.Vec3f(0.02, 0.02, 0.02)])
+        scale = Gf.Matrix4d().SetScale(Gf.Vec3d(
+            float(size), float(size), ARUCO_MARKER_THICKNESS_M))
+        translate = Gf.Matrix4d().SetTranslate(Gf.Vec3d(
+            0.0, 0.0, -ARUCO_MARKER_THICKNESS_M / 2.0))
+        plate_xf = UsdGeom.Xformable(plate.GetPrim())
+        plate_xf.ClearXformOpOrder()
+        plate_xf.AddTransformOp().Set(scale * translate)
+
+        # A small asymmetric white-cell pattern makes the square recognizable as
+        # a marker and makes 90-degree rotations visible. It is a preview, not a
+        # decodable texture or a specific ArUco dictionary ID.
+        cell_size = size * 0.16
+        for index, (cx, cy) in enumerate(((-0.18, 0.18), (0.18, 0.18), (-0.18, -0.18))):
+            cell = UsdGeom.Cube.Define(stage, f"{ARUCO_MARKER_PRIM}/Cell_{index}")
+            cell.CreateSizeAttr(1.0)
+            cell.CreateDisplayColorAttr([Gf.Vec3f(0.95, 0.95, 0.95)])
+            cell_scale = Gf.Matrix4d().SetScale(Gf.Vec3d(
+                float(cell_size), float(cell_size), ARUCO_MARKER_THICKNESS_M * 0.2))
+            cell_translate = Gf.Matrix4d().SetTranslate(Gf.Vec3d(
+                float(cx * size), float(cy * size), ARUCO_MARKER_THICKNESS_M * 0.1))
+            cell_xf = UsdGeom.Xformable(cell.GetPrim())
+            cell_xf.ClearXformOpOrder()
+            cell_xf.AddTransformOp().Set(cell_scale * cell_translate)
+
+        axis_len = max(size * 0.75, 0.02)
+        axis_width = max(size * 0.025, 0.001)
+        axes = UsdGeom.BasisCurves.Define(stage, f"{ARUCO_MARKER_PRIM}/Axes")
+        axes.CreateTypeAttr(UsdGeom.Tokens.linear)
+        axes.CreateWrapAttr(UsdGeom.Tokens.nonperiodic)
+        axes.CreateCurveVertexCountsAttr(Vt.IntArray([2, 2, 2]))
+        axes.CreatePointsAttr(Vt.Vec3fArray([
+            Gf.Vec3f(0, 0, 0), Gf.Vec3f(axis_len, 0, 0),
+            Gf.Vec3f(0, 0, 0), Gf.Vec3f(0, axis_len, 0),
+            Gf.Vec3f(0, 0, 0), Gf.Vec3f(0, 0, axis_len),
+        ]))
+        axes.CreateWidthsAttr(Vt.FloatArray([axis_width] * 6))
+        axes.CreateDisplayColorPrimvar(UsdGeom.Tokens.uniform).Set(Vt.Vec3fArray([
+            Gf.Vec3f(1.0, 0.1, 0.1),
+            Gf.Vec3f(0.1, 1.0, 0.1),
+            Gf.Vec3f(0.1, 0.4, 1.0),
+        ]))
+        if log:
+            self._append_log(
+                f"[aruco] marker shown at {ARUCO_MARKER_PRIM}, size_m={size:.4f}")
+
+    def _on_hide_aruco_marker(self, log: bool = True):
+        """Remove only the ArUco marker preview; object placement is unchanged."""
+        from isaacsim.core.utils import prims
+
+        existed = prims.is_prim_path_valid(ARUCO_MARKER_PRIM)
+        if existed:
+            prims.delete_prim(ARUCO_MARKER_PRIM)
+        if log:
+            self._append_log(
+                "[aruco] marker preview hidden." if existed else
+                "[aruco] no marker preview to hide.")
+
+    def _on_set_object_from_marker(self):
+        """Apply ``T_base_link_marker @ T_marker_object`` to the target object."""
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+        marker_pos_bl, marker_quat_bl, marker_pos, marker_rotvec = \
+            self._marker_pose_base_link_from_fields()
+        from_ur = self._pose_frame_is_ur_base()
+
+        object_local_pos = np.array([
+            self._get_field("marker_obj_x", float),
+            self._get_field("marker_obj_y", float),
+            self._get_field("marker_obj_z", float),
+        ], dtype=np.float64)
+        object_local_rotvec = np.array([
+            self._get_field("marker_obj_rx", float),
+            self._get_field("marker_obj_ry", float),
+            self._get_field("marker_obj_rz", float),
+        ], dtype=np.float64)
+        object_local_quat = rotvec_to_quat(object_local_rotvec)
+        object_pos_bl, object_quat_bl = compose_pose(
+            marker_pos_bl, marker_quat_bl, object_local_pos, object_local_quat)
+
+        if not self._place_object_at(object_pos_bl, object_quat_bl):
+            return
+        if stage.GetPrimAtPath(ARUCO_MARKER_PRIM).IsValid():
+            self._on_show_aruco_marker(log=False)
+
+        marker_src = POSE_FRAMES[1] if from_ur else POSE_FRAMES[0]
+        out_rotvec = quat_to_rotvec(object_quat_bl)
+        lines = [
+            f"[object] marker ({marker_src}) pos = "
+            + " ".join(f"{v:.4f}" for v in marker_pos)
+            + "  rotvec " + " ".join(f"{v:.4f}" for v in marker_rotvec),
+            "[object] object in marker pos = "
+            + " ".join(f"{v:.4f}" for v in object_local_pos)
+            + "  rotvec " + " ".join(f"{v:.4f}" for v in object_local_rotvec),
+            "[object] composed pose (base_link) = "
+            + " ".join(f"{v:.4f}" for v in object_pos_bl)
+            + "  rotvec " + " ".join(f"{v:.4f}" for v in out_rotvec),
+        ]
+        self._append_log("\n".join(lines))
+
+    def _place_object_at(self, pos_bl, quat_bl):
+        """물체 prim 을 base_link pose 로 놓고, 거기서 파생되는 것들을 같이 갱신한다.
+
+        직접 입력 경로와 ArUco 경로가 공유한다. **support 기둥까지 여기서 다시 계산한다**:
+        기둥은 테이블 상면과 물체 바닥 사이를 채우도록 ``sync_support_to_target()`` 이
+        WALLS 안의 support dict 를 제자리에서 고쳐 만드는 파생물이다. 예전에는 여기서
+        ``TARGET_OBJECT`` 만 갱신하고 곧장 ``spawn_scene_obstacles`` 를 불러서, 기둥이 직전
+        위치·높이 그대로 다시 그려졌다(= 물체만 움직이고 기둥은 안 따라오는 증상).
+        ``load_target_object`` 는 ``apply_object_placement`` 안에서 sync 를 타서 멀쩡했기에
+        수동 배치에서만 어긋났다.
+
+        Returns True if the prim existed and was placed.
         """
         import omni.usd
         from pxr import Gf, UsdGeom
@@ -1840,83 +2121,93 @@ class PipelineWindow:
         if not prim or not prim.IsValid():
             self._append_log(
                 "[object] no target prim on stage - click 'Load Object' first.")
-            return
-
-        px = self._get_field("obj_x", float)
-        py = self._get_field("obj_y", float)
-        pz = self._get_field("obj_z", float)
-        rotvec_in = np.array([self._get_field("obj_rx", float),
-                              self._get_field("obj_ry", float),
-                              self._get_field("obj_rz", float)], dtype=np.float64)
-        pos_in = np.array([px, py, pz], dtype=np.float64)
-        quat = rotvec_to_quat(rotvec_in)
-
-        from_ur = self._pose_frame_is_ur_base()
-        pos_bl, quat_bl = (swap_ur_base_frame(pos_in, quat) if from_ur else (pos_in, quat))
-        pos_in, quat = pos_bl, quat_bl
-        raw_tilt = quat_tilt_deg(quat)
-        if self._get_field("obj_flat", bool):
-            quat = flatten_to_yaw(quat)
-        px, py, pz = (float(v) for v in pos_in)
+            return False
 
         # XFormPrim 경로(create_prim position=/orientation=)를 쓰지 않는 이유는
         # scene.load_target_object 주석 참고 — 재생 중에는 physics/Fabric 을 타서 어긋난다.
         M = Gf.Matrix4d()
         M.SetTransform(
-            Gf.Rotation(Gf.Quatd(*(float(v) for v in quat))),
-            Gf.Vec3d(float(px), float(py), float(pz)),
+            Gf.Rotation(Gf.Quatd(*(float(v) for v in quat_bl))),
+            Gf.Vec3d(*(float(v) for v in pos_bl)),
         )
         xf = UsdGeom.Xformable(prim)
         xf.ClearXformOpOrder()
         xf.AddTransformOp().Set(M)
 
-        # support 기둥은 물체 배치에서 파생된다 — config 를 맞춘 뒤 다시 그려야 화면이
-        # 플래너와 같아진다(생성 서브프로세스는 스테이지 pose 를 인자로 따로 받는다).
+        _cfg_module.TARGET_OBJECT["position"] = np.asarray(pos_bl, dtype=np.float64).copy()
+        _cfg_module.TARGET_OBJECT["rotation"] = np.asarray(quat_bl, dtype=np.float64).copy()
         try:
-            _cfg_module.TARGET_OBJECT["position"] = np.array([px, py, pz], dtype=np.float64)
-            _cfg_module.TARGET_OBJECT["rotation"] = np.asarray(quat, dtype=np.float64)
+            support = _cfg_module.sync_support_to_target()
+            self._append_log(
+                "[object] support pillar -> pos_m "
+                + " ".join(f"{v:.4f}" for v in support["position"])
+                + f"  height_m {float(support['dimensions'][2]):.4f}")
+        except ValueError as exc:
+            # 물체 바닥이 테이블 상면보다 낮으면 기둥이 성립하지 않는다. 배치 자체는
+            # 살려두되(기즈모로 계속 조정할 수 있어야 한다) 왜 안 따라왔는지는 말해준다.
+            self._append_log(f"[object] support pillar NOT updated: {exc}")
+        except Exception as exc:  # noqa: BLE001 — 시각 갱신 실패가 배치를 막지는 않는다
+            self._append_log(f"[object] support pillar update skipped: {exc}")
+
+        # 화면에 보이는 것이 곧 플래너의 충돌 월드가 되도록 장애물을 다시 그린다
+        # (생성 서브프로세스는 스테이지 pose 를 인자로 따로 받는다).
+        try:
             urctl.spawn_scene_obstacles(_cfg_module)
         except Exception as exc:  # noqa: BLE001 — 시각 갱신 실패가 배치를 막지는 않는다
-            self._append_log(f"[object] support visual refresh skipped: {exc}")
+            self._append_log(f"[object] obstacle visual refresh skipped: {exc}")
 
-        rotvec_out = quat_to_rotvec(quat)
-        yaw_deg = float(np.degrees(2.0 * np.arctan2(quat[3], quat[0])))
-        src = POSE_FRAMES[1] if from_ur else POSE_FRAMES[0]
-        lines = [f"[object] input ({src}) = "
-                 + " ".join(f"{v:.4f}" for v in (
-                     self._get_field("obj_x", float), self._get_field("obj_y", float),
-                     self._get_field("obj_z", float)))
-                 + "  rotvec " + " ".join(f"{v:.4f}" for v in rotvec_in)]
-        if from_ur:
-            lines.append("[object]   -> base_link (Z 180deg): "
-                         + " ".join(f"{v:.4f}" for v in (px, py, pz))
-                         + "  rotvec " + " ".join(f"{v:.4f}" for v in rotvec_out))
-        # 기울기는 **평평화 전** 값을 보고한다 — 그게 마커/인식을 의심할 근거다.
-        lines.append(f"[object]   measured tilt from vertical = {raw_tilt:.2f}deg"
-                     + ("  (평평)" if raw_tilt < 0.5 else "  ⚠ 마커/인식 확인"))
-        if self._get_field("obj_flat", bool) and raw_tilt >= 0.5:
-            lines.append(f"[object]   flat 옵션으로 기울기 {raw_tilt:.2f}deg 를 버렸다 "
-                         f"(yaw 만 유지). 물체가 실제로 기울어 놓인다면 체크를 해제할 것.")
-        lines.append(f"[object] pose set (base_link) = {px:.4f} {py:.4f} {pz:.4f} · "
-                     f"yaw {yaw_deg:.2f}deg")
-        self._append_log("\n".join(lines))
+        self._range_trimesh = None
+        return True
 
-    def _on_log_object_pose(self):
-        """Print the current object world orientation for prepare_object_mesh.py."""
+    def _on_set_object_pose(self):
+        """Apply the direct pose fields, or the ArUco-relative pose, per the mode."""
+        if self._fields["marker_pose_rows"].get_value_as_bool():
+            self._on_set_object_from_marker()
+            return
+
+        pos_in = np.array([
+            self._get_field("obj_x", float),
+            self._get_field("obj_y", float),
+            self._get_field("obj_z", float),
+        ], dtype=np.float64)
+        rotvec_in = np.array([self._get_field("obj_rx", float),
+                              self._get_field("obj_ry", float),
+                              self._get_field("obj_rz", float)], dtype=np.float64)
+        quat_in = rotvec_to_quat(rotvec_in)
+
+        from_ur = self._pose_frame_is_ur_base()
+        pos_bl, quat_bl = swap_ur_base_frame(pos_in, quat_in) if from_ur else (pos_in, quat_in)
+        if not self._place_object_at(pos_bl, quat_bl):
+            return
+
+        self._append_log(
+            f"[object] pose set ({POSE_FRAMES[1 if from_ur else 0]}) pos_m="
+            + " ".join(f"{v:.4f}" for v in pos_in)
+            + " rotvec_rad=" + " ".join(f"{v:.4f}" for v in rotvec_in)
+            + ("\n[object] -> base_link pos_m="
+               + " ".join(f"{v:.4f}" for v in pos_bl)
+               + " rotvec_rad=" + " ".join(f"{v:.4f}" for v in quat_to_rotvec(quat_bl))
+               if from_ur else ""))
+
+    def _on_read_object_pose(self):
+        """Read the live stage object pose, fill direct fields, and log ASCII values."""
         pose = self._read_object_world_pose()
         if pose is None:
             self._append_log("[object] no target prim on stage - Load Object first.")
             return
-        (rx, ry, rz), (w, x, y, z) = pose
-        # 기즈모로 옮긴 뒤 Log Pose 를 누르면 그 값이 입력칸에 들어온다 → 숫자로 미세조정.
+        pos, quat = pose
         self._sync_pose_fields_from_stage()
-        obj = (self._current_object or "").strip() or "<name>"
+        from_ur = self._pose_frame_is_ur_base()
+        if from_ur:      # 스테이지는 base_link — 입력칸에 채운 것과 같은 프레임으로 보고한다
+            pos, quat = swap_ur_base_frame(pos, quat)
+        rx, ry, rz = pos
+        rotvec = quat_to_rotvec(quat)
+        w, x, y, z = quat
         self._append_log(
-            f"[object] world quat (w,x,y,z) = {w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
-            f"[object] robot-frame pos = {rx:.4f} {ry:.4f} {rz:.4f}\n"
-            f"[object] bake upright: uv run scripts/setup/prepare_object_mesh.py "
-            f"reorient --object {obj} "
-            f"--world-target-quat {w:.6f} {x:.6f} {y:.6f} {z:.6f}")
+            f"[object-pose] frame={POSE_FRAMES[1 if from_ur else 0]} "
+            f"pos_m={rx:.6f} {ry:.6f} {rz:.6f}\n"
+            f"[object-pose] quat_wxyz={w:.6f} {x:.6f} {y:.6f} {z:.6f}\n"
+            "[object-pose] rotvec_rad=" + " ".join(f"{v:.6f}" for v in rotvec))
 
     def _read_object_world_pose(self):
         """World pose of /World/target_object → (pos_robot (x,y,z), quat (w,x,y,z)) or None.
