@@ -37,7 +37,9 @@ target_object:
 
 # 순서가 곧 cuRobo cuboid 순서다.
 obstacles:
-  # 테이블 — thor_table.usd 측정값 매칭. dimensions 는 회전 전과 같다(상자를 돌렸을 뿐이다).
+  # 테이블 — 높이 630mm(바닥→상면). **실측 확인 완료(2026-08-24)** — 추정치 아님.
+  #   base_link 기준 상면 z = -0.175 → 로봇 베이스 판(z=0)보다 175mm 아래.
+  # dimensions 는 셀 회전 전과 같다(상자를 돌렸을 뿐이다).
   # ⚠️ 회전은 **z-yaw 만** 허용된다: sync_support_to_target() 이 상면 높이를
   #    position[2] + dimensions[2]/2 로 구하는데, z-yaw 는 연직 크기를 안 바꿔 이 식이
   #    그대로 맞다. x/y 축으로 기울이면 조용히 틀린다(scene_config 가 거절한다).
@@ -80,6 +82,9 @@ obstacles:
 # 근거 자료: docs/reference/placement-sweep/{object}/summary.csv
 # ⚠️ 아래 값은 전부 셀 회전(+91.7612°)이 이미 적용된 값이다. 스윕 당시의 회전 전 좌표가
 #    필요하면 git 이력을 볼 것 — 회전은 강체변환이라 상대 기하는 그대로다.
+# ⚠️ **sample 만 아루코 실측 위치다.** 나머지 셋은 스윕 산출값(추정)이다. 물체가 모두 같은
+#    받침대에 놓인다면 position 도 sample 과 같아야 하지만, 확인 전이라 손대지 않았다 —
+#    z 가 서로 다른 것(0.19 / 0.359)도 스윕이 높이를 자유롭게 고른 결과다.
 object_placements:
   # 99/100, base0, scan reconfig2, 1 component(seam0) → 실제 ~2
   curved_structure:
@@ -91,10 +96,20 @@ object_placements:
     position: [-0.7360, -0.1727, 0.19]
     rotation: [0.69615576, 0.0, 0.0, 0.71789077]    # 셀 91.7612° 만
 
-  # 72/74, base0, scan reconfig0, 3 component(seam2) → 실제 ~2 + z-yaw90(scan-collision 회피)
+  # position 은 **아루코 실측**(2026-08-24). 받침대에 마커를 놓고 로봇 베이스 기준으로
+  #   측정한 값이다. 원본은 UR 컨트롤러의 'base' 프레임이라 x/y 부호를 뒤집어 base_link 로
+  #   바꿨다(두 프레임은 Z 축 180° 차이 — docs/reference/robot-camera-assets.md).
+  #   측정 원본(UR base, mm): x=1122.79 y=248.92 z=1.81
+  #   z=+0.0018 은 받침대 상면 = 물체 바닥면. 테이블 상면(-0.175)보다 176.8mm 위이고,
+  #   support 기둥 높이는 sync_support_to_target() 이 여기서 자동 계산한다(365→177mm).
+  # rotation 은 **실측이 아니라 배치 스윕값을 유지**한다. 마커를 놓을 때 방향 규칙이 없어서
+  #   측정된 yaw(-88.96°)는 물체 방향을 뜻하지 않는다. 물체 방향은 우리가 정하는 값이고,
+  #   실측해보니 도달성 차이가 크다: 같은 위치에서 yaw -178.24°=72/74 vs -88.96°=64/74.
+  #   (측정에 섞인 11° 기울기는 종이 부착 오차로 판단해 버렸다 — 평평하다고 본다.)
+  # 스윕 근거(회전 전 위치 기준): 72/74, base0, scan reconfig0, 3 component(seam2)
   sample:
-    position: [-0.7360, -0.1727, 0.19]
-    rotation: [0.01536897, 0.0, 0.0, -0.99988189]   # z-yaw 90° + 셀 91.7612°
+    position: [-1.1228, -0.2489, 0.0018]
+    rotation: [0.01536897, 0.0, 0.0, -0.99988189]   # z-yaw 90° + 셀 91.7612° (스윕값)
 
   # 70/71, base0, reconfig3, 1 component
   square_structure:
