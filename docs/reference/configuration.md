@@ -3,6 +3,28 @@
 공유 설정은 `scripts/common/config.py`, 궤적 기본값은 `scripts/core/trajectory/settings.py`,
 셀 기하(장애물·물체 배치)는 `workcell/scenes/{name}.yaml`에 있다. 문서보다 코드의 현재 값을 우선한다.
 
+## 값을 어디에 둘 것인가
+
+새 설정을 추가할 때 이 질문 하나로 정한다:
+
+> **현장을 옮기면 바뀌는가?**
+
+| | 예 → `workcell/scenes/{name}.yaml` | 아니오 → `scripts/common/config.py` |
+|---|---|---|
+| 예 | 테이블·벽·받침 위치와 치수, 물체 배치, **마운트 기둥 높이** | 카메라 WD·FOV·광축 오프셋, 로봇 config 파일명, 알고리즘 튜닝, 경로 헬퍼, 물체별 메시 예외 |
+
+`config.py` 는 씬 값을 **소유하지 않는다.** `TARGET_OBJECT` / `OBSTACLES` / `TABLE` /
+`ROBOT_MOUNT` / `WALLS` / `OBJECT_PLACEMENTS` / `MOUNT_HEIGHT` 는 빈 껍데기로 선언돼 있고
+`load_scene()` 이 YAML 에서 읽어 채운다(façade). 소비자가 YAML 을 직접 파싱하지 않게 하려는
+것이지 값이 두 곳에 있는 것이 아니다 — **같은 숫자를 두 파일에 적지 않는다.**
+
+⚠️ `MOUNT_HEIGHT` 는 `robot_mount` 장애물의 `dimensions[2]` 에서 파생된다. 기둥 높이를 바꾸려면
+YAML 의 그 상자를 고치고, **`position[2]` 도 같이 내려 상면이 z=0(로봇 베이스 판)에 오게** 한다.
+어긋나면 `scene_config` 가 로드 시점에 거절한다.
+
+⚠️ 씬을 전환할 수 있으므로(`--scene`) 씬 파생값은 **import 시점에 스냅샷하지 않는다.**
+호출 시점에 `config.MOUNT_HEIGHT` 를 읽는다.
+
 ## 카메라
 
 용어·기준점은 [camera-geometry.md](camera-geometry.md)를 단일 진실원으로 한다.

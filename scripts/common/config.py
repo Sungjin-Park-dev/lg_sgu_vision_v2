@@ -79,7 +79,11 @@ MOVEIT_JOINT_STATES_TOPIC = "/isaac_joint_states"       # Isaac→ROS (로봇 �
 # 로봇 제약 여부
 ROBOT_HAS_CONSTRAINT = True
 
-# 로봇 시작 자세 (UR 시뮬레이터 기본 자세, radian)
+# 로봇 시작 자세 (radian). **한 값이 두 역할을 겸한다** — 나중에 나눌 여지가 있다:
+#   셀 종속  : HOME 자세 (verify/motion 의 transit 브래킷, Return to HOME 목표, 스튜디오 초기 렌더)
+#   알고리즘 : GLNS 의 reference_joints (IK 후보 선택 기준), [-1] = scan 구간 wrist_3 잠금값
+# 현장에서 HOME 을 바꾸면 IK 후보 선택 기준까지 같이 바뀐다는 뜻이다. 지금은 값이 하나라
+# 여기 두지만, 도달성이 예상과 다르게 움직이면 이 결합을 먼저 의심할 것.
 # ROBOT_START_STATE = np.array([-1.67422354221344, -1.216842532157898, 1.6096495389938354, -2.0281713008880615, -1.5707969665527344, -0.031])
 # ROBOT_START_STATE = np.array([-1.6007, -1.7271, -2.203, -0.808, 1.5951, -0.031])
 
@@ -126,12 +130,13 @@ MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
 #    안의 support dict 를 제자리에서 바꾸고, build_collision_world 와 trajectory_studio 가
 #    그 참조를 들고 있기 때문이다.
 
-# 마운트 기둥 높이 (m) = 바닥 → 로봇 베이스 판. **실측 확인 완료(2026-08-24)**.
-# **프레임 오프셋이 아니다** — 좌표계는 base_link 하나뿐이다.
-# 이 값은 기둥의 치수로만 쓰인다: ROBOT_MOUNT 상자 높이, mount USD 의 z 스케일,
-# 그리고 바닥/환경을 원점 아래로 내리는 양(scene.ENV_OFFSET). 씬 파일이 단독으로
-# 바꿀 수 없는 로봇 쪽 값이라 여기 둔다.
-MOUNT_HEIGHT = 0.805
+# 마운트 기둥 높이 (m) = 바닥 → 로봇 베이스 판. **씬 YAML 이 소유한다** —
+# robot_mount 장애물의 dimensions[2] 가 곧 이 값이고, load_scene() 이 여기 채운다.
+# 예전엔 여기 리터럴 0.805 가 있어 YAML 과 같은 숫자가 두 곳에 살았다: 한쪽만 고치면
+# 기둥 상면이 로봇 베이스(z=0)와 조용히 어긋났다. 이제 출처가 하나다.
+# (프레임 오프셋이 아니다 — 좌표계는 base_link 하나뿐이고 Isaac world 도 같다.
+#  쓰이는 곳은 기둥의 치수로서다: mount USD 의 z 스케일, 바닥/환경을 내리는 양.)
+MOUNT_HEIGHT = 0.0
 
 DEFAULT_SCENE = scene_config.DEFAULT_SCENE
 ACTIVE_SCENE = None          # 현재 로드된 씬 이름

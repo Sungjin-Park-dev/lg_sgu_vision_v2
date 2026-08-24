@@ -210,6 +210,16 @@ def parse_scene(data: dict, source: str) -> dict:
             f"config.sync_support_to_target() derives the top surface from "
             f"position[2] + dimensions[2]/2, which tilting would silently break")
 
+    mount = next(o for o in obstacles if o["name"] == "robot_mount")
+    # 기둥 상면 = 로봇 베이스 판(z=0). 정의상 그래야 하고, config.MOUNT_HEIGHT 가 이
+    # 상자 높이에서 파생되므로 어긋나면 바닥·마운트 USD 배치가 통째로 밀린다.
+    mount_top = float(mount["position"][2] + mount["dimensions"][2] / 2.0)
+    if abs(mount_top) > 1e-6:
+        raise ValueError(
+            f"{source}: 'robot_mount' 상면이 z=0 (로봇 베이스 판)에 있어야 한다 — "
+            f"position[2] + dimensions[2]/2 = {mount_top:+.4f}. "
+            f"기둥 높이를 바꿀 때는 position[2] 도 같이 내려야 한다")
+
     placements = {}
     for key, raw in (data.get("object_placements") or {}).items():
         placements[key] = _parse_placement(raw, key)
@@ -292,6 +302,10 @@ def apply_to(cfg, scene: dict) -> None:
 
     cfg.WALLS[:] = [o for o in cfg.OBSTACLES
                     if o is not cfg.TABLE and o is not cfg.ROBOT_MOUNT]
+
+    # 기둥 높이는 스칼라라 in-place 갱신이 안 된다 — rebind 한다. 소비자는
+    # config.MOUNT_HEIGHT 를 **호출 시점에** 읽어야 씬 전환이 반영된다(scene.py 참고).
+    cfg.MOUNT_HEIGHT = float(cfg.ROBOT_MOUNT["dimensions"][2])
 
     # 별칭이 깨지면 계획 시점에 조용히 틀리는 대신 여기서 죽는다.
     assert isinstance(cfg.WALLS, list), "robot.py 의 `+ config.WALLS` 가 진짜 list 를 요구한다"

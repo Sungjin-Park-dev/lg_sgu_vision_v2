@@ -99,11 +99,6 @@ def _is_under_root(path: str, root: str) -> bool:
     """
     return path == root or path.startswith(root + "/")
 
-# 마운트 기둥 높이. **프레임 오프셋이 아니다** — Isaac world 원점이 곧 robot base_link 라
-# 좌표 변환이 없다(2026-08-22). 이 값은 기둥의 치수로만 쓰인다: 마운트 USD 의 z 스케일과,
-# 바닥/환경을 기둥 높이만큼 내리는 ENV_OFFSET.
-# 소유자는 config 다 — 여기서 재정의하면 조용히 갈라진다.
-MOUNT_HEIGHT = _config.MOUNT_HEIGHT
 
 # 워크셀 USD에서 측정한 치수
 MOUNT_USD_INTRINSIC_Z = 0.515
@@ -113,8 +108,11 @@ TABLE_USD_INTRINSIC_Z = 0.795
 MOUNT_XY_SCALE = 2.0
 TABLE_USD_BBOX_CENTER_X = 0.270
 TABLE_USD_BBOX_CENTER_Y = -0.002
-# 실험실 방(바닥 포함) 배치. z 는 원점(=robot base)에서 바닥까지 = -기둥높이.
-ENV_OFFSET = np.array([2.0, 0.0, -MOUNT_HEIGHT])
+# 실험실 방(바닥 포함)의 수평 배치. z 는 씬마다 달라지므로 상수로 두지 않는다 —
+# 바닥은 원점(=robot base)에서 기둥 높이만큼 아래이고, 그 높이는 씬 YAML 소유다.
+# **기둥 높이를 import 시점에 스냅샷하지 않는다**: --scene 으로 다른 셀을 로드하면
+# config.MOUNT_HEIGHT 가 바뀌는데 스냅샷은 안 따라온다.
+ENV_OFFSET_XY = np.array([2.0, 0.0])
 
 
 def parse_args(argv=None):
@@ -176,9 +174,10 @@ def load_workcell(usd_path: Path) -> None:
     # 환경(실험실 방)은 테이블과 한 덩어리인 셀이다. 셀이 로봇 기준으로 돌면 방도 같이
     # 돌아야 한다 — 안 그러면 테이블만 옮겨가 벽을 뚫는다. 시각 전용이라 충돌엔 안 들어간다.
     cell_yaw = _cell_yaw(_config)
+    mount_height = float(_config.MOUNT_HEIGHT)      # 호출 시점에 읽는다 (씬 전환 반영)
     prims.create_prim(
         ENV_PATH, "Xform",
-        position=np.array([*_yaw_xy(cell_yaw, ENV_OFFSET[:2]), ENV_OFFSET[2]]),
+        position=np.array([*_yaw_xy(cell_yaw, ENV_OFFSET_XY), -mount_height]),
         orientation=_yaw_quat(cell_yaw),
         usd_path=str(ENV_USD),
     )
@@ -187,7 +186,7 @@ def load_workcell(usd_path: Path) -> None:
         MOUNT_PATH, "Xform",
         position=np.zeros(3),
         scale=np.array([MOUNT_XY_SCALE, MOUNT_XY_SCALE,
-                        MOUNT_HEIGHT / MOUNT_USD_INTRINSIC_Z]),
+                        mount_height / MOUNT_USD_INTRINSIC_Z]),
         usd_path=str(MOUNT_USD),
     )
     table_position, table_scale, table_quat = _table_prim_transform(_config)
