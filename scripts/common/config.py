@@ -37,12 +37,6 @@ CAMERA_WORKING_DISTANCE_MM = 250.0
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
 
-# 센서 해상도 (pixels) + 픽셀 크기 (mm)
-# ⚠️ placeholder — 실제 AR0820 native 는 3848×2168 @ 2.1µm (8.08×4.55mm). camera-geometry.md 참고.
-CAMERA_RESOLUTION_W = 4096
-CAMERA_RESOLUTION_H = 3000
-CAMERA_PIXEL_SIZE_MM = 0.010
-
 # Isaac Sim 렌더/퍼블리시 해상도 — **FOV 종횡비에서 유도**한다.
 # USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산한다(verticalAperture 는 사실상
 # 무시). 그래서 해상도 비율이 FOV 비율과 다르면 퍼블리시된 이미지가 FOV_H 를 덮지 않는다 —
@@ -76,9 +70,6 @@ INSPECTION_CAMERA_INFO_TOPIC = "/inspection_camera/camera_info"
 MOVEIT_JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"   # ROS→Isaac (MoveIt 위치 명령)
 MOVEIT_JOINT_STATES_TOPIC = "/isaac_joint_states"       # Isaac→ROS (로봇 상태 피드백)
 
-# 로봇 제약 여부
-ROBOT_HAS_CONSTRAINT = True
-
 # 로봇 시작 자세 (radian). **한 값이 두 역할을 겸한다** — 나중에 나눌 여지가 있다:
 #   셀 종속  : HOME 자세 (verify/motion 의 transit 브래킷, Return to HOME 목표, 스튜디오 초기 렌더)
 #   알고리즘 : GLNS 의 reference_joints (IK 후보 선택 기준), [-1] = scan 구간 wrist_3 잠금값
@@ -103,10 +94,6 @@ ROBOT_START_STATE = np.deg2rad([3.59, -111.84, -92.06, -66.09, 90.06, -99.61])
 # 1.4753616491900843,-1.4261000792132776,2.299572706222534,-0.4354444742202759,1.4843419233905237,0.0,-0.15000295639038086,0.8933659791946411,0.222349613904953,-0.017051808536052704,-0.8432048559188843,-0.5372121930122375,0.010853501968085766
 
 # ROBOT_START_STATE = np.deg2rad([-90, -120, -60, -90, 90, 0])
-
-# 조인트 최대 움직임
-MAX_JOINT_FROM_START_STATE = np.deg2rad(90)
-
 
 
 # ============================================================================
@@ -332,29 +319,12 @@ def working_distance_error(wd_mm: float) -> str | None:
 
 
 # ============================================================================
-# GTSP 최적화 기본값
-# ============================================================================
-DEFAULT_KNN = 30
-DEFAULT_LAMBDA_ROT = 1.0
-
-# ============================================================================
 # 충돌 검사 파라미터
 # ============================================================================
 
 COLLISION_MARGIN = 0.0
 COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG = 0.05  # 1 step 당 최대 joint 변화량
 COLLISION_INTERP_EXCLUDE_LAST_JOINT = True # End-Effector 회전 무시
-
-
-# ============================================================================
-# 재계획 파라미터
-# ============================================================================
-
-REPLAN_ENABLED = True
-REPLAN_MAX_ATTEMPTS = 60
-REPLAN_TIMEOUT = 10.0  # 초
-REPLAN_INTERP_DT = 0.005
-REPLAN_TRAJOPT_TSTEPS = 32
 
 
 # ============================================================================
