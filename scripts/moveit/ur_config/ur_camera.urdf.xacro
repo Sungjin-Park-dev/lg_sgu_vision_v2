@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<!-- MoveIt/cuMotion 용 robot_description = workcell 의 카메라 달린 URDF + MoveIt 이
+     요구하는 껍데기(world 링크, ros2_control).
+
+     **기구학·카메라 기하를 여기 적지 않는다.** 전부 workcell/robot/
+     ur20_with_camera_curobo.urdf 에서 include 로 들어온다 — 그 파일이 cuRobo·Isaac·viser
+     가 쓰는 것과 같은 파일이라, 카메라를 옮기거나 clocking 을 바꿔도 MoveIt 이 자동으로
+     따라온다. 값을 복사해두면 한쪽만 고쳤을 때 두 계획기가 다른 로봇을 보게 되는데
+     그게 에러 없이 일어난다(docs/reference/robot-camera-assets.md).
+
+     launch 가 그 URDF 를 두 군데만 손봐서 넘긴다(둘 다 기하가 아니다):
+       - 실기 드라이버용 ros2_control 제거 → Isaac 은 TopicBasedSystem 이 필요하다
+       - 카메라 메시의 package:// → 절대경로. 컨테이너의 ur_description 에는
+         meshes/camera 디렉토리가 없어 그 경로가 풀리지 않는다.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur">
+  <!-- launch 가 /tmp 에 준비한 기구학 URDF (위 두 손질이 끝난 것) -->
+  <xacro:arg name="kinematics_urdf" default=""/>
+  <!-- true = Isaac(TopicBasedSystem) 용 ros2_control 을 얹는다.
+       실기 스택은 ur_robot_driver 가 자기 description 으로 ros2_control 을 올리므로
+       여기서는 필요 없다(이 description 은 move_group·cuMotion 의 모델용이다). -->
+  <xacro:arg name="isaac_control" default="false"/>
+
+  <xacro:include filename="$(arg kinematics_urdf)"/>
+
+  <!-- MoveIt/RViz 가 기준으로 삼는 world. 로봇 base 와 identity 다 — 좌표계는
+       base_link 하나이고 Isaac world 도 여기에 맞춰져 있다(config.py 프레임 규약). -->
+  <link name="world"/>
+  <joint name="world_to_base_link" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- include 는 조건부로 두지 않는다(xacro 가 include 를 선평가한다). 매크로 호출만 건다. -->
+  <xacro:include filename="ur_gated.ros2_control.xacro"/>
+  <xacro:if value="$(arg isaac_control)">
+    <xacro:ur_ros2_control name="UR_IsaacSim" tf_prefix=""/>
+  </xacro:if>
+</robot>

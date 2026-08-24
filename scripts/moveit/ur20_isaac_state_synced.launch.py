@@ -20,6 +20,8 @@
 #   (ur_type defaults to ur20)
 
 import os
+import sys
+import re
 from typing import List
 
 from ament_index_python.packages import get_package_share_directory
@@ -43,8 +45,21 @@ import yaml
 # This project's scripts/moveit directory (where the gated xacros, xrdf, relay
 # and gate scripts live).
 MOVEIT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, MOVEIT_DIR)
+import moveit_assets            # noqa: E402  (리포 자산 → MoveIt 형식 파생)
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
-GATED_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_gated.urdf.xacro')
+PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
+# robot_description = workcell 의 카메라 달린 URDF + MoveIt 껍데기(ur_camera.urdf.xacro).
+# 예전에는 카메라 없는 순정 UR20(ur_gated.urdf.xacro)을 써서, 플랜지에서 219mm 뻗어나온
+# 카메라 몸체가 MoveIt 의 충돌 모델에서 통째로 빠져 있었다.
+ROBOT_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
+# 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
+# wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
+SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
+# 카메라 스피어를 가진 xrdf. scripts/moveit/ur20.xrdf 는 카메라가 0개라 cuMotion 이
+# 카메라를 충돌에서 놓친다(tool_frames 도 tool0 이라 광축을 목표로 못 준다).
+CAMERA_XRDF = moveit_assets.SOURCE_XRDF
+KINEMATICS_URDF = '/tmp/ur20_camera_kinematics.urdf'
 ROS2_CONTROLLERS = os.path.join(MOVEIT_DIR, 'ur_config', 'ros2_controllers.yaml')
 RELAY_SCRIPT = os.path.join(MOVEIT_DIR, 'isaac_joint_command_relay.py')
 GATE_SCRIPT = os.path.join(MOVEIT_DIR, 'wait_for_joint_state_gate.py')
@@ -56,11 +71,14 @@ ACTIVE_CONTROLLER = 'scaled_joint_trajectory_controller'
 STATUS_TOPIC = f'/{ACTIVE_CONTROLLER}/follow_joint_trajectory/_action/status'
 
 
+
+
 def get_robot_description_contents(ur_type: str, output_file: str) -> str:
-    """Process the gated UR urdf.xacro to URDF xml and dump it to output_file."""
+    """Process the wrapper xacro to URDF xml and dump it to output_file."""
+    del ur_type          # 기구학은 workcell URDF 가 소유한다 (ur_type 파라미터 불필요)
     xacro_processed = xacro.process_file(
-        GATED_URDF_XACRO,
-        mappings={'ur_type': ur_type, 'name': f'{ur_type}_robot'},
+        ROBOT_URDF_XACRO,
+        mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF), 'isaac_control': 'true'},
     )
     robot_description = xacro_processed.toxml()
     with open(output_file, 'w') as f:
@@ -68,37 +86,24 @@ def get_robot_description_contents(ur_type: str, output_file: str) -> str:
     return robot_description
 
 
-def build_collision_scene(scene_name: str, output_file: str) -> str:
-    """씬 YAML → cuMotion 이 읽는 .scene 을 만들고 경로를 돌려준다 (빈 이름이면 skip).
-
-    이 파일이 없으면 MoveIt/cuMotion 은 **장애물 0개인 빈 월드**로 계획한다 — 그런데
-    StaticPlanningSceneServer 가 조용히 넘어가서 그 사실이 드러나지 않는다.
-    (다른 월드 입구인 nvblox ESDF 는 아래에서 의도적으로 꺼둔다.)
-
-    생성물을 리포에 두지 않고 매번 만드는 것은 위 URDF 덤프와 같은 이유다: 씬 YAML 이
-    단일 진실원이어야 하고, 고친 뒤 재생성을 잊으면 MoveIt 만 옛 셀을 보게 된다.
-    """
-    if not scene_name:
-        return ''
-    import importlib.util
-    builder = os.path.join(PROJECT_SCRIPTS, 'setup', 'build_moveit_scene.py')
-    spec = importlib.util.spec_from_file_location('build_moveit_scene', builder)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.write_scene_file(scene_name, output_file)
 
 
 def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     del args, kwargs
     ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type')))
     xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path')))
+    # base_link_inertia 스피어를 **월드충돌에서만** 뺀 파생 xrdf (자기충돌은 유지).
+    # 그대로 쓰면 그 스피어가 robot_mount 상면을 상시 ~16mm 파고들어 cuMotion 이
+    # 모든 시작 자세를 world collision 으로 거부한다 — prepare_xrdf 주석 참고.
+    xrdf_path = moveit_assets.prepare_xrdf('/tmp/ur20_camera_isaac.xrdf', xrdf_path)
     scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
-    scene_file = build_collision_scene(scene_name, '/tmp/lg_cell_isaac.scene')
+    scene_file = moveit_assets.build_collision_scene(scene_name, '/tmp/lg_cell_isaac.scene')
 
     moveit_config = (
         MoveItConfigsBuilder(ur_type, package_name='ur_moveit_config')
-        .robot_description(file_path=GATED_URDF_XACRO, mappings={'ur_type': ur_type})
-        .robot_description_semantic(file_path='srdf/ur.srdf.xacro', mappings={'name': 'ur'})
+        .robot_description(file_path=ROBOT_URDF_XACRO, mappings={
+            'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF), 'isaac_control': 'true'})
+        .robot_description_semantic(file_path=SRDF_XACRO, mappings={'name': 'ur'})
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
         .planning_pipelines(pipelines=['ompl'])
@@ -185,7 +190,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     # config above) forwards planning to the cuMotion ACTION SERVER, which runs as
     # composable nodes (CumotionPlanner + StaticPlanningSceneServer) brought up by
     # the package's own launch file. We include it and override args for UR20.
-    #   - urdf/xrdf: our dumped UR20 urdf + project ur20.xrdf
+    #   - urdf/xrdf: 카메라 달린 workcell URDF/xrdf 에서 파생한 /tmp 파일
+    #     (moveit_assets.prepare_kinematics_urdf / prepare_xrdf)
     #   - read_esdf_world/update_esdf_on_request = False: no nvblox here, so don't
     #     block planning waiting on an ESDF service.
     #   - joint_states_topic /joint_states: seed planner from the broadcaster, which
@@ -251,7 +257,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
 
 
 def generate_launch_description():
-    default_xrdf = os.path.join(MOVEIT_DIR, 'ur20.xrdf')
+    default_xrdf = CAMERA_XRDF
     launch_args = [
         DeclareLaunchArgument(
             'ur_type', default_value='ur20',

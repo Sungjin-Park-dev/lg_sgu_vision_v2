@@ -18,6 +18,8 @@
 #   ros2 launch scripts/moveit/ur20_real_moveit.launch.py use_mock_hardware:=false robot_ip:=<ip>
 
 import os
+import sys
+import re
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -37,40 +39,37 @@ import xacro
 import yaml
 
 MOVEIT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, MOVEIT_DIR)
+import moveit_assets            # noqa: E402  (리포 자산 → MoveIt 형식 파생)
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
-# robot_description for move_group / cuMotion (ur_description ur20 kinematics; the
-# ros2_control tag inside is irrelevant here — execution goes via the controller
-# action to the driver, not through this description).
-UR_URDF_XACRO = os.path.join(
-    get_package_share_directory('isaac_ros_cumotion_examples'), 'ur_config', 'ur.urdf.xacro')
+PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
+# robot_description for move_group / cuMotion. 기구학·카메라 기하는 workcell 의 URDF 가
+# 소유한다 — cuRobo/Isaac/viser 와 같은 파일이라 카메라를 옮겨도 자동으로 따라온다.
+# (여기 description 의 ros2_control 은 무의미하다. 실행은 ur_robot_driver 의 컨트롤러
+#  액션으로 나가지 이 description 을 거치지 않는다 — 그래서 아래에서 아예 제거한다.)
+UR_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
+# 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
+# wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
+SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
+# 카메라 스피어를 가진 xrdf. scripts/moveit/ur20.xrdf 는 카메라가 0개다.
+CAMERA_XRDF = moveit_assets.SOURCE_XRDF
+KINEMATICS_URDF = '/tmp/ur20_camera_kinematics_real.urdf'
 
 
-def build_collision_scene(scene_name: str, output_file: str) -> str:
-    """씬 YAML → cuMotion 이 읽는 .scene 을 만들고 경로를 돌려준다 (빈 이름이면 skip).
 
-    이 파일이 없으면 MoveIt/cuMotion 은 **장애물 0개인 빈 월드**로 계획한다 — 그런데
-    StaticPlanningSceneServer 가 조용히 넘어가서 그 사실이 드러나지 않는다.
-    (다른 월드 입구인 nvblox ESDF 는 아래에서 의도적으로 꺼둔다.)
 
-    생성물을 리포에 두지 않고 매번 만드는 것은 위 URDF 덤프와 같은 이유다: 씬 YAML 이
-    단일 진실원이어야 하고, 고친 뒤 재생성을 잊으면 MoveIt 만 옛 셀을 보게 된다.
-    """
-    if not scene_name:
-        return ''
-    import importlib.util
-    builder = os.path.join(PROJECT_SCRIPTS, 'setup', 'build_moveit_scene.py')
-    spec = importlib.util.spec_from_file_location('build_moveit_scene', builder)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.write_scene_file(scene_name, output_file)
 
 
 def launch_setup(context: LaunchContext, *args, **kwargs):
     del args, kwargs
     ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type')))
     xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path')))
+    # base_link_inertia 스피어를 **월드충돌에서만** 뺀 파생 xrdf (자기충돌은 유지).
+    # 그대로 쓰면 그 스피어가 robot_mount 상면을 상시 ~16mm 파고들어 cuMotion 이
+    # 모든 시작 자세를 world collision 으로 거부한다 — prepare_xrdf 주석 참고.
+    xrdf_path = moveit_assets.prepare_xrdf('/tmp/ur20_camera_real.xrdf', xrdf_path)
     scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
-    scene_file = build_collision_scene(scene_name, '/tmp/lg_cell_real.scene')
+    scene_file = moveit_assets.build_collision_scene(scene_name, '/tmp/lg_cell_real.scene')
 
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
     ur_control = IncludeLaunchDescription(
@@ -87,8 +86,9 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     # 2) move_group with cuMotion pipeline (real time).
     moveit_config = (
         MoveItConfigsBuilder(ur_type, package_name='ur_moveit_config')
-        .robot_description(file_path=UR_URDF_XACRO, mappings={'ur_type': ur_type})
-        .robot_description_semantic(file_path='srdf/ur.srdf.xacro', mappings={'name': 'ur'})
+        .robot_description(file_path=UR_URDF_XACRO,
+                           mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF)})
+        .robot_description_semantic(file_path=SRDF_XACRO, mappings={'name': 'ur'})
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
         .planning_pipelines(pipelines=['ompl'])
@@ -130,7 +130,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     urdf_path = '/tmp/collated_ur20_real_urdf.urdf'
     with open(urdf_path, 'w') as f:
         f.write(xacro.process_file(
-            UR_URDF_XACRO, mappings={'ur_type': ur_type, 'name': f'{ur_type}_robot'}).toxml())
+            UR_URDF_XACRO,
+            mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF)}).toxml())
     cumotion = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('isaac_ros_cumotion'),
@@ -178,6 +179,6 @@ def generate_launch_description():
             description='워크셀 씬 이름(workcell/scenes/<name>.yaml). '
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
-        DeclareLaunchArgument('xrdf_path', default_value=os.path.join(MOVEIT_DIR, 'ur20.xrdf')),
+        DeclareLaunchArgument('xrdf_path', default_value=CAMERA_XRDF),
     ]
     return LaunchDescription(launch_args + [OpaqueFunction(function=launch_setup)])

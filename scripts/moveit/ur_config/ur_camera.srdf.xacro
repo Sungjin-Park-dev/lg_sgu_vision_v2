@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 벤더 UR SRDF + 카메라 자기충돌 예외.
+
+     벤더 ur_moveit_config 의 SRDF 는 camera 를 전혀 모른다(문자열 0회). 그래서 플랜지에
+     볼트로 붙은 카메라가 wrist_3_link 와 닿아 있는 것을 자기충돌로 잡고, RViz 에서
+     카메라가 빨갛게 뜨며 "start state in collision" 으로 계획이 거부된다.
+
+     어느 쌍을 열지는 추측하지 않고 쟀다(40개 무작위 자세, 충돌 메시 convex hull):
+       camera_link <-> wrist_3_link   항상 겹침(0.3mm 접촉)  → 여기서 연다
+       camera_link <-> upper_arm_link 일부 겹침(최대 22mm)   → **진짜 자기충돌이라 안 연다**
+       나머지(wrist_2/wrist_1/forearm/shoulder/base) 안 겹침 → 열 이유 없다
+     upper_arm 을 같이 열면 팔을 접었을 때 카메라가 상완에 박는 것을 놓친다.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+  <xacro:arg name="name" default="ur"/>
+
+  <xacro:include filename="$(find ur_moveit_config)/srdf/ur_macro.srdf.xacro"/>
+  <xacro:ur_srdf/>
+
+  <disable_collisions link1="camera_link" link2="wrist_3_link" reason="Adjacent"/>
+</robot>
