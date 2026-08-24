@@ -38,7 +38,7 @@ workcell/robot/ur20_with_camera_curobo.urdf                  ← 운동학의 �
 | `workcell/robot/ur20_with_camera.usd` | Isaac Sim 실로봇 (물리·아티큘레이션) | `core/isaac/scene.py` |
 | `workcell/robot/ur20_with_camera_ghost.usd` | Isaac preview ghost (물리 제거) | `isaac_pipeline.py` |
 | `workcell/robot/camera/camera.usdc`, `camera_body.obj` | 카메라 몸체 메시(mount=camera_link 프레임에 pre-bake) | 위 USD 2개, URDF visual/collision, MorphIt |
-| `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의(카메라 포함) | ⚠️ **현재 아무도 안 읽는다** — 아래 참고 |
+| `workcell/robot/ur20_with_camera.xrdf` | cuMotion(ROS2) 용 로봇 정의(카메라 스피어, tool_frames) | MoveIt/cuMotion launch — `moveit_assets.prepare_xrdf` 가 파생 |
 | `scripts/common/config.py` | WD·FOV 등 **운용 파라미터** | 파이프라인 전역 |
 
 ### URDF 는 `_curobo` 하나뿐이다
@@ -55,24 +55,38 @@ MorphIt 빌더도 리포에 없어서 재생성이 불가능했다.
 내용이 필요하면 git 이력에 있다(`git log --follow -- workcell/robot/ur20_with_camera.urdf`).
 **새 URDF 를 추가하지 말 것** — 운동학의 소유자는 `_curobo.urdf` 단 하나다.
 
-### ⚠️ MoveIt 은 이 폴더의 로봇을 안 쓴다 (카메라가 없다)
+### MoveIt 도 같은 로봇을 쓴다 (2026-08-23~)
 
-`scripts/moveit/` 의 launch 둘은 `workcell/robot/` 를 전혀 참조하지 않는다:
+`scripts/moveit/` 의 launch 둘은 `workcell/` 의 원본에서 MoveIt 입력을 **파생시킨다**.
+파생은 [moveit_assets.py](../../scripts/moveit/moveit_assets.py) 가 맡고, 산출물은
+리포가 아니라 `/tmp` 에 쓴다 — 원본을 고친 뒤 재생성을 잊어 MoveIt 만 옛것을 보는 일이
+구조적으로 불가능하게(기존 xacro → `/tmp/collated_ur20_urdf.urdf` 와 같은 패턴).
 
-| launch | robot_description | xrdf |
+| MoveIt 입력 | 원본 | 파생 시 손보는 것 |
 |---|---|---|
-| `ur20_isaac_state_synced.launch.py` | `scripts/moveit/ur_config/ur_gated.urdf.xacro` | `scripts/moveit/ur20.xrdf` |
-| `ur20_real_moveit.launch.py` | `isaac_ros_cumotion_examples/ur_config/ur.urdf.xacro` (외부 패키지) | 〃 |
+| robot_description | `ur20_with_camera_curobo.urdf` (+ `ur_config/ur_camera.urdf.xacro` 껍데기) | ros2_control 교체, 카메라 메시 `package://` → 절대경로 |
+| xrdf | `ur20_with_camera.xrdf` | 월드충돌용 스피어 집합 파생(아래) |
+| planning scene | `workcell/scenes/{name}.yaml` | `.scene` 생성 |
+| SRDF | 벤더 `ur_moveit_config` + `ur_config/ur_camera.srdf.xacro` | 카메라 자기충돌 예외 1쌍 |
 
-`ur_gated.urdf.xacro` 는 `ur_description/urdf/ur_macro.xacro`(순정 UR20) + `world` +
-ros2_control 이 전부고 **카메라 링크·조인트가 없다**. `scripts/moveit/ur20.xrdf` 도
-`camera` 문자열 0 회에 `tool_frames: ["tool0"]` 이다. 즉 **MoveIt/cuMotion 은 카메라가
-충돌 모델에 없는 맨 UR20 으로 계획한다.** 정작 카메라를 가진
-`workcell/robot/ur20_with_camera.xrdf`(camera_link 스피어, `tool_frames:
-camera_optical_frame`)는 어느 launch 의 기본값도 아니고 override 하는 코드도 없다.
+**기하값은 복사하지 않는다** — xacro 가 `_curobo.urdf` 를 `include` 한다. 카메라를 옮기면
+MoveIt 이 자동으로 따라온다. 팔 기구학까지 한 파일에서 온다.
 
-그래서 카메라 기하 변경(clocking·optical_frame 이동)은 **MoveIt 에 아무 영향이 없다** —
-반영할 카메라가 거기 없기 때문이다. 이 격차 자체는 따로 다뤄야 할 문제다.
+두 군데는 값을 그대로 못 쓴다:
+
+- **`base_link_inertia` 스피어를 월드충돌에서 뺀다.** 로봇 베이스 바닥과 `robot_mount`
+  상면이 정확히 같은 평면(볼트 체결면)이라, 평평한 면을 구로 덮는 한 반드시 튀어나온다
+  (스피어 59개로도 ~16mm 남는다) → cuMotion 이 모든 시작 자세를 world collision 으로
+  거부한다. Inspection 은 [settings.py](../../scripts/core/trajectory/settings.py)
+  `COLLISION_EXCLUDE_LINKS` 로 같은 링크를 이미 빼고 있어 **그 목록을 읽어 공유한다.**
+  `self_collision` 은 원래 집합을 계속 가리킨다 — 팔이 자기 베이스에 닿는 것은 실제로
+  일어난다(무작위 자세의 4.2%). `robot_mount` 자체는 빼면 안 된다: 실제 작업 자세가
+  전부 기둥 10cm 이내에서 움직이고 무작위 자세의 36.5%가 기둥을 침투한다.
+- **SRDF 에 `camera_link` ↔ `wrist_3_link` 예외.** 벤더 SRDF 는 camera 를 모른다.
+  `upper_arm_link` 는 **열지 않는다** — 팔을 접으면 카메라가 상완에 실제로 박는다.
+
+미해결: planning group 의 tip 은 `tool0` 인데 xrdf `tool_frames` 는
+`camera_optical_frame` 이라 원리적으로 정합하지 않는다(현재 계획은 된다).
 
 
 ## 3. 카메라 프레임 체인

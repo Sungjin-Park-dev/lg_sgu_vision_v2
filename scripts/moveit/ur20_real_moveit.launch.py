@@ -51,7 +51,8 @@ UR_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
 # 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
 # wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
 SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
-# 카메라 스피어를 가진 xrdf. scripts/moveit/ur20.xrdf 는 카메라가 0개다.
+# 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 xrdf.
+# launch 가 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
 CAMERA_XRDF = moveit_assets.SOURCE_XRDF
 KINEMATICS_URDF = '/tmp/ur20_camera_kinematics_real.urdf'
 

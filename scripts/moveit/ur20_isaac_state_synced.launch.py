@@ -42,22 +42,23 @@ from moveit_configs_utils import MoveItConfigsBuilder
 import xacro
 import yaml
 
-# This project's scripts/moveit directory (where the gated xacros, xrdf, relay
-# and gate scripts live).
+# This project's scripts/moveit directory (xacros, relay/gate scripts, and the
+# moveit_assets helper that derives MoveIt inputs from workcell/).
 MOVEIT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, MOVEIT_DIR)
 import moveit_assets            # noqa: E402  (리포 자산 → MoveIt 형식 파생)
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
 PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
 # robot_description = workcell 의 카메라 달린 URDF + MoveIt 껍데기(ur_camera.urdf.xacro).
-# 예전에는 카메라 없는 순정 UR20(ur_gated.urdf.xacro)을 써서, 플랜지에서 219mm 뻗어나온
+# 기구학·카메라 기하는 그 URDF 가 소유한다 — Inspection(cuRobo/Isaac/viser)과 같은 파일이다.
+# 2026-08-23 이전에는 카메라 없는 순정 UR20 로 계획해서, 플랜지에서 219mm 뻗어나온
 # 카메라 몸체가 MoveIt 의 충돌 모델에서 통째로 빠져 있었다.
 ROBOT_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
 # 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
 # wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
 SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
-# 카메라 스피어를 가진 xrdf. scripts/moveit/ur20.xrdf 는 카메라가 0개라 cuMotion 이
-# 카메라를 충돌에서 놓친다(tool_frames 도 tool0 이라 광축을 목표로 못 준다).
+# 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 xrdf.
+# launch 가 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
 CAMERA_XRDF = moveit_assets.SOURCE_XRDF
 KINEMATICS_URDF = '/tmp/ur20_camera_kinematics.urdf'
 ROS2_CONTROLLERS = os.path.join(MOVEIT_DIR, 'ur_config', 'ros2_controllers.yaml')
