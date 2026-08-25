@@ -119,6 +119,12 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     )
     with open(cumotion_config_file_path) as f:
         cumotion_config = yaml.safe_load(f)
+    # RViz 의 Plan 애니메이션(/display_planned_path)을 켠다 — NVIDIA 배포 yaml 에
+    # response_adapters 가 없어서 cuMotion 으로 Plan 하면 계획이 안 그려진다.
+    # 자세한 이유와 "다른 어댑터는 넣지 말 것" 경고는 ur20_real_moveit.launch.py 의
+    # CUMOTION_DISPLAY_ADAPTER 주석 참고.
+    cumotion_config.setdefault('response_adapters', []).append(
+        'default_planning_response_adapters/DisplayMotionPath')
     moveit_config.planning_pipelines['planning_pipelines'].insert(0, 'isaac_ros_cumotion')
     moveit_config.planning_pipelines['isaac_ros_cumotion'] = cumotion_config
     moveit_config.planning_pipelines['default_planning_pipeline'] = 'isaac_ros_cumotion'

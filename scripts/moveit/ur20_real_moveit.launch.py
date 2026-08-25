@@ -58,6 +58,18 @@ KINEMATICS_URDF = '/tmp/ur20_camera_kinematics_real.urdf'
 # cuMotion 없이 장애물을 넣는 노드 (use_cumotion:=false 에서 쓴다).
 SCENE_PUB_SCRIPT = os.path.join(MOVEIT_DIR, 'publish_planning_scene.py')
 
+# RViz 의 Plan 애니메이션을 켜는 response adapter. RViz 는 /display_planned_path 를 보는데
+# (Planned Path 디스플레이의 Trajectory Topic), 그 토픽은 플래너가 아니라 이 어댑터가 쏜다.
+# NVIDIA 가 배포하는 isaac_ros_cumotion_planning.yaml 에는 response_adapters 키가 아예 없어서
+# cuMotion 으로 Plan 하면 계획은 나오지만 RViz 에 아무것도 안 그려진다(OMPL 쪽 yaml 에는 있다).
+# cuMotion 의 한계가 아니라 배포 설정 누락이라, 여기서 얹어준다.
+#
+# ⚠ 나머지 두 기본 어댑터(AddTimeOptimalParameterization, ValidateSolution)는 넣지 말 것.
+# cuMotion 은 자기 시간 프로파일을 붙여서 돌려준다 — 아래 allow_nonzero_velocity_at_
+# trajectory_end 를 켜는 이유가 바로 그 끝 속도다. 재파라미터화하면 그걸 갈아엎고,
+# 검증 어댑터는 같은 이유로 궤적을 거부할 수 있다. 이 어댑터는 순수 시각화라 무해하다.
+CUMOTION_DISPLAY_ADAPTER = 'default_planning_response_adapters/DisplayMotionPath'
+
 
 
 
@@ -106,6 +118,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     with open(cumotion_cfg) as f:
         cm = yaml.safe_load(f)
     if use_cumotion:
+        cm.setdefault('response_adapters', []).append(CUMOTION_DISPLAY_ADAPTER)
         moveit_config.planning_pipelines['planning_pipelines'].insert(0, 'isaac_ros_cumotion')
         moveit_config.planning_pipelines['isaac_ros_cumotion'] = cm
         moveit_config.planning_pipelines['default_planning_pipeline'] = 'isaac_ros_cumotion'
