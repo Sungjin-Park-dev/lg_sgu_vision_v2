@@ -6,24 +6,36 @@
 
 1. `sim` 또는 mock hardware로 컨트롤러 연결을 확인한다.
 2. CSV의 시작 자세와 작업 공간을 확인한다.
-3. `Move to Start`로 시작점 접근을 별도로 검증한다.
-4. `Execute Selected CSV`로 검사 구간을 실행한다.
-5. 종료 후 `Return to HOME`을 사용한다.
+3. `Plan to Start` → 고스트로 접근 경로를 확인 → `Move to Start`.
+4. `Execute Scan`으로 검사 구간을 실행한다.
+5. 종료 후 `Plan to HOME` → 확인 → `Move to HOME`.
 
 실행 중에는 Run/Pipeline 모드를 바꾸지 않는다(작업 중에는 자동으로 잠긴다). `Cancel`이 활성 상태이고 컨트롤러가 살아 있는지 확인한다.
 
 ## 버튼
 
+이동은 leg 당 두 버튼이다 — **계획하고 눈으로 본 뒤에야 움직인다**. `Move` 는 그 leg 의 계획이 대기 중일 때만 활성화된다.
+
 | 버튼 | 동작 |
 |---|---|
-| `Move to Start` | 현재 자세 → CSV 첫 행. 충돌-free 경로를 계획한 뒤 실행. 스캔·틸트 CSV 공용 |
-| `Return to HOME` | 현재 자세 → `ROBOT_START_STATE`. 〃 |
-| `Execute Selected CSV` | 선택한 CSV 실행 |
+| `Plan to Start` | 현재 자세 → CSV 첫 행의 충돌-free 경로를 계획해 **고스트에서 바로 재생한다**(실행 안 함). 스캔·틸트 CSV 공용 |
+| `Move to Start` | 그 계획을 실행한다 |
+| `Plan to HOME` | 현재 자세 → `ROBOT_START_STATE`. 〃 |
+| `Move to HOME` | 그 계획을 실행한다 |
+| `Execute Scan` | CSV path 칸의 궤적을 실행한다 |
 | `Cancel` | 계획 단계와 실행 단계 모두 중단 |
 
-HOME 이동은 **현재 자세에서** 계획하므로 로봇이 어디 있든 전 구간이 검사된다. 계획에 수 초 걸리며, 물체가 스테이지에 로드돼 있어야 한다.
+계획이 나오면 고스트가 **자동으로 한 번 재생한다.** 다시 보려면 `Preview in Simulation` 의 `Play`/슬라이더를 쓴다(스캔 궤적은 길어서 자동 재생하지 않는다 — 지금처럼 로드만 된다).
 
-**경로를 못 찾으면 움직이지 않는다**(`plan exit code = 2`). 물체를 옮기거나 자세를 바꿔 다시 시도하고, 임의 이동이 필요하면 Pipeline mode = MoveIt의 RViz Plan & Execute를 쓴다.
+계획은 고스트에만 올라간다 — **CSV path 칸은 스캔 궤적을 가리킨 채로 남는다.** 그래서 계획을 본 뒤에도 `Execute Scan` 은 여전히 스캔을 실행한다. 버튼 아래 한 줄이 지금 무엇이 대기 중인지(`planned: Move to Start — 412 wp, 6.31 s`) 보여준다.
+
+이동은 **현재 자세에서** 계획하므로 로봇이 어디 있든 전 구간이 검사된다. 계획에 수 초 걸리며, 물체가 스테이지에 로드돼 있어야 한다.
+
+**경로를 못 찾으면 계획이 남지 않는다**(`plan exit code = 2`). 물체를 옮기거나 자세를 바꿔 다시 시도하고, 임의 이동이 필요하면 Pipeline mode = MoveIt의 RViz Plan & Execute를 쓴다.
+
+### 계획이 낡으면 거부한다
+
+`Move` 는 실행 직전에 계획 당시의 입력을 다시 확인한다 — 로봇이 아직 계획의 시작점에 있는지, 목표(스캔 CSV 첫 행)와 물체 pose 가 그대로인지. 하나라도 어긋나면 **실행하지 않고** 이유를 로그에 찍은 뒤 계획을 버린다(`the robot moved since planning (max |Δ| = 42.31 deg) - re-plan from where it is now.`). 그대로 실행하면 실행기가 현재 자세와 CSV 첫 행 사이에 **계획되지 않은 직선**을 덧붙여, 미리 본 것과 다른 길을 가기 때문이다.
 
 ## 모드별 명령 소스
 

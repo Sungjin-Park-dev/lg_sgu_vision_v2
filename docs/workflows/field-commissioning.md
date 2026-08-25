@@ -141,20 +141,25 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py \
 
 **통과되면 중단** — 막혀야 할 것이 통과되면 **즉시 정지.** 충돌 모델이 안 들어간 것이다.
 
-### P5 Move to Start — 계획된 접근 · 저속
+### P5 Plan/Move to Start — 계획된 접근 · 저속
 
-Inspection 패널의 `Move to Start` 는 **현재 자세에서** 충돌-free 경로를 계획한 뒤 실행한다.
-임의 이동보다 안전하므로 첫 자동 이동으로 쓴다. 실행 전 Preview 로 먼저 본다.
+Inspection 패널의 `Plan to Start` 가 **현재 자세에서** 충돌-free 경로를 계획해 고스트로
+자동 재생한다. 경로를 눈으로 확인한 뒤(다시 보려면 `Preview in Simulation` 의 `Play`)
+`Move to Start` 로 실행한다. 임의 이동보다 안전하므로 첫 자동 이동으로 쓴다.
 
 **통과** — 계획이 나오고, 실행 경로가 Preview 와 같음
 
-**경로 없음** — `plan exit code = 2` 면 움직이지 않는다. 물체를 옮기거나 자세를 바꿔 재시도.
+**경로 없음** — `plan exit code = 2` 면 계획이 남지 않아 `Move to Start` 가 회색 그대로다.
+물체를 옮기거나 자세를 바꿔 재시도.
+
+**거부** — 계획 후 로봇이 움직였으면 `Move` 가 실행을 거부하고 재계획을 요구한다.
+`Plan to Start` 를 다시 누른다.
 
 ### P6 검사 궤적 1개 저속 완주 · 저속
 
 1. Preview 로 전 구간 확인
-2. `Execute Selected CSV` — **속도를 낮춰서**
-3. 완주 후 `Return to HOME`
+2. `Execute Scan` — **속도를 낮춰서**
+3. 완주 후 `Plan to HOME` → 확인 → `Move to HOME`
 
 **통과** — 드롭 없이 완주, 계획 시간과 실제 시간이 비슷(속도 스케일링 개입 없음)
 

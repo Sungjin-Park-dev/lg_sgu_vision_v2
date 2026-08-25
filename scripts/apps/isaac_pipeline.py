@@ -216,11 +216,20 @@ CAMERA_COLLISION_LINKS = {
     "camera_link",
 }
 
-# Execute 패널의 HOME 이동. 각 leg 는 현재 자세 → 목표를 plan_move.py 로 계획해 실행한다.
+# Execute 패널의 HOME 이동. 각 leg 는 두 버튼이다: Plan 이 현재 자세 → 목표를 plan_move.py
+# 로 계획해 고스트에 올리고, Move 가 그 계획을 실행한다. 계획 없이는 움직이지 않는다.
 HOME_TRANSITIONS = {
-    "approach": "move to start",
-    "return": "return to HOME",
+    "approach": {"goal": "scan start", "plan": "Plan to Start", "move": "Move to Start"},
+    "return": {"goal": "HOME", "plan": "Plan to HOME", "move": "Move to HOME"},
 }
+
+# Move 가 실행 직전에 "계획이 아직 유효한가" 를 재확인할 때 쓰는 허용 오차.
+# 관절 오차를 실행기의 1e-4 rad(무이동 판정)로 잡으면 sim articulation 의 정착 오차나
+# 실로봇 엔코더 노이즈에도 걸린다. 0.5° 면 실행기가 덧붙이는 직선이 최소 램프(0.5 s)
+# 안에 묻혀 무해하다 — _pending_move_ready 주석 참고.
+MOVE_PLAN_STALE_TOL_RAD = np.deg2rad(0.5)
+MOVE_PLAN_OBJ_POS_TOL_M = 1e-3
+MOVE_PLAN_OBJ_QUAT_TOL = 1e-3
 
 
 def discover_objects() -> list[str]:
@@ -970,6 +979,11 @@ class PipelineWindow:
         self._sim_executor = IsaacArticulationExecutor(
             articulation_root, JOINT_NAMES, self._append_log,
         )
+        # 계획됐지만 아직 실행되지 않은 이동 하나. None = 없음(Move 버튼 비활성).
+        # 계획 당시의 **입력을 전부** 담는다 — Move 가 실행 직전에 그것들을 다시 유도해
+        # 비교한다(_pending_move_ready). 키: transition/label/csv/start_q/target_q/
+        # object/obj_pos/obj_quat/n_wp/duration.
+        self._pending_move: Optional[dict] = None
 
         self._uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
         if not Path(self._uv).exists() and shutil.which("uv") is None:
@@ -978,8 +992,11 @@ class PipelineWindow:
         # Mutable field models (created in _build).
         self._fields: dict = {}
         self._btn_generate = None
-        self._btn_home_approach = None
-        self._btn_home_return = None
+        self._btn_plan_approach = None
+        self._btn_move_approach = None
+        self._btn_plan_return = None
+        self._btn_move_return = None
+        self._plan_status_label: Optional["ui.Label"] = None
         self._btn_cancel_gen = None
         self._btn_check_ik = None
         self._btn_cancel_ik = None
@@ -1374,28 +1391,54 @@ class PipelineWindow:
         if self._btn_publish is not None:
             # Execute works in both sim (→ Isaac) and real (→ real robot); it is
             # available in Inspection pipeline mode (locked in MoveIt mode).
-            self._btn_publish.text = (
-                "Execute on Isaac UR20" if self._mode == "sim"
-                else "Execute on Real Robot"
-            )
+            # 이름에 run-mode 를 넣지 않는다 — 이 패널의 다른 버튼들과 같은 규칙이다
+            # (아래 주석). 어디로 나가는지는 Run Mode 콤보와 "[execute] target=..." 로그가 말한다.
+            self._btn_publish.text = "Execute Scan"
             self._btn_publish.enabled = (
                 self._pipeline_mode == "inspection"
                 and not self._pub_runner.running and not self._sim_executor.running
             )
         # Unified labels across sim/real (sim naming is the standard). "Move to Start" 는
         # 스캔·틸트 공용이다 — 두 궤적이 같은 CSV 칸을 쓰므로 하는 일이 정확히 같다.
-        if self._btn_home_approach is not None:
-            self._btn_home_approach.text = "Move to Start"
-        if self._btn_home_return is not None:
-            self._btn_home_return.text = "Return to HOME"
         # _pub_runner 항이 빠져 있어 real 이동 중에 버튼이 되살아났다(기존 버그).
-        home_enabled = (
+        idle = (
             self._pipeline_mode == "inspection" and not self._gen_runner.running
             and not self._sim_executor.running and not self._pub_runner.running
         )
-        for button in (self._btn_home_approach, self._btn_home_return):
-            if button is not None:
-                button.enabled = home_enabled
+        pending = (self._pending_move or {}).get("transition")
+        for transition, plan_btn, move_btn in (
+            ("approach", self._btn_plan_approach, self._btn_move_approach),
+            ("return", self._btn_plan_return, self._btn_move_return),
+        ):
+            labels = HOME_TRANSITIONS[transition]
+            if plan_btn is not None:
+                plan_btn.text = labels["plan"]
+                plan_btn.enabled = idle
+            if move_btn is not None:
+                # Move 는 그 leg 의 계획이 대기 중일 때만 눌린다 — 계획되지 않은 이동을
+                # 코드가 원천 차단한다. 계획이 낡았는지는 누른 뒤 _pending_move_ready 가 본다.
+                move_btn.text = labels["move"]
+                move_btn.enabled = idle and pending == transition
+        self._sync_plan_status()
+
+    def _sync_plan_status(self):
+        """대기 중인 이동 계획을 한 줄로 보여준다.
+
+        CSV path 칸을 건드리지 않기로 했으므로(이동 계획은 고스트에만 올라간다) "지금 무엇이
+        계획돼 있는지" 를 볼 자리가 UI 에 따로 필요하다.
+        """
+        if self._plan_status_label is None:
+            return
+        pending = self._pending_move
+        if pending is None:
+            self._plan_status_label.text = (
+                "no planned move — press Plan to Start / Plan to HOME")
+            self._plan_status_label.style = {"color": 0xFF888888}
+            return
+        self._plan_status_label.text = (
+            f"planned: {pending['label']} — {pending['n_wp']} wp, "
+            f"{pending['duration']:.2f} s (preview loaded)")
+        self._plan_status_label.style = {"color": 0xFF33CC33}
 
     def _build_panel_scene(self):
         """활성 셀(씬) 표시 + 뷰포트에서 잰 치수를 씬 YAML 조각으로 뽑는 보조 도구.
@@ -1735,23 +1778,37 @@ class PipelineWindow:
                     self._lock(ui.Button("Browse...", width=80, clicked_fn=self._on_browse_csv))
                 # 실 카메라(InspectionCamera, ROS render product) 시각화. 스펙은 공유.
                 self._build_camera_view_ui("execute")
+                # 이동은 leg 당 두 버튼이다: 왼쪽 Plan 이 계획해 고스트에 올리고, 오른쪽
+                # Move 가 그 계획을 실행한다. Move 는 계획이 없으면 눌리지 않는다
+                # (_sync_mode_ui) — 미리보기 없이 로봇이 움직이는 일이 없다.
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_home_approach = self._lock(ui.Button(
-                        "Move to Start",
+                    self._btn_plan_approach = self._lock(ui.Button(
+                        HOME_TRANSITIONS["approach"]["plan"],
                         clicked_fn=lambda: self._on_plan_home_transition("approach")))
-                    self._btn_home_return = self._lock(ui.Button(
-                        "Return to HOME",
-                        clicked_fn=lambda: self._on_plan_home_transition("return")))
-                    # 같은 줄에 둔 이유: 이 세 버튼이 모두 '지금 로봇이 있는 자리'를
-                    # 입력으로 쓴다. 두 이동은 그 값으로 계획하고, Log Joints 는 그 값을
-                    # 보여준다 — 어디로 갈지 정하기 전에 어디에 있는지 읽는 자리.
+                    self._btn_move_approach = self._lock(ui.Button(
+                        HOME_TRANSITIONS["approach"]["move"],
+                        clicked_fn=lambda: self._on_move_home_transition("approach")))
+                    # 이 줄에 Log Joints 를 둔 이유: 이 버튼들이 모두 '지금 로봇이 있는
+                    # 자리'를 입력으로 쓴다. 계획은 그 값에서 출발하고, Log Joints 는 그
+                    # 값을 보여준다 — 어디로 갈지 정하기 전에 어디에 있는지 읽는 자리.
                     self._lock(ui.Button(
                         "Log Joints", width=100, clicked_fn=self._on_log_joints))
-                    self._btn_home_approach.enabled = True
-                    self._btn_home_return.enabled = True
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_plan_return = self._lock(ui.Button(
+                        HOME_TRANSITIONS["return"]["plan"],
+                        clicked_fn=lambda: self._on_plan_home_transition("return")))
+                    self._btn_move_return = self._lock(ui.Button(
+                        HOME_TRANSITIONS["return"]["move"],
+                        clicked_fn=lambda: self._on_move_home_transition("return")))
+                    ui.Label("", width=100)   # Log Joints 자리 — 두 줄의 버튼 폭을 맞춘다
+                # 계획이 생기기 전에는 눌리지 않는다. 이후로는 _sync_mode_ui 가 관리한다.
+                self._btn_move_approach.enabled = False
+                self._btn_move_return.enabled = False
+                self._plan_status_label = ui.Label("", height=20)
+                self._sync_plan_status()
                 with ui.HStack(height=28, spacing=6):
                     self._btn_publish = self._lock(ui.Button(
-                        "Execute Selected CSV", clicked_fn=self._on_execute))
+                        "Execute Scan", clicked_fn=self._on_execute))
                     self._btn_cancel_pub = self._lock(ui.Button(
                         "Cancel", clicked_fn=self._on_cancel_execute))
 
@@ -3375,14 +3432,16 @@ class PipelineWindow:
         self._gen_runner.start(cmd, cwd=PROJECT_ROOT, on_line=on_line, on_exit=on_exit)
 
     def _home_move_target(self, transition: str, obj: str):
-        """(목표 관절값, 라벨, 출력 CSV 경로) — 실패 시 None.
+        """(목표 관절값, 출력 CSV 경로) — 실패 시 None.
 
         목표는 오늘과 같은 곳에서 읽는다: approach = Execute CSV 첫 행, return = HOME.
         GLNS 결과 h5 에 기대지 않으므로 DP 궤적 CSV 에서도 그대로 동작한다.
+
+        순수 조회라 두 번 불러도 안전하다 — Plan 이 목표를 정할 때 한 번, Move 가 실행 직전
+        "그때와 같은 목표인가" 를 확인할 때 한 번(_pending_move_ready).
         """
         from common import config as _config
 
-        label = HOME_TRANSITIONS[transition]
         csv = self._csv_path_model.get_value_as_string().strip()
         if transition == "approach":
             if not csv or not Path(csv).exists():
@@ -3402,16 +3461,16 @@ class PipelineWindow:
         # 없으면 물체 폴더까지만. 어느 경우든 data/{object}/ 밖으로 나가지 않는다.
         name = f"home_move_{transition}.csv"
         if csv and Path(csv).parent.is_dir():
-            return target_q, label, Path(csv).parent / name
+            return target_q, Path(csv).parent / name
         _, n_vp = self._parse_h5_meta(self._h5_path_model.get_value_as_string().strip())
         if n_vp is not None:
-            return target_q, label, _config.get_trajectory_path(obj, n_vp, filename=name)
-        return target_q, label, _config.DATA_ROOT / obj / "trajectory" / name
+            return target_q, _config.get_trajectory_path(obj, n_vp, filename=name)
+        return target_q, _config.DATA_ROOT / obj / "trajectory" / name
 
     def _on_log_joints(self):
         """로봇의 현재 관절값을 로그에 찍는다 — run-mode 와 무관하게 '진짜 지금 자세'.
 
-        Move to Start / Return to HOME / Generate Tilt 가 계획 입력으로 쓰는 값과 **같은
+        Plan to Start / Plan to HOME / Generate Tilt 가 계획 입력으로 쓰는 값과 **같은
         소스**다(IsaacArticulationExecutor.current_joints). 그 셋은 이 값을 CLI 인자로만
         흘려보내서 사람이 볼 데가 없었다 — 확인만 하고 싶을 때 여기서 읽는다.
         """
@@ -3438,21 +3497,22 @@ class PipelineWindow:
             f"[joints] max |Δ| vs HOME (config.ROBOT_START_STATE) = {home_gap_deg:.2f} deg"
             + ("  → at HOME" if home_gap_deg < 0.05 else ""))
         # 붙여넣기용. publish.py 가 --joint-target 을 '=' 형태로 받는 이유는
-        # _plan_and_execute_move 의 argparse 음수 휴리스틱 주석 참고.
+        # _plan_move 의 argparse 음수 휴리스틱 주석 참고.
         lines.append("[joints] publish.py --joint-target="
                      + repr(",".join(f"{v:.6f}" for v in q)))
         self._append_log("\n".join(lines))
 
     def _on_plan_home_transition(self, transition: str):
-        """HOME↔스캔시작을 **충돌-free 로 계획한 뒤** 실행한다.
+        """HOME↔스캔시작을 **충돌-free 로 계획해 고스트에 올린다** — 실행하지는 않는다.
 
         현재 자세에서 계획하는 게 핵심이다. 고정된 자세(HOME/스캔끝)에서 시작하는 궤적을
         실행하면, 두 실행기 모두 현재 자세→CSV 첫 행 사이에 **계획되지 않은 직선**을 덧붙인다
         (IsaacArticulationExecutor.start / publish.build_interpolated_points). 시작점이 곧
         현재 자세면 그 구간이 아예 생기지 않아 전 구간이 계획된 이동이 된다.
 
-        2단계 체인이다: plan_move.py(_gen_runner) → 성공 시 _start_csv_execution.
-        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel(Generate) 이 그대로 적용된다.
+        계획은 _pending_move 에 남고 고스트로 재생된다. 실제로 움직이는 것은 짝이 되는
+        Move 버튼(_on_move_home_transition)이다 — 사람이 궤적을 보고 승인하는 자리.
+        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel 이 그대로 적용된다.
         """
         if transition not in HOME_TRANSITIONS:
             raise ValueError(f"unknown HOME transition: {transition}")
@@ -3464,10 +3524,110 @@ class PipelineWindow:
         target = self._home_move_target(transition, obj)
         if target is None:
             return
-        target_q, label, out_csv = target
-        self._plan_and_execute_move(
-            tag="home", obj=obj, pos_robot=pos_robot, quat_wxyz=quat_wxyz,
-            target_q=target_q, label=label, out_csv=out_csv)
+        target_q, out_csv = target
+        self._plan_move(
+            tag="home", transition=transition, obj=obj, pos_robot=pos_robot,
+            quat_wxyz=quat_wxyz, target_q=target_q, out_csv=out_csv)
+
+    def _on_move_home_transition(self, transition: str):
+        """대기 중인 계획을 실행한다 — 계획이 없거나 낡았으면 움직이지 않는다.
+
+        계획 시점과 실행 시점 사이에 로봇이나 씬이 바뀌었을 수 있다. 그 확인은
+        _pending_move_ready 가 한다(무효화 훅 대신 지연 검증을 쓰는 이유는 거기 주석 참고).
+        """
+        if transition not in HOME_TRANSITIONS:
+            raise ValueError(f"unknown HOME transition: {transition}")
+        if (self._gen_runner.running or self._sim_executor.running
+                or self._pub_runner.running):
+            self._append_log("[home] a plan or move is already running")
+            return
+
+        pending = self._pending_move_ready(transition)
+        if pending is None:
+            self._sync_mode_ui()        # 계획이 버려졌으면 Move 버튼도 같이 회색으로
+            return
+        label = pending["label"]
+
+        # 고스트는 계획을 보여주는 물건이다 — 진짜 로봇이 그 길을 가는 동안 둘이 겹쳐 보이면
+        # 어느 쪽이 실물인지 헷갈린다 (_on_execute 와 같은 처리).
+        if self._preview.loaded:
+            self._preview.stop()
+        self._set_busy(self._btn_cancel_pub)
+
+        def finished(rc: int):
+            # 계획은 한 번 쓰면 끝이다. 이동이 끝난 시점의 자세는 계획의 시작점이 아니므로
+            # 그대로 두면 다음 클릭이 곧바로 stale 로 걸린다 — 애초에 지운다.
+            self._pending_move = None
+            self._append_log(f"[home] {label} exit code = {rc}")
+            self._clear_busy()
+
+        self._append_log(f"[home] {label}: executing the planned route {pending['csv']}")
+        if not self._start_csv_execution(str(pending["csv"]), tag="home",
+                                         on_done=finished):
+            self._clear_busy()
+
+    def _pending_move_ready(self, transition: str):
+        """대기 중인 계획이 지금도 유효하면 그 dict 를, 아니면 None(계획을 버린다).
+
+        계획을 무효화해야 할 사건은 많다 — 로봇이 움직였다, 스캔 CSV 를 바꿨다, 기즈모로
+        물체를 옮겼다, 새로 Generate 했다… 그 모든 지점에 무효화 훅을 심는 대신 **계획의
+        입력을 통째로 기억했다가 실행 직전에 다시 유도해 비교한다**. 훅 하나를 빠뜨려
+        낡은 계획이 살아남는 실패 모드가 생기지 않는다.
+
+        특히 (3) 이 중요하다: CSV 첫 행이 현재 자세와 다르면 두 실행기 모두 그 사이에
+        **계획되지 않은 직선**을 덧붙인다(IsaacArticulationExecutor.start /
+        publish.build_interpolated_points). 미리 본 것과 다른 길을 가는 셈이라 거부한다.
+        """
+        pending = self._pending_move
+        labels = HOME_TRANSITIONS[transition]
+
+        def reject(reason: str):
+            self._append_log(f"[home] {labels['move']}: {reason}")
+            self._pending_move = None
+            return None
+
+        # (1) 그 leg 의 계획이 있는가
+        if pending is None or pending["transition"] != transition:
+            self._append_log(
+                f"[home] {labels['move']}: no planned route - press "
+                f"\"{labels['plan']}\" first.")
+            return None
+        # (2) 산출물이 아직 있는가
+        if not Path(pending["csv"]).exists():
+            return reject(f"the planned CSV is gone ({pending['csv']}) - re-plan.")
+        # (3) 로봇이 계획의 시작점에 그대로 있는가
+        try:
+            current_q = self._sim_executor.current_joints()
+        except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
+            return reject(f"could not read the current joint state: {exc}")
+        gap = float(np.max(np.abs(current_q - pending["start_q"])))
+        if gap > MOVE_PLAN_STALE_TOL_RAD:
+            return reject(
+                f"the robot moved since planning (max |Δ| = {np.rad2deg(gap):.2f} deg) "
+                "- re-plan from where it is now.")
+        # (4) 목표가 그대로인가 (approach 는 스캔 CSV 첫 행이 목표다 — CSV 를 바꾸면 달라진다)
+        target = self._home_move_target(transition, pending["object"])
+        if target is None:
+            return reject("the planning target is no longer readable - re-plan.")
+        if float(np.max(np.abs(target[0] - pending["target_q"]))) > MOVE_PLAN_STALE_TOL_RAD:
+            return reject(
+                f"the {labels['goal']} target changed since planning - re-plan.")
+        # (5) 충돌 세계가 그대로인가 — 같은 물체가, 같은 자리에.
+        if (self._current_object or "").strip() != pending["object"]:
+            return reject(
+                f"the loaded object changed ({pending['object']} -> "
+                f"{self._current_object}) - re-plan.")
+        pose = self._read_object_world_pose()
+        if pose is None:
+            return reject("the target object is gone from the stage - re-plan.")
+        quat = np.asarray(pose[1], dtype=np.float64)
+        # q 와 -q 는 같은 회전이다(double cover) — 부호가 뒤집힌 것만으로 거부하지 않는다.
+        quat_gap = min(float(np.max(np.abs(quat - pending["obj_quat"]))),
+                       float(np.max(np.abs(quat + pending["obj_quat"]))))
+        if (float(np.max(np.abs(np.asarray(pose[0]) - pending["obj_pos"])))
+                > MOVE_PLAN_OBJ_POS_TOL_M or quat_gap > MOVE_PLAN_OBJ_QUAT_TOL):
+            return reject("the target object moved since planning - re-plan.")
+        return pending
 
     def _move_context(self, tag: str):
         """이동 계획의 공통 전제 → (object, pos_robot, quat_wxyz) 또는 None.
@@ -3488,45 +3648,82 @@ class PipelineWindow:
             return None
         return obj, pose[0], pose[1]
 
-    def _plan_and_execute_move(self, *, tag, obj, pos_robot, quat_wxyz,
-                               target_q, label, out_csv):
-        """현재 자세 → target_q 를 계획해 실행한다. HOME 이동과 tilt 진입이 공유한다.
+    def _plan_move(self, *, tag, transition, obj, pos_robot, quat_wxyz,
+                   target_q, out_csv):
+        """현재 자세 → target_q 를 계획해 **고스트에 올린다**. 실행은 Move 버튼이 한다.
 
-        2단계 체인이다: plan_move.py(_gen_runner) → 성공 시 _start_csv_execution.
-        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel(Generate) 이 그대로 적용된다.
+        성공하면 계획의 입력 전부를 _pending_move 에 남긴다 — 실행 직전에 그것들이 아직
+        유효한지 다시 확인하기 위해서다(_pending_move_ready).
+        _gen_runner 를 쓰므로 계획 중 버튼 비활성화와 Cancel 이 그대로 적용된다.
         """
+        labels = HOME_TRANSITIONS[transition]
         try:
             current_q = self._sim_executor.current_joints()
         except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비
             self._append_log(f"[{tag}] could not read the current joint state: {exc}")
             return
 
+        # 새 계획을 세우는 순간 옛 계획은 무효다 — 고스트에 남은 옛 궤적과 Move 버튼을
+        # 함께 거둔다. 실패로 끝나도 이 상태(계획 없음)가 정답이다.
+        self._pending_move = None
         if self._preview.loaded:
             self._preview.stop()
-        # 계획과 실행을 한 덩어리로 취소할 수 있게, 두 단계 모두 Execute 패널의 Cancel 을
-        # 살려둔다 — 사용자가 누른 버튼(Move to Start / Return to HOME)과 같은 패널이라
-        # 어디를 눌러야 멈추는지 찾을 필요가 없다. 어느 러너를 멈출지는
+        # 계획 중에도 Execute 패널의 Cancel 을 살려둔다 — 사용자가 누른 버튼(Plan to Start
+        # 등)과 같은 패널이라 어디를 눌러야 멈추는지 찾을 필요가 없다. 어느 러너를 멈출지는
         # _on_cancel_execute 가 단계를 보고 고른다.
         self._set_busy(self._btn_cancel_pub)
 
-        def finished(rc: int):
-            self._append_log(f"[{tag}] {label} exit code = {rc}")
-            self._clear_busy()
-
         def on_planned(rc: int):
             if self._gen_runner.cancelled:
-                self._append_log(f"[{tag}] {label}: planning cancelled - not moving.")
+                self._append_log(f"[{tag}] {labels['plan']}: planning cancelled.")
                 self._clear_busy()
                 return
             self._append_log(f"[{tag}] plan exit code = {rc}")
             if rc != 0 or not out_csv.exists():
                 self._append_log(
-                    f"[{tag}] {label}: no collision-free route - not moving.")
+                    f"[{tag}] {labels['plan']}: no collision-free route.")
                 self._clear_busy()
                 return
-            self._append_log(f"[{tag}] executing planned {label}: {out_csv}")
-            if not self._start_csv_execution(str(out_csv), tag=tag, on_done=finished):
+            # 시작점은 요청에 쓴 current_q 가 아니라 **산출된 CSV 의 첫 행**으로 잡는다.
+            # resample 로 미세하게 달라질 수 있고, 실행기가 실제로 보는 값이 그쪽이다.
+            try:
+                solutions, times = load_trajectory_csv(str(out_csv))
+            except Exception as exc:  # noqa: BLE001 — 산출물이 깨졌다
+                self._append_log(f"[{tag}] planned CSV load failed: {exc}")
                 self._clear_busy()
+                return
+            duration = float(times[-1] - times[0])
+            self._pending_move = {
+                "transition": transition,
+                "label": labels["move"],
+                "csv": out_csv,
+                "start_q": np.asarray(solutions[0], dtype=np.float64),
+                "target_q": np.asarray(target_q, dtype=np.float64),
+                "object": obj,
+                "obj_pos": np.asarray(pos_robot, dtype=np.float64),
+                "obj_quat": np.asarray(quat_wxyz, dtype=np.float64),
+                "n_wp": int(len(solutions)),
+                "duration": duration,
+            }
+            # 고스트에만 올린다 — CSV path 칸은 스캔 궤적을 가리킨 채로 둔다. 그래야
+            # "Execute Scan" 이 계속 스캔을 실행한다 (_on_generate 와 같은 3줄 패턴).
+            # 여기서 바로 재생까지 한다: 이 버튼의 목적이 "계획을 보는 것"이라 Play 를
+            # 한 번 더 누르게 할 이유가 없다. pump 가 다음 프레임부터 step_preview 로
+            # 굴려준다. 한 번 재생하고 멈춘다 — 다시 보려면 Preview 패널의 Play.
+            # (스캔 궤적을 올리는 _on_generate 는 그대로 둔다. 수십 초~몇 분짜리라
+            #  자동 재생이 거슬린다.)
+            if self._preview.load(str(out_csv)):
+                self._update_slider_bounds()
+                self._refresh_status()
+                self._preview.play()
+            self._append_log(
+                f"[{tag}] {labels['plan']}: {len(solutions)} wp, {duration:.2f} s "
+                f"-> {out_csv}")
+            self._append_log(
+                f"[{tag}] playing the plan on the ghost - replay with Play in \"Preview "
+                f"in Simulation\", then \"{labels['move']}\" to run it for real. "
+                "(The CSV path field still points at the scan trajectory.)")
+            self._clear_busy()
 
         # NB: --from/to-joints 는 =<v> (공백 아님). 관절 문자열은 첫 값이 음수면 '-1.5,...'
         # 로 시작하는데, argparse 의 음수 휴리스틱은 순수 숫자 하나("-1.5")만 값으로 봐주고
@@ -3544,7 +3741,8 @@ class PipelineWindow:
             f"--output {str(out_csv)!r}"
         )
         self._append_log(
-            f"[{tag}] {label}: planning a collision-free route from the current pose...")
+            f"[{tag}] {labels['plan']}: planning a collision-free route from the "
+            f"current pose to the {labels['goal']}...")
         self._append_log(f"[{tag}] $ " + shell)
         self._gen_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
                                on_line=self._append_log, on_exit=on_planned)
@@ -4046,6 +4244,11 @@ class PipelineWindow:
         # preview is paused so two robot poses cannot overlap in the viewport.
         if self._preview.loaded:
             self._preview.stop()
+
+        # 스캔을 실행하면 로봇은 확실히 계획의 시작점을 떠난다 — 대기 중이던 이동 계획을
+        # 지금 버려서 Move 버튼이 곧바로 회색이 되게 한다. (판단의 진실원은 여전히
+        # _pending_move_ready 다. 이건 눌러봐야 거절당하는 것을 미리 보여줄 뿐이다.)
+        self._pending_move = None
 
         self._set_busy(self._btn_cancel_pub)
 
