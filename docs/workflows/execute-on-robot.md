@@ -27,7 +27,18 @@
 
 계획이 나오면 고스트가 **자동으로 한 번 재생한다.** 다시 보려면 `Preview in Simulation` 의 `Play`/슬라이더를 쓴다(스캔 궤적은 길어서 자동 재생하지 않는다 — 지금처럼 로드만 된다).
 
-계획은 고스트에만 올라간다 — **CSV path 칸은 스캔 궤적을 가리킨 채로 남는다.** 그래서 계획을 본 뒤에도 `Execute Scan` 은 여전히 스캔을 실행한다. 버튼 아래 한 줄이 지금 무엇이 대기 중인지(`planned: Move to Start — 412 wp, 6.31 s`) 보여준다.
+### 두 패널이 서로 다른 파일을 가리킬 때
+
+계획은 고스트에만 올라간다 — **CSV path 칸은 스캔 궤적을 가리킨 채로 남는다.** 그 칸 하나를 Preview 와 Execute 가 공유하고, 그것이 곧 `Execute Scan` 의 대상이자 `Plan to Start` 의 목표(첫 행)이기 때문이다. 계획 출력으로 덮어쓰면 `Execute Scan` 이 스캔 대신 이동을 실행하고, `Plan to Start` 가 자기 산출물을 목표로 삼는다.
+
+그래서 계획을 재생하는 동안에는 **바가 트는 파일과 CSV path 칸이 다르다.** 숨기지 않는다 — Preview 바의 상태 줄이 지금 재생 중인 파일 이름을 적는다:
+
+```
+t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv    ← 바가 트는 것
+CSV path: .../trajectory/74/trajectory.csv                        ← Execute Scan 대상
+```
+
+`Load & Preview` 로 스캔을 다시 올리면 `playing:` 도 따라 바뀌므로 이 줄은 언제나 사실이다. 버튼 아래 한 줄은 지금 무엇이 실행 대기 중인지 따로 말한다(`planned: Move to Start - 412 wp, 6.31 s`).
 
 이동은 **현재 자세에서** 계획하므로 로봇이 어디 있든 전 구간이 검사된다. 계획에 수 초 걸리며, 물체가 스테이지에 로드돼 있어야 한다.
 

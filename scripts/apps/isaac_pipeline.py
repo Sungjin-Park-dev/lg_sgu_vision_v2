@@ -690,6 +690,11 @@ class PreviewState:
     t: float = 0.0
     playing: bool = False
     dof_perm: Optional[list[int]] = None
+    # 이 재생기가 실제로 들고 있는 CSV. Preview 패널의 "CSV path" 칸과 다를 수 있다 —
+    # Plan to Start / Plan to HOME 은 그 칸을 스캔 궤적에 둔 채로(Execute Scan 이 계속
+    # 스캔을 실행해야 한다) 이동 계획만 고스트에 올린다. 그 어긋남이 화면에서 안 보이면
+    # 사람이 속으므로 상태 라벨이 이 값을 적는다(_refresh_status).
+    source: str = ""
 
 
 class PreviewPlayer:
@@ -724,10 +729,11 @@ class PreviewPlayer:
             t=0.0,
             playing=False,
             dof_perm=None,
+            source=csv_path,
         )
         self._log(
             f"[preview] Loaded {len(solutions)} waypoints, "
-            f"duration={self._state.duration:.2f}s"
+            f"duration={self._state.duration:.2f}s from {Path(csv_path).name}"
         )
         set_ghost_visible(self._ghost_root, True)
         self._apply()
@@ -1432,12 +1438,14 @@ class PipelineWindow:
         pending = self._pending_move
         if pending is None:
             self._plan_status_label.text = (
-                "no planned move — press Plan to Start / Plan to HOME")
+                "no planned move - press Plan to Start / Plan to HOME")
             self._plan_status_label.style = {"color": 0xFF888888}
             return
+        # "미리보기에 올라와 있다"는 말은 여기 쓰지 않는다 — Load & Preview 로 스캔을 다시
+        # 올리면 거짓이 된다. 지금 무엇이 재생 중인지는 Preview 바가 파일명으로 말한다.
         self._plan_status_label.text = (
-            f"planned: {pending['label']} — {pending['n_wp']} wp, "
-            f"{pending['duration']:.2f} s (preview loaded)")
+            f"planned: {pending['label']} - {pending['n_wp']} wp, "
+            f"{pending['duration']:.2f} s")
         self._plan_status_label.style = {"color": 0xFF33CC33}
 
     def _build_panel_scene(self):
@@ -1475,7 +1483,7 @@ class PipelineWindow:
             selection = omni.usd.get_context().get_selection()
             paths = list(selection.get_selected_prim_paths())
         except Exception as exc:      # Kit 버전마다 selection API 가 다르다 — 죽지 않고 안내만
-            self._append_log(f"[scene] selection API unavailable ({exc}) — check the Stage tree")
+            self._append_log(f"[scene] selection API unavailable ({exc}) - check the Stage tree")
             return
         if not paths:
             self._append_log("[scene] select a prim in the viewport or Stage tree first.")
@@ -1517,12 +1525,12 @@ class PipelineWindow:
             name = _SCENE_PRIM_NAME_RE.sub("_", prim.GetName()).strip("_").lower() or "obstacle"
             snippet = scene_config.obstacle_yaml_snippet(name, position, dims, rotation)
             if np.any(np.asarray(dims) <= 0.0):
-                self._append_log(f"[scene] {path}: zero-sized — prim may have no geometry")
+                self._append_log(f"[scene] {path}: zero-sized - prim may have no geometry")
             if urctl._is_under_root(str(path), urctl.STAGE_PATH) or \
                     urctl._is_under_root(str(path), GHOST_ROOT_PATH):
                 self._append_log(f"[scene] note: {path} is part of the robot, not an obstacle")
             self._append_log(
-                f"[scene] {path} → paste into obstacles: in workcell/scenes/{self._scene}.yaml\n"
+                f"[scene] {path} -> paste into obstacles: in workcell/scenes/{self._scene}.yaml\n"
                 f"{snippet}")
 
     def _build_panel_object(self):
@@ -1762,7 +1770,7 @@ class PipelineWindow:
                     self._slider_model = ui.SimpleFloatModel(0.0)
                     self._slider = self._lock(ui.FloatSlider(self._slider_model, min=0.0, max=1.0))
                     self._slider.model.add_value_changed_fn(self._on_slider)
-                self._status_label = ui.Label("t=0.00s / 0.00s  (no CSV)")
+                self._status_label = ui.Label("t=0.00s / 0.00s  (nothing loaded)")
 
     def _build_panel_publish(self):
         ui = self._ui
@@ -1814,8 +1822,8 @@ class PipelineWindow:
 
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
-            return "● REAL mode — executes the CSV on the live robot."
-        return "● SIM mode — executes the CSV on the Isaac UR20 articulation."
+            return "* REAL mode - executes the CSV on the live robot."
+        return "* SIM mode - executes the CSV on the Isaac UR20 articulation."
 
     def _build_log(self):
         ui = self._ui
@@ -3494,8 +3502,8 @@ class PipelineWindow:
         lines.append("[joints] rad = [" + ", ".join(f"{v:.6f}" for v in q) + "]")
         lines.append("[joints] deg = [" + ", ".join(f"{v:.2f}" for v in deg) + "]")
         lines.append(
-            f"[joints] max |Δ| vs HOME (config.ROBOT_START_STATE) = {home_gap_deg:.2f} deg"
-            + ("  → at HOME" if home_gap_deg < 0.05 else ""))
+            f"[joints] max |delta| vs HOME (config.ROBOT_START_STATE) = {home_gap_deg:.2f} deg"
+            + ("  -> at HOME" if home_gap_deg < 0.05 else ""))
         # 붙여넣기용. publish.py 가 --joint-target 을 '=' 형태로 받는 이유는
         # _plan_move 의 argparse 음수 휴리스틱 주석 참고.
         lines.append("[joints] publish.py --joint-target="
@@ -3603,7 +3611,7 @@ class PipelineWindow:
         gap = float(np.max(np.abs(current_q - pending["start_q"])))
         if gap > MOVE_PLAN_STALE_TOL_RAD:
             return reject(
-                f"the robot moved since planning (max |Δ| = {np.rad2deg(gap):.2f} deg) "
+                f"the robot moved since planning (max |delta| = {np.rad2deg(gap):.2f} deg) "
                 "- re-plan from where it is now.")
         # (4) 목표가 그대로인가 (approach 는 스캔 CSV 첫 행이 목표다 — CSV 를 바꾸면 달라진다)
         target = self._home_move_target(transition, pending["object"])
@@ -4204,17 +4212,26 @@ class PipelineWindow:
             self._updating_slider = False
 
     def _refresh_status(self):
+        """재생 위치 + **지금 고스트가 들고 있는 파일 이름**.
+
+        파일명을 적는 이유: 이 바는 위 "CSV path" 칸을 재생하는 게 보통이지만, Plan to
+        Start / Plan to HOME 을 누르면 그 칸을 그대로 둔 채(Execute Scan 이 계속 스캔을
+        가리켜야 한다) 이동 계획이 올라온다. 그 어긋남을 숨기지 않고 여기에 적는다 —
+        Load & Preview 로 스캔을 다시 올리면 이름도 따라 바뀌므로 항상 사실이다.
+        """
         if self._status_label is None:
             return
         s = self._preview.state
         if not self._preview.loaded:
-            self._status_label.text = "t=0.00s / 0.00s  (no CSV)"
+            self._status_label.text = "t=0.00s / 0.00s  (nothing loaded)"
             return
         # Find the nearest waypoint index for display.
         i = int(np.searchsorted(s.times - s.times[0], s.t))
         i = max(0, min(i, len(s.times) - 1))
+        name = Path(s.source).name if s.source else "?"
         self._status_label.text = (
             f"t={s.t:.2f}s / {s.duration:.2f}s  (wp {i}/{len(s.times)-1})"
+            f"  playing: {name}"
         )
 
     def step_preview(self, dt: float):
