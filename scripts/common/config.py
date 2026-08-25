@@ -164,6 +164,7 @@ def scene_snapshot() -> dict:
     return scene_config.snapshot({
         "name": ACTIVE_SCENE,
         "target_object": TARGET_OBJECT,
+        "environment": ENVIRONMENT,
         "obstacles": OBSTACLES,
         "object_placements": OBJECT_PLACEMENTS,
     })
