@@ -148,9 +148,18 @@ RUN curl -fsSL "https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_VERSION
 # JULIA_DEPOT_PATH: keep the Julia depot on the bind-mounted /workspace so it
 # survives container recreation (like .venv and ros2_overlay). Set as ENV, not
 # in a shell rc — `docker exec ... bash script.sh` does not read rc files.
+#
+# UV_CACHE_DIR: same reasoning, and it matters most on a fresh site machine.
+# `uv sync` pulls ~25 GB of Isaac Sim wheels; the default cache (/root/.cache/uv)
+# lives INSIDE the container, so recreating it — routine while troubleshooting —
+# throws that away and the next sync re-downloads everything. On /workspace the
+# cache survives, so a sync interrupted by a flaky network resumes cheaply.
+# Bonus: cache and .venv now share a filesystem, so uv hardlinks instead of
+# copying (faster, and it stops storing the same wheels twice).
 ENV OMNI_KIT_ACCEPT_EULA=YES \
     UV_HTTP_TIMEOUT=600 \
     UV_CONCURRENT_DOWNLOADS=4 \
+    UV_CACHE_DIR=/workspace/.uv-cache \
     JULIA_DEPOT_PATH=/workspace/.julia
 
 WORKDIR /workspace

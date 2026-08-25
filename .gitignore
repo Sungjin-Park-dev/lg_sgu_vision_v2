@@ -24,6 +24,7 @@ ros2_overlay/
 
 # Julia depot (GLNS.jl packages) — JULIA_DEPOT_PATH, populated by install_env.sh
 .julia/
+.uv-cache/
 
 # Local tool state
 .claude/
