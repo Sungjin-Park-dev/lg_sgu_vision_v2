@@ -13,7 +13,11 @@
 set -euo pipefail
 
 WS=/workspace
-TB_REF="${TOPIC_BASED_REF:-main}"   # PickNikRobotics/topic_based_ros2_control (default branch = main)
+# PickNikRobotics/topic_based_ros2_control, pinned to the COMMIT behind tag 0.3.0.
+# Not a branch: `main` moves, and this package sits on the ros2_control ABI that
+# the Dockerfile pins — a newer one silently reintroduces the segfault we built
+# this overlay to avoid. Verified byte-identical to tag 0.3.0 on 2026-08-25.
+TB_REF="${TOPIC_BASED_REF:-6bd8d55e1c4ad3188770fe5c8b93b942bcede4a2}"
 
 cd "$WS"
 
@@ -38,7 +42,7 @@ if [ ! -f "$SRC/package.xml" ]; then
   mkdir -p "$OVERLAY/src"
   # git clone can hit an auth prompt inside the container; fetch the tarball.
   echo "  fetching topic_based_ros2_control@$TB_REF"
-  curl -fsSL "https://codeload.github.com/PickNikRobotics/topic_based_ros2_control/tar.gz/refs/heads/$TB_REF" \
+  curl -fsSL "https://codeload.github.com/PickNikRobotics/topic_based_ros2_control/tar.gz/$TB_REF" \
     | tar -xz -C "$OVERLAY/src"
   mv "$OVERLAY"/src/topic_based_ros2_control-* "$SRC"
 fi

@@ -16,12 +16,23 @@
 # Build:  docker build -t lg_sgu_vision:system -f docker/Dockerfile .
 # Run:    docker compose -f docker/compose.yaml up -d   (then install_env.sh once)
 #
-# Pinned/tested versions (2026-07, this machine): cuMotion 4.4.0,
-# cuda-toolkit-13-0 13.0.3, libnvvpi4 4.0.5, ur-robot-driver 3.8.0,
-# ros2controlcli 4.45.2, Julia 1.12.6. The NVIDIA apt repos below only serve one
-# release line each, so metapackage names resolve to the tested line.
+# REPRODUCIBILITY
+# ---------------
+# Every apt package, the base image, uv and Julia are pinned to the set verified
+# working on 2026-08-25 (see section 3). Rebuild anywhere and you get that set.
+#
+# Why this matters: packages.ros.org and the NVIDIA repos are ROLLING — they keep
+# only the newest version of each package. Without pins an unattended rebuild
+# silently picks up whatever shipped that morning, and we have already been bitten
+# twice (UR 99.2.0, diagnostic_updater ABI skew). Pinned, a moved repo makes the
+# build FAIL LOUDLY instead of producing a robot stack that crashes at run time.
+#
+# When a pin 404s (the repo dropped that version), rebuild unpinned:
+#     docker build --build-arg PIN_APT=0 -t lg_sgu_vision:system -f docker/Dockerfile .
+# That takes the current versions but KEEPS the ros.org UR pin from section 2b,
+# which is the one that actually breaks the robot. Re-verify before trusting it.
 
-FROM osrf/ros:jazzy-desktop-full
+FROM osrf/ros:jazzy-desktop-full@sha256:922657e1da43e8f91df9f43e8218cc6ec6f75b19d2c15e20321ec970e966101a
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -59,6 +70,23 @@ RUN install -d /usr/share/keyrings && \
       > /etc/apt/sources.list.d/nvidia-jetson-x86.list
 
 # ---------------------------------------------------------------------------
+# 2b. Keep the UR stack on packages.ros.org.
+#     The Isaac ROS repo also serves ros-jazzy-ur-* — as version 99.2.0, which
+#     outranks ros.org's 3.8.0 on any plain `apt-get install`. That build is not
+#     the released UR driver and CRASHES controller_manager, so every real-robot
+#     run dies at startup. Priority 1001 (> 1000) makes ros.org win even when it
+#     means a downgrade, hence --allow-downgrades in section 3.
+#
+#     This file is load-bearing: without it a rebuild produces a broken image
+#     that still LOOKS like it built fine.
+# ---------------------------------------------------------------------------
+RUN printf '%s\n' \
+      'Package: ros-jazzy-ur-*' \
+      'Pin: origin packages.ros.org' \
+      'Pin-Priority: 1001' \
+      > /etc/apt/preferences.d/ros-org-ur.pref
+
+# ---------------------------------------------------------------------------
 # 3. System stack: CUDA toolkit + VPI + cuMotion 4.4 + UR driver + ros2_control.
 #    ros-jazzy-topic-based-ros2-control (apt 99.99.1) is pulled as a cuMotion
 #    dependency but is ABI-incompatible with ros2_control 4.45 and SEGFAULTS at
@@ -68,25 +96,34 @@ RUN install -d /usr/share/keyrings && \
 #    diagnostic_updater 4.2.6) older than the ros2_control 4.45 the repo now
 #    serves. Without the upgrade, ros2_control_node dies with a symbol lookup
 #    error (undefined diagnostic_updater::Updater 8-arg ctor).
+#
+#    Versions below are the set verified on 2026-08-25. PIN_APT=0 strips them
+#    (see the REPRODUCIBILITY note at the top) — the section 2b UR pin still holds.
 # ---------------------------------------------------------------------------
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-      cuda-toolkit-13-0 \
-      libnvvpi4 \
-      ros-jazzy-isaac-ros-cumotion \
-      ros-jazzy-isaac-ros-cumotion-moveit \
-      ros-jazzy-isaac-ros-cumotion-examples \
-      ros-jazzy-isaac-ros-cumotion-robot-description \
-      ros-jazzy-ur-robot-driver \
-      ros-jazzy-ur-moveit-config \
-      ros-jazzy-ur-controllers \
-      ros-jazzy-control-msgs \
-      ros-jazzy-ros2controlcli \
+ARG PIN_APT=1
+RUN apt-get update && apt-get upgrade -y \
+    && PKGS="cuda-toolkit-13-0=13.0.3-1 \
+             libnvvpi4=4.0.5 \
+             ros-jazzy-isaac-ros-cumotion=4.4.0-0noble.20260428200047773 \
+             ros-jazzy-isaac-ros-cumotion-moveit=4.4.0-0noble.20260428211026915 \
+             ros-jazzy-isaac-ros-cumotion-examples=4.4.0-0noble.20260428214116449 \
+             ros-jazzy-isaac-ros-cumotion-robot-description=4.4.0-0noble.20260428184406204 \
+             ros-jazzy-ur-robot-driver=3.8.0-1noble.20260615.175905 \
+             ros-jazzy-ur-moveit-config=3.8.0-1noble.20260617.155215 \
+             ros-jazzy-ur-controllers=3.8.0-1noble.20260615.172009 \
+             ros-jazzy-ur-client-library=2.12.0-1noble.20260519.172915 \
+             ros-jazzy-ur-dashboard-msgs=3.8.0-1noble.20260615.103026 \
+             ros-jazzy-control-msgs=5.9.0-1noble.20260615.113124 \
+             ros-jazzy-ros2controlcli=4.45.2-1noble.20260615.165650" \
+    && if [ "$PIN_APT" != "1" ]; then PKGS="$(echo "$PKGS" | sed 's/=[^ ]*//g')"; fi \
+    && apt-get install -y --no-install-recommends --allow-downgrades $PKGS \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # 4. uv, installed system-wide so install_env.sh / any shell can use it.
 # ---------------------------------------------------------------------------
-RUN curl -LsSf https://astral.sh/uv/install.sh \
+ARG UV_VERSION=0.12.5
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
       | env UV_UNMANAGED_INSTALL=/usr/local/bin sh \
     && uv --version
 
