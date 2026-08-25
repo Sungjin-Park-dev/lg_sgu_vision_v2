@@ -15,6 +15,23 @@ check "VPI libnvvpi4"          "dpkg -s libnvvpi4"
 check "uv"                     "uv --version"
 check "julia 1.12.6"           "julia --version | grep -q '1\.12\.6'"
 
+# These four are the ones a rebuild silently gets wrong. Everything above only
+# proves a package is present; these prove it is the RIGHT one.
+echo "=== pins (a rebuild can break these and still look fine) ==="
+check "UR pinned to packages.ros.org" \
+      "grep -q 'packages.ros.org' /etc/apt/preferences.d/ros-org-ur.pref"
+# The Isaac ROS repo also ships ros-jazzy-ur-* as 99.2.0, which outranks ros.org
+# on a plain install and crashes controller_manager at startup.
+check "ur_robot_driver is 3.8.x, not NVIDIA 99.x" \
+      "dpkg-query -W -f='\${Version}' ros-jazzy-ur-robot-driver | grep -q '^3[.]8[.]'"
+# Newer topic_based drops off the ros2_control ABI this image pins -> segfault.
+check "topic_based_ros2_control is 0.3.0" \
+      "grep -q '<version>0[.]3[.]0</version>' /workspace/ros2_overlay/src/topic_based_ros2_control/package.xml"
+# Not fatal, but on a fresh machine it decides whether an interrupted 25 GB
+# `uv sync` resumes or starts over.
+check "uv cache on /workspace (survives container recreation)" \
+      "test \"\${UV_CACHE_DIR:-}\" = /workspace/.uv-cache"
+
 echo "=== per-machine (install_env.sh) stack ==="
 check ".venv present"          "test -f /workspace/.venv/bin/activate"
 check ".venv bridge patch"     "grep -q 'isaacsim.ros2.core/jazzy/lib' /workspace/.venv/bin/activate"
