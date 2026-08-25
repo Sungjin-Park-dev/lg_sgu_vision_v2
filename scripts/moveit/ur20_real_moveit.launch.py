@@ -55,6 +55,8 @@ SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
 # launch 가 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
 CAMERA_XRDF = moveit_assets.SOURCE_XRDF
 KINEMATICS_URDF = '/tmp/ur20_camera_kinematics_real.urdf'
+# cuMotion 없이 장애물을 넣는 노드 (use_cumotion:=false 에서 쓴다).
+SCENE_PUB_SCRIPT = os.path.join(MOVEIT_DIR, 'publish_planning_scene.py')
 
 
 
@@ -71,6 +73,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     xrdf_path = moveit_assets.prepare_xrdf('/tmp/ur20_camera_real.xrdf', xrdf_path)
     scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
     scene_file = moveit_assets.build_collision_scene(scene_name, '/tmp/lg_cell_real.scene')
+    use_cumotion = str(context.perform_substitution(
+        LaunchConfiguration('use_cumotion'))).lower() not in ('false', '0')
 
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
     ur_control = IncludeLaunchDescription(
@@ -101,9 +105,14 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         'config', 'isaac_ros_cumotion_planning.yaml')
     with open(cumotion_cfg) as f:
         cm = yaml.safe_load(f)
-    moveit_config.planning_pipelines['planning_pipelines'].insert(0, 'isaac_ros_cumotion')
-    moveit_config.planning_pipelines['isaac_ros_cumotion'] = cm
-    moveit_config.planning_pipelines['default_planning_pipeline'] = 'isaac_ros_cumotion'
+    if use_cumotion:
+        moveit_config.planning_pipelines['planning_pipelines'].insert(0, 'isaac_ros_cumotion')
+        moveit_config.planning_pipelines['isaac_ros_cumotion'] = cm
+        moveit_config.planning_pipelines['default_planning_pipeline'] = 'isaac_ros_cumotion'
+    else:
+        # OMPL 만. cuMotion 파이프라인을 등록조차 하지 않는다 — 등록해두면 RViz 의
+        # 플래너 목록에 뜨고, 고르면 응답 없는 액션을 기다리게 된다.
+        moveit_config.planning_pipelines['default_planning_pipeline'] = 'ompl'
     moveit_config.moveit_cpp.update({'use_sim_time': False})
     moveit_config.trajectory_execution['trajectory_execution']['allowed_start_tolerance'] = 0.1
 
@@ -147,8 +156,19 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         }.items(),
     )
 
-    # Delay move_group/RViz/cuMotion so the driver's controllers are up first.
-    delayed = TimerAction(period=6.0, actions=[move_group, rviz, cumotion])
+    # 장애물을 플래닝 씬에 넣는 노드. cuMotion 을 쓸 때는 NVIDIA 의
+    # StaticPlanningSceneServer 가 그 일을 하는데, 그게 cuMotion 플래너와 **같은
+    # ComposableNodeContainer 안**에 있어서 CUDA 가 안 맞아 컨테이너가 죽으면 장애물도
+    # 같이 사라진다 — 로봇이 테이블을 못 보게 된다. use_cumotion:=false 에서는
+    # 우리 노드가 같은 씬 YAML 을 읽어 /apply_planning_scene 으로 직접 넣는다.
+    scene_pub = ExecuteProcess(
+        cmd=['python3', SCENE_PUB_SCRIPT, '--ros-args', '-p', f'scene:={scene_name}'],
+        output='screen',
+    )
+
+    planner_actions = [cumotion] if use_cumotion else [scene_pub]
+    # Delay move_group/RViz/planner so the driver's controllers are up first.
+    delayed = TimerAction(period=6.0, actions=[move_group, rviz, *planner_actions])
 
     # cuMotion trajectories end with a tiny non-zero velocity; UR's scaled (and
     # plain) joint_trajectory_controller reject a goal whose last point has nonzero
@@ -181,5 +201,11 @@ def generate_launch_description():
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
         DeclareLaunchArgument('xrdf_path', default_value=CAMERA_XRDF),
+        DeclareLaunchArgument(
+            'use_cumotion', default_value='true',
+            description='false = cuMotion 없이 OMPL 로만 계획한다. cuMotion 은 CUDA 13 '
+                        '(드라이버 >= 580, Turing 이상)을 요구하므로 그게 안 되는 '
+                        '머신에서 쓴다. 장애물은 우리 노드가 직접 넣으므로 유지된다.',
+        ),
     ]
     return LaunchDescription(launch_args + [OpaqueFunction(function=launch_setup)])
