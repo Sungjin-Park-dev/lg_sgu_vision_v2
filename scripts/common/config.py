@@ -133,6 +133,7 @@ TARGET_OBJECT: dict = {}     # 대상 물체 pose (name/position/rotation)
 # 씬이 준 물체 기본 pose 의 **불변 사본**. TARGET_OBJECT 는 배치/기즈모/CLI 가 계속
 # 덮어쓰므로, 미등록 물체를 기본값으로 되돌리려면 별도 보관이 필요하다.
 _SCENE_TARGET_DEFAULT: dict = {}
+ENVIRONMENT: dict = {}       # 실험실 방 USD 의 pose (시각 전용, 충돌 월드 밖)
 OBJECT_PLACEMENTS: dict = {}  # 물체별 배치 override
 OBSTACLES: list = []         # 씬 순서 그대로의 전체 장애물 — 신규 정식 API
 TABLE: dict = {}             # OBSTACLES 안의 그 dict 자체 (별칭)

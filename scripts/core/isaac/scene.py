@@ -108,12 +108,6 @@ TABLE_USD_INTRINSIC_Z = 0.795
 MOUNT_XY_SCALE = 2.0
 TABLE_USD_BBOX_CENTER_X = 0.270
 TABLE_USD_BBOX_CENTER_Y = -0.002
-# 실험실 방(바닥 포함)의 수평 배치. z 는 씬마다 달라지므로 상수로 두지 않는다 —
-# 바닥은 원점(=robot base)에서 기둥 높이만큼 아래이고, 그 높이는 씬 YAML 소유다.
-# **기둥 높이를 import 시점에 스냅샷하지 않는다**: --scene 으로 다른 셀을 로드하면
-# config.MOUNT_HEIGHT 가 바뀌는데 스냅샷은 안 따라온다.
-ENV_OFFSET_XY = np.array([2.0, 0.0])
-
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
@@ -171,14 +165,14 @@ def load_workcell(usd_path: Path) -> None:
     """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다."""
     from isaacsim.core.utils import prims
 
-    # 환경(실험실 방)은 테이블과 한 덩어리인 셀이다. 셀이 로봇 기준으로 돌면 방도 같이
-    # 돌아야 한다 — 안 그러면 테이블만 옮겨가 벽을 뚫는다. 시각 전용이라 충돌엔 안 들어간다.
-    cell_yaw = _cell_yaw(_config)
+    # 환경(실험실 방)은 시각 전용이고, pose 는 씬 YAML 의 environment 블록이 갖는다.
+    # 예전에는 table.rotation 을 "셀 전체의 회전"으로 재해석해 방을 같이 돌렸는데,
+    # 테이블만 옮겨도 방이 따라 도는 숨은 결합이었다. 이제 각자 자기 pose 를 본다.
     mount_height = float(_config.MOUNT_HEIGHT)      # 호출 시점에 읽는다 (씬 전환 반영)
     prims.create_prim(
         ENV_PATH, "Xform",
-        position=np.array([*_yaw_xy(cell_yaw, ENV_OFFSET_XY), -mount_height]),
-        orientation=_yaw_quat(cell_yaw),
+        position=np.asarray(_config.ENVIRONMENT["position"], dtype=np.float64),
+        orientation=np.asarray(_config.ENVIRONMENT["rotation"], dtype=np.float64),
         usd_path=str(ENV_USD),
     )
     # 마운트 USD 는 원점이 상면이라 z=0(= robot base) 에 놓으면 아래로 뻗는다.
@@ -206,17 +200,10 @@ def load_workcell(usd_path: Path) -> None:
     spawn_scene_obstacles(_config)
 
 
-def _cell_yaw(config_module) -> float:
-    """셀이 robot base Z 둘레로 얼마나 돌아 있는지 (rad).
-
-    단일 출처는 **씬 YAML 의 table.rotation** 이다. 시각 전용 자산(환경 방, 테이블 메시)은
-    충돌 월드에 안 들어가서 YAML 이 직접 배치하지 않는데, 그렇다고 각도를 여기 또 적으면
-    YAML 과 조용히 어긋난다 — 그래서 적지 않고 읽는다.
-    (scene_config 가 table 을 순수 z-yaw 로 강제하므로 yaw 하나로 환원된다.)
-    """
-    quat = np.asarray(config_module.TABLE.get("rotation", (1.0, 0.0, 0.0, 0.0)),
-                      dtype=np.float64)
-    return float(2.0 * np.arctan2(quat[3], quat[0]))
+def _quat_yaw(quat) -> float:
+    """순수 z-yaw 쿼터니언 (w,x,y,z) → yaw (rad). table 이 그 형태임은 scene_config 가 강제한다."""
+    q = np.asarray(quat, dtype=np.float64)
+    return float(2.0 * np.arctan2(q[3], q[0]))
 
 
 def _yaw_quat(yaw: float) -> np.ndarray:
@@ -236,9 +223,10 @@ def _table_prim_transform(config_module):
     surface.  ``config.TABLE`` is a center pose in the robot-base frame, which is
     also the Isaac world frame -- no coordinate promotion here.
 
-    Returns (position, scale, orientation_wxyz). The table carries a z-yaw when the
-    cell is laid out around the robot at an angle -- the off-center origin offset has
-    to be rotated by that same yaw, or the mesh lands beside its collision box.
+    Returns (position, scale, orientation_wxyz). The yaw here is the table's OWN
+    rotation from the scene YAML -- the USD's off-center origin offset lives in the
+    table's local frame, so it has to turn with the table or the mesh lands beside
+    its collision box. Nothing else in the cell reads this angle.
     """
     table = config_module.TABLE
     center_robot = np.asarray(table["position"], dtype=np.float64)
@@ -251,7 +239,7 @@ def _table_prim_transform(config_module):
     scale = dimensions / np.array([
         TABLE_USD_INTRINSIC_X, TABLE_USD_INTRINSIC_Y, TABLE_USD_INTRINSIC_Z,
     ], dtype=np.float64)
-    yaw = _cell_yaw(config_module)
+    yaw = _quat_yaw(table.get("rotation", (1.0, 0.0, 0.0, 0.0)))
     off = _yaw_xy(yaw, (TABLE_USD_BBOX_CENTER_X * scale[0],
                         TABLE_USD_BBOX_CENTER_Y * scale[1]))
     # world == base_link 라 좌표 승격이 없다. z 는 상자 중심 → USD 원점(상면) 보정만.

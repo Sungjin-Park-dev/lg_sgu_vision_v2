@@ -220,6 +220,35 @@ def parse_scene(data: dict, source: str) -> dict:
             f"position[2] + dimensions[2]/2 = {mount_top:+.4f}. "
             f"기둥 높이를 바꿀 때는 position[2] 도 같이 내려야 한다")
 
+    # 환경(실험실 방) USD 는 **시각 전용**이라 충돌 월드에 안 들어간다. 그래도 pose 를
+    # YAML 이 직접 들고 있어야 한다: 예전에는 table.rotation 을 "셀 전체의 회전"으로
+    # 재해석해 방을 같이 돌렸는데, 그러면 테이블만 옮겨도 방이 따라 도는 숨은 결합이 된다.
+    # 이제 방은 자기 pose 만 본다 — 다른 장애물과 같은 규칙(월드=base_link 좌표)이다.
+    # environment 블록이 생기기 전(2026-08-25 이전)에 박제된 h5 스냅샷에는 이 키가 없다.
+    # 그때는 방 pose 가 table.rotation 에서 파생됐으므로, 그 식을 그대로 재현해 채운다 —
+    # 옛 실행을 다시 열었을 때 화면이 그때와 같아야 한다.
+    mount_bottom = float(mount["position"][2] - mount["dimensions"][2] / 2.0)
+    raw_env = data.get("environment")
+    if raw_env is None:
+        tq = np.asarray(table["rotation"], dtype=np.float64)
+        yaw = 2.0 * np.arctan2(tq[3], tq[0])
+        raw_env = {
+            "position": [2.0 * np.cos(yaw), 2.0 * np.sin(yaw), mount_bottom],
+            "rotation": [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)],
+        }
+    environment = {
+        "position": _vec(raw_env.get("position", [0.0, 0.0, 0.0]), 3,
+                         "environment.position"),
+        "rotation": _quat(raw_env.get("rotation"), "environment.rotation"),
+    }
+    # 방 USD 의 원점은 바닥이고, 바닥은 기둥 밑면이다. 어긋나면 로봇이 공중에 뜨거나
+    # 바닥에 잠긴 것처럼 보인다 — 시각 전용이라 계획은 멀쩡해서 눈으로만 이상하다.
+    if abs(float(environment["position"][2]) - mount_bottom) > 1e-6:
+        raise ValueError(
+            f"{source}: 'environment' 바닥이 기둥 밑면과 같은 z 여야 한다 — "
+            f"environment.position[2]={float(environment['position'][2]):+.4f}, "
+            f"robot_mount 밑면={mount_bottom:+.4f}")
+
     placements = {}
     for key, raw in (data.get("object_placements") or {}).items():
         placements[key] = _parse_placement(raw, key)
@@ -228,6 +257,7 @@ def parse_scene(data: dict, source: str) -> dict:
         "version": SCHEMA_VERSION,
         "name": data.get("name") or source,
         "target_object": target,
+        "environment": environment,
         "obstacles": obstacles,
         "object_placements": placements,
     }
@@ -260,6 +290,7 @@ def snapshot(scene: dict) -> dict:
         "version": SCHEMA_VERSION,
         "name": scene["name"],
         "target_object": _plain(scene["target_object"]),
+        "environment": _plain(scene["environment"]),
         "obstacles": [_plain(o) for o in scene["obstacles"]],
         "object_placements": {k: _plain(v) for k, v in scene["object_placements"].items()},
     }
@@ -281,6 +312,10 @@ def apply_to(cfg, scene: dict) -> None:
     cfg._SCENE_TARGET_DEFAULT.clear()
     cfg._SCENE_TARGET_DEFAULT.update({k: (v.copy() if isinstance(v, np.ndarray) else v)
                                       for k, v in scene["target_object"].items()})
+
+    cfg.ENVIRONMENT.clear()
+    cfg.ENVIRONMENT.update({k: (v.copy() if isinstance(v, np.ndarray) else v)
+                            for k, v in scene["environment"].items()})
 
     cfg.OBJECT_PLACEMENTS.clear()
     cfg.OBJECT_PLACEMENTS.update({
