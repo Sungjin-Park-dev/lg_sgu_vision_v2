@@ -65,7 +65,7 @@ Examples:
                              f'(default: {config.CAMERA_OVERLAP_RATIO}). --row/col-spacing 이 우선')
     parser.add_argument('--working-distance', type=float, default=None,
                         help='Working distance in mm — 카메라 끝(렌즈 배럴 앞면)에서 검사면까지 '
-                             f'(default: {config.CAMERA_WORKING_DISTANCE_MM:.2f}, '
+                             f'(default: {config.CAMERA_WORKING_DISTANCE_MM:g}, '
                              f'최소 {config.CAMERA_MIN_WORKING_DISTANCE_MM:.1f} 초과)')
     parser.add_argument('--no-filter-bottom', action='store_true', default=False,
                         help='Disable bottom-face filtering')

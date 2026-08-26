@@ -36,7 +36,7 @@ YAML 의 그 상자를 고치고, **`position[2]` 도 같이 내려 상면이 z=
 | 항목 | 값 | 코드 심볼 |
 |---|---|---|
 | FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님. CAD `VIEW_1` 과 일치) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
-| WD (optical_frame=**카메라 끝**→object. 실사용 값 = 구 기준 273 − 77.770) | 195.23 mm | `CAMERA_WORKING_DISTANCE_MM` |
+| WD (optical_frame=**카메라 끝**→object. 실사용 값 273 − 77.770 = 195.23 을 정수로) | 195 mm | `CAMERA_WORKING_DISTANCE_MM` |
 | WD 하한 (검사면이 카메라 끝보다 앞) | 0 mm | `CAMERA_MIN_WORKING_DISTANCE_MM` |
 | mount_offset (flange→optical_frame=렌즈 앞면) | 0.21877 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
 | lens_front (flange→렌즈 앞면) | 0.21877 m (CAD 실측) | `CAMERA_LENS_FRONT_OFFSET_M` |

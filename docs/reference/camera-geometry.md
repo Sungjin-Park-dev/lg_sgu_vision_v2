@@ -17,7 +17,7 @@ flange ──── sensor ──── body_face ──[?pupil]── optical_f
 ```
 
 위 `VIEW_1`(0.391)은 **벤더 공칭 WD 에 대응하는 CAD 랜드마크**다. config 기본 WD 는
-실사용 값 **0.19523** 이라 검사면은 flange+**0.414** 에 놓인다 — CAD 판보다 23mm 앞이다.
+실사용 값 **0.195** 라 검사면은 flange+**0.41377** 에 놓인다 — CAD 판보다 23mm 앞이다.
 
 | 표준어 | 뜻 | 위치 | 근거 |
 |---|---|---|---|
@@ -26,19 +26,19 @@ flange ──── sensor ──── body_face ──[?pupil]── optical_f
 | **body_face** | 카메라 커버 앞면 | 0.141 | 벤더 공칭 WD 250mm 의 기준점. **2026-08-27 부터 코드 기준점 아님** |
 | **pupil** | 광학중심(입사동공) | 렌즈 내부(미확정) | 핀홀 투영중심. CAD에 없음 |
 | **lens_front** = **optical_frame** | 렌즈 앞면(배럴 끝) = **카메라의 끝** | **0.21877** | `MFA121-U50` 배럴 Ø38.6. **코드 tool frame**, WD 기준점 |
-| **object_plane** | 물체면 = 검사면 = 초점면 | **WD 따라 이동** | `VIEW_1`(0.391)은 벤더 공칭 WD 자리. config 기본 WD 로는 0.414 |
+| **object_plane** | 물체면 = 검사면 = 초점면 | **WD 따라 이동** | `VIEW_1`(0.391)은 벤더 공칭 WD 자리. config 기본 WD 로는 0.41377 |
 
 ## B. 거리 — 이름에 기준점을 못박음
 
 | 표준어 | 정의 (from → to) | 값 | 코드 심볼 |
 |---|---|---|---|
 | **mount_offset** | flange → optical_frame | 0.21877 m | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` (URDF가 소유) |
-| **WD** = **frame_standoff** | optical_frame(= 카메라 끝) → object_plane | **195.23 mm** (config 기본, 실사용 값) | `CAMERA_WORKING_DISTANCE_MM` |
-| **flange_to_object** | flange → object_plane | 414 mm | mount_offset + WD |
-| **body_face_WD** | body_face → object_plane | 273 mm | 구 기준의 `CAMERA_WORKING_DISTANCE_MM` (지금은 코드에 없음). 벤더 공칭은 250 |
-| **sensor_to_object** | sensor → object_plane | 289.7 mm | (코드에 없음) |
+| **WD** = **frame_standoff** | optical_frame(= 카메라 끝) → object_plane | **195 mm** (config 기본) | `CAMERA_WORKING_DISTANCE_MM` |
+| **flange_to_object** | flange → object_plane | 413.77 mm | mount_offset + WD |
+| **body_face_WD** | body_face → object_plane | 272.77 mm | 구 기준의 `CAMERA_WORKING_DISTANCE_MM` (지금은 코드에 없음). 벤더 공칭은 250 |
+| **sensor_to_object** | sensor → object_plane | 289.47 mm | (코드에 없음) |
 
-표의 아래 세 행(`flange_to_object` · `body_face_WD` · `sensor_to_object`)은 **config 기본 WD(195.23) 기준**이다 — WD 를 바꾸면 같이 움직인다.
+표의 아래 세 행(`flange_to_object` · `body_face_WD` · `sensor_to_object`)은 **config 기본 WD(195) 기준**이다 — WD 를 바꾸면 같이 움직인다.
 
 > **WD 는 카메라의 끝에서 잰다** (2026-08-27 이전). `optical_frame` 이 렌즈 배럴 앞면에
 > 놓여 있어, 현장에서 자로 "카메라 끝 → 물체" 를 재면 그게 곧 이 값이다.
@@ -130,7 +130,7 @@ uv run --no-sync scripts/setup/inspect_camera_step.py   # 아래 표를 재출�
 **391.0 − 141.0 = 250.0** 은 벤더 공칭 WD 와 정확히 일치한다 — 벤더가 `body_face` 를
 기준으로 쓴다는 증거이고, 그래서 벤더 스펙을 코드에 넣을 때는 77.770 을 빼야 한다
 (250 → **172.230**). `CAMERA_WORKING_DISTANCE_MM` 기본값은 그 벤더 값이 아니라
-실사용 값 195.23 이라 검사면이 `VIEW_1` 과 일치하지 않는다.
+실사용 값 195 라 검사면이 `VIEW_1` 과 일치하지 않는다.
 
 ### 해소된 파킹 항목
 
@@ -139,7 +139,8 @@ uv run --no-sync scripts/setup/inspect_camera_step.py   # 아래 표를 재출�
   **2026-08-27**: 그 77.77mm 를 이번엔 의도적으로 넘어가 `optical_frame` 을 배럴 끝으로
   옮겼다 — CAD 없이는 못 찾는 `body_face` 대신 자로 잴 수 있는 카메라 끝을 기준으로
   삼기 위해서다. 같은 검사면을 유지하려면 WD 를 77.770 만큼 낮추면 되고, 그때 로봇
-  기하는 불변이다(cylinder_sample/132: 273 → 195.23 에서 도달성 118/132 로 동일 확인).
+  기하는 불변이다(cylinder_sample/132: 273 → 195.23 에서 도달성 118/132 로 동일 확인.
+  기본값으로 쓰는 195 도 같은 118/132 — 0.23mm 차이는 도달성에 영향이 없다).
 - ~~**optical_frame 이 렌즈보다 127mm 앞 허공**~~ — 그 위치(0.346)는 어셈블리에서
   제거된 조명박스 `LIGHT_1` 의 앞면이었다. 2026-07-27 에 body_face 로 이전.
 

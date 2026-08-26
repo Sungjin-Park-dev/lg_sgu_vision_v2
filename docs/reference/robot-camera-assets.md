@@ -135,8 +135,8 @@ wrist_3_link
 flange 목표 = 표면점 + 법선 × (WD + mount_offset)
                               ↑          ↑
        CAMERA_WORKING_DISTANCE_MM   URDF camera_optical_joint (하드웨어 상수)
-             = 0.19523 m                 = 0.21877 m
-                              합 = 0.414 m = 검사면
+              = 0.195 m                  = 0.21877 m
+                            합 = 0.41377 m = 검사면
 ```
 
 - **WD 만 튜닝 대상**이다. 기준점은 **카메라의 끝**(렌즈 배럴 앞면)이라 현장에서 자로
