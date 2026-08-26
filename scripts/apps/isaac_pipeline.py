@@ -3440,6 +3440,17 @@ class PipelineWindow:
         # 같은 물체/viewpoint 수면 같은 해다(재solve 는 덮어쓰기).
         det_h5 = str(_config.get_solution_path(obj, n_vp))
         trajectory_dir = str(Path(det_h5).parent)
+        # 현재 자세를 넘겨 **이어붙인 궤적의 관절값 표현만** 그 기준으로 다시 고르게 한다
+        # (verify 의 align_path_to_start). 방문 순서·방향·waypoint 수는 안 바뀐다 — 2π 만큼
+        # 헛도는 표현만 없앤다.
+        # NB: --start-joints=<v> (등호). 첫 값이 음수면 argparse 가 옵션으로 오인한다.
+        start_arg = ""
+        try:
+            current_q = self._sim_executor.current_joints()
+            start_arg = " --start-joints=" + repr(",".join(f"{v:.6f}" for v in current_q))
+        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 고정 없이 진행
+            self._append_log(
+                f"[generate] no current joint state, scan start not anchored: {exc}")
         pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
         quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
         shell = (
@@ -3450,7 +3461,7 @@ class PipelineWindow:
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
-            f"--no-home-bracket --output-dir {trajectory_dir!r}"
+            f"--no-home-bracket --output-dir {trajectory_dir!r}{start_arg}"
         )
         cmd = ["bash", "-c", shell]
 

@@ -9,6 +9,7 @@ import numpy as np
 
 from core import trajectory as PT
 from core.trajectory import collision_gate_and_save
+from core.trajectory.periodic import periodic_joint_delta
 
 class SeamFailure(RuntimeError):
     """An inter-component / HOME-bracket seam could not be bridged (incl. via-home)."""
@@ -21,11 +22,13 @@ def _linf(a, b) -> float:
 def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
     """방문 순서 + 성분별 방향 결정. 반환 [(성분_index, reversed_bool), ...].
 
-    ``optimized``: component 간 seam 거리(joint L∞)만 최소화한다. HOME 접근/복귀는
-    scan 경로와 독립적으로 계획하므로 순서 비용에 포함하지 않는다. 작은 K(≤6)는
-    정확 brute-force, 큰 K는 모든 시작 component/방향을 비교하는 greedy를 쓴다.
-    ``home_q``는 기존 호출자 호환을 위해 남겨두지만 최적화에 사용하지 않는다.
+    ``optimized``: component 간 seam 거리(joint L∞)를 최소화한다. 작은 K(≤6)는 정확
+    brute-force, 큰 K는 모든 시작 component/방향을 비교하는 greedy를 쓴다.
     ``fixed``: 입력 순서·원방향 그대로.
+
+    ``home_q`` 는 기존 호출자 호환을 위해 남겨두며 최적화에 쓰지 않는다. 스캔의 진입
+    자세를 현재 로봇 자세에 맞추는 일은 방문 순서를 바꾸지 않고 ``align_path_to_start``
+    가 표현만 골라서 처리한다 — 검사 순서는 GLNS 가 정한 그대로 둔다.
     """
     K = len(endpoints)
     if K <= 1 or strategy == "fixed":
@@ -69,6 +72,82 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
             if cost < best_cost - 1e-12:
                 best_order, best_cost = order, cost
     return best_order
+
+
+def align_path_to_start(traj, start_q, robot_cfg):
+    """이어붙인 궤적 전체를 ``start_q`` 에서 출발하도록 2π 등가로 다시 표현한다.
+
+    첫 행은 start_q 에, 그 뒤 각 행은 **직전 행**에 가장 가까운 등가로 맞춘다. 첫 행만
+    옮기면 둘째 행에서 튀기 때문이다. 자세는 하나도 안 바뀌고(2π 정수배 이동) 표현만 고른다.
+
+    generate 의 **맨 마지막 후처리**다. 성분 순서·방향·seam 이 모두 확정되고 조각이 이어붙은
+    뒤라, 여기서 고른 표현이 곧 저장되는 값이다. solve.py 의 성분별 unwrap 은 join 이 뒤집을
+    수 있어 최종 표현을 정하지 못한다. 검사 순서(어느 viewpoint 를 언제 보는가)는 GLNS 가
+    정한 그대로 두고 **관절값 표현만** 바꾼다.
+
+    **안전장치**: 관절 한계 때문에 어떤 행이 못 따라오면 거기서 새 점프가 생긴다. 그래서
+    정렬 뒤 인접 행 최대 변화량을 원본과 비교해, 나빠졌으면 **통째로 원본을 쓴다** —
+    진입을 줄이려다 궤적 한가운데를 깨뜨리지 않는다.
+
+    Returns: (표현이 바뀐 궤적, 적용했는지 여부)
+    """
+    from core.glns.candidates import _joint_limits_and_periods
+
+    traj = np.asarray(traj, dtype=np.float64)
+    # 어떤 경로로 끝나든 **반드시 한 줄은 찍는다.** 조용히 빠지면 "정렬이 안 돌았다" 와
+    # "돌았는데 바꿀 게 없다" 를 구분할 수 없어서, 멀쩡한 동작을 버그로 의심하게 된다.
+    if start_q is None:
+        print("  Start alignment: skipped - no start pose given "
+              "(pass --start-joints to align the trajectory to where the robot is)")
+        return traj, False
+    if len(traj) == 0:
+        print("  Start alignment: skipped - the joined trajectory is empty")
+        return traj, False
+    try:
+        lower, upper, periods = _joint_limits_and_periods(robot_cfg)
+    except Exception as exc:  # noqa: BLE001 — 정렬 실패가 생성을 죽이면 안 된다
+        print(f"  Start alignment: skipped - could not read joint limits ({exc})")
+        return traj, False
+    if not np.any(periods > 0.0):
+        print("  Start alignment: skipped - no joint has a full extra turn of range, "
+              "so there is no 2pi equivalent to choose")
+        return traj, False
+
+    out = np.empty_like(traj)
+    ref = np.asarray(start_q, dtype=np.float64)
+    try:
+        for i in range(len(traj)):
+            out[i] = PT.align_to_reference(traj[i], ref, periods, lower, upper)
+            ref = out[i]
+    except Exception as exc:  # noqa: BLE001 — 원본을 지키고 사실대로 알린다
+        print(f"  Start alignment: failed, keeping the trajectory as solved ({exc})")
+        return traj, False
+
+    entry0 = float(np.max(np.abs(traj[0] - np.asarray(start_q, dtype=np.float64))))
+    if np.array_equal(out, traj):
+        # 침묵하면 "정렬이 안 돌았다"와 구분이 안 된다. 남은 거리는 2π 로 못 없애는
+        # **진짜** 차이다(비주기 축이거나, 등가가 한계 밖이거나, 팔 자세 자체가 다르다).
+        print(f"  Start alignment: nothing to change - the scan already starts at the "
+              f"closest 2pi representation ({np.rad2deg(entry0):.1f} deg from the given "
+              f"pose; that gap is real, use Plan/Move to Start)")
+        return traj, False
+    # 연속성이 나빠졌으면 채택하지 않는다.
+    def worst_step(a):
+        return float(np.max(np.abs(np.diff(a, axis=0)))) if len(a) > 1 else 0.0
+    before, after = worst_step(traj), worst_step(out)
+    if after > before + 1e-9:
+        print(f"  start alignment rejected: it would grow the worst joint step "
+              f"{np.rad2deg(before):.2f} -> {np.rad2deg(after):.2f} deg (limits block it)")
+        return traj, False
+    entry_before = float(np.max(np.abs(traj[0] - np.asarray(start_q, dtype=np.float64))))
+    entry_after = float(np.max(np.abs(out[0] - np.asarray(start_q, dtype=np.float64))))
+    per_joint = np.rad2deg(np.abs(out[0] - np.asarray(start_q, dtype=np.float64)))
+    print(f"  Aligned the joined path to the start pose: entry travel "
+          f"{np.rad2deg(entry_before):.1f} -> {np.rad2deg(entry_after):.1f} deg "
+          f"(worst step unchanged at {np.rad2deg(after):.2f} deg)")
+    print(f"    remaining per-joint gap [deg]: "
+          f"{np.round(per_joint, 1).tolist()} - what is left cannot be removed by 2pi")
+    return out, True
 
 
 def plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m,
@@ -118,7 +197,10 @@ def resample_seam(q_from, q_to, seam_wp, *, robot_cfg, world_config, reconfig_ra
 
 def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
                      spacing, reconfig_rad, enable_via_ladder, home_bracket,
-                     order_strategy, out_csv, motion_planner=None, meta=None):
+                     order_strategy, out_csv, motion_planner=None, meta=None,
+                     start_q=None):
+    # start_q: 이어붙인 궤적의 관절값 표현만 이 자세 기준으로 다시 고른다
+    # (align_path_to_start). 방문 순서·방향은 건드리지 않는다.
     """충돌-free 성분들을 순서최적화 + seam transit + HOME 브래킷으로 한 궤적으로 stitch.
 
     seam(via-home 포함)이 하나라도 실패하면 ``SeamFailure`` — 성분을 조용히 드롭하지 않는다.
@@ -181,6 +263,8 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
         pieces.append(seam_trajs[si][0]); masks.append(seam_trajs[si][1]); si += 1
 
     joined_traj, joined_is_transit = PT.stitch_trajectory_pieces(pieces, masks)
+    # 방향·seam 이 확정된 뒤에 표현을 고른다 — 여기가 마지막 기회다.
+    joined_traj, _aligned = align_path_to_start(joined_traj, start_q, robot_cfg)
     gate = collision_gate_and_save(
         joined_traj, joined_is_transit, robot_cfg=robot_cfg,
         world_config=world_config, out_csv=out_csv, meta=meta,
