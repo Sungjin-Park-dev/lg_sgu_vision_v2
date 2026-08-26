@@ -72,17 +72,6 @@ DEFAULT_MAX_CANDIDATES = 16
 DEFAULT_JOINT_WEIGHTS = (1.0, 1.0, 0.5, 0.2, 0.2, 0.05)
 
 
-def _parse_joints(text):
-    """"q0,...,q5" → (6,) ndarray. None/빈 문자열이면 None (정렬 안 함)."""
-    if not text:
-        return None
-    values = [v for v in str(text).replace(",", " ").split() if v]
-    q = np.asarray([float(v) for v in values], dtype=np.float64)
-    if q.shape != (6,):
-        raise SystemExit(f"--reference-joints needs 6 values, got {len(values)}")
-    return q
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Delaunay-only component GTSP over viewpoints and IK candidates",
@@ -144,8 +133,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--keep-glns-files", action="store_true",
                         help="Keep generated .gtsp and GLNS tour files beside the result")
     scene_config.add_cli_argument(parser)
-    parser.add_argument("--reference-joints", type=str, default=None,
-                        help='reference joints "q0,...,q5" [rad] — IK 해를 이 자세에 가장 가까운 2π 등가로 옮긴다(자세는 그대로, 회전량만 줄어든다). 보통 로봇의 현재 관절값을 준다')
     parser.add_argument("--object-position", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"))
     parser.add_argument("--object-quat", type=float, nargs=4, default=None,
@@ -363,8 +350,6 @@ def main() -> int:
             wrist3_fixed, lock_nominal_wrist3=lock_nominal_wrist3,
             joint_periods=joint_periods, ik_seed=args.ik_seed,
             dedup_rad=ik_settings["dedup_rad"],
-            reference_joints=_parse_joints(args.reference_joints),
-            joint_lower=joint_lower, joint_upper=joint_upper,
         )
         removed_collision = _collision_filter_representatives(
             representatives_raw, robot_cfg, world, candidate_metadata_raw,

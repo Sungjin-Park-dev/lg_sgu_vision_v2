@@ -54,17 +54,6 @@ from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 from common import config, scene_config  # noqa: E402
 
 
-def _parse_joints(text):
-    """"q0,...,q5" → (6,) ndarray. None/빈 문자열이면 None (정렬 안 함)."""
-    if not text:
-        return None
-    values = [v for v in str(text).replace(",", " ").split() if v]
-    q = np.asarray([float(v) for v in values], dtype=np.float64)
-    if q.shape != (6,):
-        raise SystemExit(f"--reference-joints needs 6 values, got {len(values)}")
-    return q
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Check per-viewpoint IK reachability and save the IK candidates",
@@ -103,9 +92,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dedup-rad", type=float, default=CANDIDATE_DEDUP_RAD,
                         help=f"[dedup] L-inf joint threshold rad (default: {CANDIDATE_DEDUP_RAD})")
     scene_config.add_cli_argument(parser)
-    # 첫 값이 음수면 argparse 가 옵션으로 오인한다 — 호출자는 --reference-joints=<v> 형태로.
-    parser.add_argument("--reference-joints", type=str, default=None,
-                        help='reference joints "q0,...,q5" [rad] — IK 해를 이 자세에 가장 가까운 2π 등가로 옮긴다(자세는 그대로, 회전량만 줄어든다). 보통 로봇의 현재 관절값을 준다')
     parser.add_argument("--object-position", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"),
                         help="Override target object position in robot-base frame (meters)")
@@ -187,17 +173,12 @@ def main() -> None:
     world_config = build_collision_world(args.object)
     robot_cfg = resolve_robot_config(ROBOT_CONFIG)
     print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
-    joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
-    reference = _parse_joints(args.reference_joints)
-    if reference is not None:
-        print(f"  Aligning IK to reference joints "
-              f"{np.round(np.rad2deg(reference), 1).tolist()} deg")
+    _, _, joint_periods = _joint_limits_and_periods(robot_cfg)
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
     representatives, metadata = _solve_pose_variant_candidates(
         targets, n_viewpoints, world_config, robot_cfg, args.num_seeds, args.batch_size,
         wrist3_fixed, lock_nominal_wrist3=lock_nominal_wrist3, joint_periods=joint_periods,
         ik_seed=args.ik_seed, dedup_rad=settings["dedup_rad"],
-        reference_joints=reference, joint_lower=joint_lower, joint_upper=joint_upper,
     )
 
     print("[4/5] Collision filter...")
