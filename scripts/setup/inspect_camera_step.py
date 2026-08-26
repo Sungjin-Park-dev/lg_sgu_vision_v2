@@ -32,9 +32,10 @@ LENS_PART = "MFA121-U50"                            # optical axis comes from it
 
 # Landmarks asserted against the rest of the repo (mm from flange, along the optical axis).
 EXPECT = {
-    "lens barrel tip": (218.770, "build_camera_mesh.EXPECT_HI[0] = 0.21877 m"),
-    "body_face": (141.000, "URDF camera_optical_joint xyz / TOOL_TO_CAMERA_OPTICAL_OFFSET_M"),
-    "object_plane": (391.000, "body_face + CAMERA_WORKING_DISTANCE_MM"),
+    "lens barrel tip": (218.770, "URDF camera_optical_joint xyz / TOOL_TO_CAMERA_OPTICAL_OFFSET_M"
+                                 " / build_camera_mesh.EXPECT_HI[0] = 0.21877 m"),
+    "body_face": (141.000, "커버 앞면. 2026-08-27 부터 코드 기준점이 아니다 — CAD 랜드마크로만 남는다"),
+    "object_plane": (391.000, "lens barrel tip + CAMERA_WORKING_DISTANCE_MM"),
 }
 TOL_MM = 1e-3
 

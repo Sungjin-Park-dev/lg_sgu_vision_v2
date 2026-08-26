@@ -48,7 +48,7 @@ workcell/robot/ur20_with_camera_curobo.urdf                  ← 운동학의 �
 예전에는 `_curobo` 없는 `ur20_with_camera.urdf` 와 `config.DEFAULT_URDF_PATH` 가 함께
 있었는데 **둘 다 삭제했다**(둘 다 참조하는 코드가 0곳). 그 파일은 카메라를 `tool0` 에
 프리미티브 박스·실린더로 붙인 옛 표현이었고 `camera_optical_joint` 도 `xyz="-0.212 0.03 0"`
-으로 현행 `0.141` 과 부호까지 달랐다 — 기준으로 삼으면 조용히 어긋나는 종류의 파일이다.
+으로 현행 `0.21877` 과 부호까지 달랐다 — 기준으로 삼으면 조용히 어긋나는 종류의 파일이다.
 명목상 역할이던 MorphIt 원본 기능도 실제로는 못 했다: 이 파일을 만든 `.urdf.xacro` 도,
 MorphIt 빌더도 리포에 없어서 재생성이 불가능했다.
 
@@ -96,12 +96,12 @@ wrist_3_link
   └─(wrist_3-flange, fixed, rpy 0,-90°,-90°)→ flange
        ├─(flange-tool0, fixed)→ tool0
        └─(camera_mount_joint, fixed, rpy -90°,0,0)→ camera_link  ← 메시가 이 프레임에 pre-bake
-            └─(camera_optical_joint, xyz="0.141 0 0", rpy 90°,0,90°)→ camera_optical_frame
+            └─(camera_optical_joint, xyz="0.21877 0 0", rpy 90°,0,90°)→ camera_optical_frame
 ```
 
 - `camera_mount_joint` 의 rpy 는 **카메라가 플랜지에 물린 clocking** 이다. roll 만 쓴다:
   회전축이 툴 축(flange **+X** = 광축)이라 **광축 방향도 `camera_optical_frame` 원점도
-  움직이지 않는다**. 그래서 `0.141` 은 clocking 과 무관하게 flange 기준 광축 거리 그대로다.
+  움직이지 않는다**. 그래서 `0.21877` 은 clocking 과 무관하게 flange 기준 광축 거리 그대로다.
   바뀌는 것은 몸체가 어느 쪽으로 뻗는지와 이미지 회전뿐이다 —
   flange 좌표 bbox 가 `y[-94.9,+50] z[-56,+56]` → `y[-56,+56] z[-50,+94.9] mm` 로 옮겨간다.
 - rpy(90°,0,90°) 가 flange **+X** 광축을 optical_frame **+Z** 광축으로 돌린다
@@ -135,11 +135,13 @@ wrist_3_link
 flange 목표 = 표면점 + 법선 × (WD + mount_offset)
                               ↑          ↑
        CAMERA_WORKING_DISTANCE_MM   URDF camera_optical_joint (하드웨어 상수)
-              = 0.250 m                    = 0.141 m
+             = 0.17223 m                 = 0.21877 m
                               합 = 0.391 m = CAD VIEW_1 검사면
 ```
 
-- **WD 만 튜닝 대상**이다. 이 값은 벤더 공칭 WD 와 같은 기준점(카메라 몸체 앞면)을 쓴다.
+- **WD 만 튜닝 대상**이다. 기준점은 **카메라의 끝**(렌즈 배럴 앞면)이라 현장에서 자로
+  "카메라 끝 → 물체" 를 재면 그 값이다. ⚠️ 벤더 공칭 WD(250mm)는 `body_face` 기준이라
+  다른 숫자다 — 환산은 `새 WD = 구 WD − 77.770` (camera-geometry.md §B).
 - **mount_offset 은 하드웨어 사실**이다. 바꾸려면 §5 체크리스트 전체를 밟아야 한다.
 - 실제 적용 지점: [poses.py](../../scripts/core/trajectory/poses.py)
   `camera_positions = positions + normals * working_distance_m`.
@@ -170,7 +172,7 @@ ViewpointGenParams (생성 시 선택)
 
 config 를 없앨 수는 없다 — 첫 h5 를 만들 때 FOV/WD 가 어디선가는 와야 하는데 h5 는 그 결과물이라
 닭-달걀이고, [inspect_camera_step.py](../../scripts/setup/inspect_camera_step.py) 가
-`object_plane == body_face + CAMERA_WORKING_DISTANCE_MM` 로 기본값을 CAD 에 고정한다.
+`object_plane == lens_front + CAMERA_WORKING_DISTANCE_MM` 로 기본값을 CAD 에 고정한다.
 
 대신 "지금 어느 쪽이 적용 중인가"를 알 수 없는 구간을 없앴다:
 
@@ -191,14 +193,22 @@ h5 를 고르면(Browse 또는 Show Viewpoints) `_sync_camera_spec_from_h5` 가 
 1. `workcell/robot/ur20_with_camera_curobo.urdf` — `camera_optical_joint` 의 `origin xyz`
 2. `scripts/setup/build_camera_mesh.py` — `OPTICAL_FRAME_X`
    (안 고치면 `--verify` 가 assert 로 막는다 — 의도된 가드)
-3. `workcell/robot/ur20_with_camera.usd` 와 `..._ghost.usd` 의
-   `/Root/UR20/wrist_3_link/flange/camera_mount/camera_optical_frame` 트랜스폼
+3. `workcell/robot/ur20_with_camera.usd` 의
+   `/Root/UR20/wrist_3_link/flange/camera_mount/camera_optical_frame` 트랜스폼 —
+   `xformOp:transform` 의 **병진 행만** 바꾼다(회전 basis 는 flange +X → optical +Z 규약).
+   그다음 ghost 재생성: `uv run --no-sync scripts/setup/build_ghost_usd.py`
+   (ghost 는 산출물이다. 재생성하면 `Flattened_Prototype_NN` 번호가 갈려 바이너리 diff 가
+   크게 잡히는데, 실제 의미 차이는 이 트랜스폼 하나뿐이다 — 2026-08-27 구조 diff 로 확인)
 4. `scripts/common/config.py` — `TOOL_TO_CAMERA_OPTICAL_OFFSET_M`,
    그리고 물체면을 유지하려면 `CAMERA_WORKING_DISTANCE_MM` 을 상보적으로
 5. 문서 — [camera-geometry.md](camera-geometry.md), [configuration.md](configuration.md)
 6. **viewpoint h5 재생성** — h5 의 `metadata/camera_spec/working_distance_mm` 가
    config 보다 우선하므로([storage.py](../../scripts/core/viewpoint/storage.py)),
-   옛 파일을 그대로 읽으면 물체면이 틀린 자리에 잡힌다. 불일치 시 경고가 출력된다.
+   옛 파일을 그대로 읽으면 물체면이 틀린 자리에 잡힌다.
+   ⚠️ **경고에 기대지 말 것.** `working_distance_error()` 는 *물리적으로 불가능한* 값만
+   잡는다. 프레임을 옮긴 뒤 옛 WD 숫자가 여전히 유효 범위면 조용히 통과한다 — 실제로
+   2026-08-27 이전 h5(250·273 등)가 그 상태다(camera-geometry.md §미해결).
+   `data/*/trajectory/*/solution.h5` 와 `data/*/ik/*` 의 `working_distance_m` 도 같다.
 7. 검증 —
    ```bash
    uv run --no-sync scripts/setup/inspect_camera_step.py      # CAD 랜드마크가 그대로인지
