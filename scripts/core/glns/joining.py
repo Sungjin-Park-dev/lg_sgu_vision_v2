@@ -8,17 +8,55 @@ from pathlib import Path
 import numpy as np
 
 from core import trajectory as PT
+from core.trajectory.periodic import align_to_reference
 from core.trajectory import collision_gate_and_save
 
 class SeamFailure(RuntimeError):
     """An inter-component / HOME-bracket seam could not be bridged (incl. via-home)."""
 
 
-def _linf(a, b) -> float:
-    return float(np.max(np.abs(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64))))
+def _linf(a, b, joint_periods=None) -> float:
+    """두 자세 사이 L∞. 주기 관절은 **2π 등가 중 가장 가까운 것**으로 잰다.
+
+    주기를 안 주면 문자 그대로 잰다(비주기 축 전용). 성분 경계에서 이걸 빼먹으면
+    같은 자세인 154.3° 와 -148.1° 가 302° 떨어진 것으로 보인다 — 그 값으로 방문
+    순서를 고르면 사실은 가까운 seam 을 비싸다고 피하게 된다.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if joint_periods is not None:
+        b = align_to_reference(b, a, joint_periods)
+    return float(np.max(np.abs(a - b)))
 
 
-def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
+def align_component_to(traj, reference, joint_periods, joint_lower, joint_upper):
+    """성분 전체를 ``reference`` 에 맞춰 통째로 k·2π 이동한다. (이동된 traj, 이동했나).
+
+    성분 내부의 상대 기하는 강체라 모든 waypoint 에 같은 상수를 더해도 궤적이 변하지
+    않는다 — 바뀌는 것은 **어느 등가 표현을 쓰느냐**뿐이다. 이동 후 성분 전체가 관절
+    한계 안에 남는지 확인하고, 벗어나면 그 축은 원래대로 둔다.
+    """
+    traj = np.asarray(traj, dtype=np.float64)
+    aligned_entry = align_to_reference(traj[0], reference, joint_periods,
+                                       joint_lower, joint_upper)
+    shift = aligned_entry - traj[0]
+    if not np.any(np.abs(shift) > 1e-9):
+        return traj, False
+    out = traj.copy()
+    moved = False
+    tol = 1e-9
+    for j in range(traj.shape[1]):
+        if abs(shift[j]) <= 1e-9:
+            continue
+        col = traj[:, j] + shift[j]
+        if col.min() >= joint_lower[j] - tol and col.max() <= joint_upper[j] + tol:
+            out[:, j] = col
+            moved = True
+    return out, moved
+
+
+def choose_component_order(endpoints, home_q=None, *, strategy="optimized",
+                           joint_periods=None):
     """방문 순서 + 성분별 방향 결정. 반환 [(성분_index, reversed_bool), ...].
 
     ``optimized``: component 간 seam 거리(joint L∞)만 최소화한다. HOME 접근/복귀는
@@ -32,7 +70,7 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
         return [(i, False) for i in range(K)]
     ends = [(np.asarray(e0, np.float64), np.asarray(e1, np.float64)) for (e0, e1) in endpoints]
     if K <= 6:
-        d_btw = [[[[_linf(ends[a][sa], ends[b][sb]) for sb in (0, 1)]
+        d_btw = [[[[_linf(ends[a][sa], ends[b][sb], joint_periods) for sb in (0, 1)]
                    for b in range(K)] for sa in (0, 1)] for a in range(K)]
         best, best_cost = None, float("inf")
         for perm in itertools.permutations(range(K)):
@@ -59,7 +97,7 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
                 bk, brev, bd = None, False, float("inf")
                 for k in sorted(remaining):
                     for rev in (False, True):
-                        d = _linf(cur, ends[k][1 if rev else 0])
+                        d = _linf(cur, ends[k][1 if rev else 0], joint_periods)
                         if d < bd:
                             bd, bk, brev = d, k, rev
                 order.append((bk, brev))
@@ -87,6 +125,9 @@ def plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m,
         seam_selected, reconfig_indices, robot_cfg, world_config,
         wd_m=wd_m, enable_via_ladder=enable_via_ladder,
         lock_wrist3=False, motion_planner=motion_planner,
+        # seam 은 성분 수-1 개뿐인데 base 회전의 대부분을 만든다 — 사다리 첫 성공이 아니라
+        # 모든 단을 시도해 회전이 가장 적은 우회로를 고른다.
+        pick_least_base_travel=True,
     )
     routes = {s["idx"]: s.get("route") for s in transit_stats if s.get("success")}
     out = []
@@ -115,14 +156,20 @@ def resample_seam(q_from, q_to, seam_wp, *, robot_cfg, world_config, reconfig_ra
 
 def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
                      spacing, reconfig_rad, enable_via_ladder, home_bracket,
-                     order_strategy, out_csv, motion_planner=None, meta=None):
+                     order_strategy, out_csv, motion_planner=None, meta=None,
+                     joint_periods=None, joint_lower=None, joint_upper=None):
     """충돌-free 성분들을 순서최적화 + seam transit + HOME 브래킷으로 한 궤적으로 stitch.
 
     seam(via-home 포함)이 하나라도 실패하면 ``SeamFailure`` — 성분을 조용히 드롭하지 않는다.
+
+    성분은 ``solve`` 에서 **각자 독립적으로** 2π unwrap 된다(unwrap_joint_path 를 성분마다
+    부른다). 그래서 성분 0 이 pan 180° 근처에서, 성분 1 이 -150° 근처에서 각자 최적일 수
+    있고, 그대로 이으면 같은 자세 사이를 302° 도는 seam 이 생긴다(실측: 궤적 전체 base
+    이동의 53%). 여기서 방문 순서대로 성분을 앞 성분 출구에 맞춰 정렬해 그것을 없앤다.
     """
     home = np.asarray(home_q, dtype=np.float64)
     order = choose_component_order([(c["entry"], c["exit"]) for c in included], home,
-                          strategy=order_strategy)
+                          strategy=order_strategy, joint_periods=joint_periods)
 
     oriented = []
     for idx, rev in order:
@@ -132,6 +179,22 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
             traj, mask = traj[::-1].copy(), mask[::-1].copy()
         oriented.append({"cid": c["cid"], "traj": traj, "mask": mask,
                          "entry": traj[0], "exit": traj[-1]})
+
+    # 성분 간 2π 정렬. 앞에서부터 차례로, 직전 성분의 출구를 기준으로 삼는다.
+    # (home_bracket 이면 첫 성분은 HOME 을 기준으로 — 진입 이동도 같은 함정을 겪는다.)
+    if joint_periods is not None and joint_lower is not None and joint_upper is not None:
+        reference = home if home_bracket else None
+        for o in oriented:
+            if reference is not None:
+                traj, moved = align_component_to(
+                    o["traj"], reference, joint_periods, joint_lower, joint_upper)
+                if moved:
+                    shift_deg = np.rad2deg(traj[0] - o["traj"][0])
+                    nz = ", ".join(f"q{j}{v:+.0f}" for j, v in enumerate(shift_deg)
+                                   if abs(v) > 1e-6)
+                    print(f"    comp{o['cid']}: 2pi-aligned to previous exit ({nz})")
+                    o["traj"], o["entry"], o["exit"] = traj, traj[0], traj[-1]
+            reference = o["exit"]
 
     # seam pairs(방문 순서): [front HOME?] inter-comp… [back HOME?]
     pairs, labels = [], []

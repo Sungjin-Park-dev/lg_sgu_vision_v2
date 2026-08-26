@@ -53,7 +53,7 @@ from core.glns.candidates import (  # noqa: E402
     _collision_filter_representatives,
     _joint_limits_and_periods,
 )
-from core.glns.problem import periodic_joint_delta  # noqa: E402
+from core.trajectory.periodic import periodic_joint_delta  # noqa: E402
 from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 
 # 분기 전환(같은 포즈의 다른 팔 자세) 억제용 DP 페널티. 인접 waypoint 사이 L∞ 가

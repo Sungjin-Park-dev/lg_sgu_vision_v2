@@ -63,6 +63,7 @@ def build_reconfig_motion_planner(robot_cfg, world_scene, *, batch_size=None):
 def plan_reconfig_transits(
     selected, reconfig_indices, robot_cfg, world_scene, label_idx=None, wd_m=None,
     lock_wrist3=True, enable_via_ladder=True, motion_planner=None,
+    pick_least_base_travel=False,
 ):
     """Reconfig 지점마다 BatchMotionPlanner joint-to-joint planning 수행.
 
@@ -347,26 +348,47 @@ def plan_reconfig_transits(
             np.asarray(selected[idx])[:3] - np.asarray(selected[idx + 1])[:3])))
         skip_wrist_ladder = base_linf > BIG_BASE_RECONFIG_RAD
 
+        def _try_home():
+            """4) HOME 경유 (big-base 는 곧장 여기). 성공하면 waypoints, 아니면 None."""
+            legs = _plan_batch([selected[idx], home_q], [home_q, selected[idx + 1]])
+            if legs[0] is None or legs[1] is None:
+                return None
+            cand = np.concatenate([legs[0], legs[1][1:]], axis=0)  # HOME 중복 제거
+            if lock_wrist3:
+                cand[:, -1] = _w3lock                              # via-home 도 wrist_3 lock 후 검증
+            return cand if _transit_safe(cand) else None
+
         if enable_via_ladder:                                      # via 사다리 off 시 direct 실패분은 드롭
+            # 기본은 **첫 성공에서 멈춘다** — 성분 내부 transit 이 많아 전 단을 다 도는 것은
+            # 낭비다. pick_least_base_travel 은 seam 에서만 켠다(성분 수-1 개뿐인데 base
+            # 회전의 대부분을 차지한다). 실측: 한 seam 이 via-roll 이면 526°, via-home 이면
+            # 301° 인데 사다리 순서상 via-roll 이 먼저라 비교 없이 526° 를 쓰고 있었다.
+            rungs = []
             if not skip_wrist_ladder:
-                waypoints = _via_variant(idx, "roll")              # 2) 광축 roll 중간자세 경유
-                route = "via-roll" if waypoints is not None else None
+                rungs.append(("via-roll", lambda: _via_variant(idx, "roll")))
+                if wd_m is not None:
+                    rungs.append(("via-tilt", lambda: _via_variant(idx, "tilt")))
+            rungs.append(("via-home", _try_home))
 
-                if waypoints is None and wd_m is not None:         # 3) tilt 중간자세 경유 (escalation)
-                    waypoints = _via_variant(idx, "tilt")
-                    if waypoints is not None:
-                        route = "via-tilt"
-
-            if waypoints is None:                                  # 4) HOME 경유 (big-base 는 곧장 여기)
-                legs = _plan_batch([selected[idx], home_q],
-                                   [home_q, selected[idx + 1]])
-                if legs[0] is not None and legs[1] is not None:
-                    cand = np.concatenate([legs[0], legs[1][1:]], axis=0)  # HOME 중복 제거
-                    if lock_wrist3:
-                        cand[:, -1] = _w3lock                          # via-home 도 wrist_3 lock 후 검증
-                    if _transit_safe(cand):
-                        waypoints = cand
-                        route = "via-home"
+            found = []
+            for name, attempt in rungs:
+                cand = attempt()
+                if cand is None:
+                    continue
+                found.append((name, cand))
+                if not pick_least_base_travel:
+                    break                                          # 기존 동작: 첫 성공 채택
+            if found:
+                if len(found) > 1:
+                    scored = [(float(np.abs(np.diff(np.asarray(c)[:, :3], axis=0)).max(axis=1).sum()),
+                               nm, c) for nm, c in found]
+                    scored.sort(key=lambda x: x[0])
+                    detail = ", ".join(f"{nm} {np.rad2deg(v):.0f}deg" for v, nm, _ in scored)
+                    print(f"    {_lbl(idx)}->{_lbl(idx + 1)}: base travel {detail}"
+                          f" -> picked {scored[0][1]}")
+                    _, route, waypoints = scored[0]
+                else:
+                    route, waypoints = found[0]
 
         dt = time.time() - t0
         if waypoints is not None:

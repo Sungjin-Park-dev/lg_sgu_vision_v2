@@ -118,9 +118,9 @@ def write_result_hdf5(
             group.attrs["status"] = str(component["status"])
             group.attrs["reason"] = str(component.get("reason", ""))
             for key in (
-                "solver_cost", "reconfig_unit", "reconfig_unit_base", "reconfig_unit_any",
-                "reconfig_unit_wrist", "tilt_unit", "forbidden_cost", "joint_cost_scale",
-                "objective_base_cost", "objective_any_cost", "objective_tilt_cost",
+                "solver_cost", "reconfig_unit_base", "base_travel_unit", "base_bucket_rad", "reconfig_unit_any",
+                "tilt_unit", "forbidden_cost", "joint_cost_scale",
+                "objective_base_count", "objective_base_buckets", "objective_any_cost", "objective_tilt_cost",
                 "objective_joint_cost", "num_reconfigurations_any",
                 "num_reconfigurations", "num_reconfigurations_base",
                 "num_reconfigurations_wrist", "solver_seconds", "matrix_mib",

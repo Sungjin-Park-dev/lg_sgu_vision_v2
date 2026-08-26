@@ -137,13 +137,6 @@ def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
 _BASE_IDX = np.array([0, 1, 2])
 
 
-def _tilt_magnitudes(max_deg: float) -> list[float]:
-    """작은 tilt 부터 시도하도록 오름차순 각도 목록(시야 손실 최소화)."""
-    if max_deg <= 5.0:
-        return [round(float(max_deg), 1)]
-    return [round(float(max_deg) * 0.5, 1), round(float(max_deg), 1)]
-
-
 def _tilt_cone_poses(world_pose, wd_m, tilt_deg, n_azimuth):
     """표면점 중심 orbit tilt 포즈들(광축 ±tilt_deg, n_azimuth 방위) → (positions, quats wxyz).
 
@@ -194,63 +187,3 @@ def _tilt_compatible_solution(viewpoint, neighbor_configs, *, world_poses, world
         if best is not None:
             return best, float(tilt_deg)
     return None, None
-
-
-def _repair_branch_outliers(order, selected, candidates, *, world_poses, world, robot_cfg,
-                            wd_m, wrist3_fixed, num_seeds, batch_size,
-                            big_base_rad, outlier_max_len, tilt_magnitudes_deg, n_azimuth,
-                            ik_seed=PT.IK_RANDOM_SEED):
-    """GLNS 경로의 short branch-run(강제 big-base reconfig outlier)을 tilt-repair 또는 drop.
-
-    big-base reconfig edge 가 경로를 branch-run 으로 가른다. 양쪽 run 이 모두 길면 '진짜 전환'
-    으로 보고 손대지 않는다(verify 에서 via-home). 짧은 run(≤outlier_max_len, endpoint 포함)은
-    minority outlier 로 보고, run 바깥 이웃 branch 와 호환되는 tilt 해를 찾으면 교체(작은 모션),
-    못 찾으면 그 viewpoint 를 drop 한다. 반환 (order, selected, candidates, repaired, dropped).
-    """
-    order = [int(v) for v in order]
-    selected = [np.asarray(q, dtype=np.float64).copy() for q in selected]
-    candidates = [int(c) for c in candidates]
-    M = len(order)
-    repaired, dropped, drop_pos = [], [], set()
-    if M < 2:
-        return order, selected, candidates, repaired, dropped
-
-    base_linf = np.array([float(np.max(np.abs(selected[i][:3] - selected[i + 1][:3])))
-                          for i in range(M - 1)])
-    big = base_linf > big_base_rad
-    runs, s = [], 0
-    for i in range(M - 1):
-        if big[i]:
-            runs.append((s, i))
-            s = i + 1
-    runs.append((s, M - 1))
-
-    for a, b in runs:
-        if (b - a + 1) > outlier_max_len:
-            continue
-        if a == 0 and b == M - 1:                  # big edge 없는 전체 경로 → skip
-            continue
-        outside = []                                # run 바깥(확정) 이웃 = 타깃 branch
-        if a - 1 >= 0:
-            outside.append(selected[a - 1])
-        if b + 1 <= M - 1:
-            outside.append(selected[b + 1])
-        for p in range(a, b + 1):
-            v = order[p]
-            sol, tilt_deg = _tilt_compatible_solution(
-                v, outside, world_poses=world_poses, world=world, robot_cfg=robot_cfg,
-                wd_m=wd_m, wrist3_fixed=wrist3_fixed, num_seeds=num_seeds,
-                batch_size=batch_size, big_base_rad=big_base_rad,
-                tilt_magnitudes_deg=tilt_magnitudes_deg, n_azimuth=n_azimuth,
-                ik_seed=ik_seed)
-            if sol is not None:
-                selected[p] = sol
-                candidates[p] = -1                  # tilt-repaired(비-nominal 후보)
-                repaired.append((v, tilt_deg))
-            else:
-                drop_pos.add(p)
-                dropped.append(v)
-
-    keep = [p for p in range(M) if p not in drop_pos]
-    return ([order[p] for p in keep], [selected[p] for p in keep],
-            [candidates[p] for p in keep], repaired, dropped)

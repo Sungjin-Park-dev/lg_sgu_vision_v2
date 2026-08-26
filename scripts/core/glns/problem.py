@@ -10,124 +10,18 @@ from ortools.sat.python import cp_model
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+# 주기성 규약은 core/trajectory/periodic.py 한 곳이 소유한다. 여기서는 쓰기만 한다
+# (예전에는 이 파일이 갖고 있어서 trajectory -> glns 역방향 import 가 생겼다).
+from core.trajectory.periodic import periodic_joint_delta, unwrap_joint_path
+
 RESULT_FORMAT_VERSION = 2
 JOINT_COST_SCALE = 1000
-
-def periodic_joint_delta(delta: np.ndarray, joint_periods: np.ndarray | None = None) -> np.ndarray:
-    """Return signed shortest deltas for periodic joints, preserving array shape."""
-    out = np.asarray(delta, dtype=np.float64).copy()
-    if joint_periods is None:
-        return out
-    periods = np.asarray(joint_periods, dtype=np.float64)
-    if out.shape[-1] != len(periods) or np.any(periods < 0.0):
-        raise ValueError("joint_periods must be non-negative and match the final dimension")
-    mask = periods > 0.0
-    out[..., mask] = (
-        (out[..., mask] + periods[mask] / 2.0) % periods[mask]
-        - periods[mask] / 2.0
-    )
-    return out
-
-
-def unwrap_joint_path(
-    path: np.ndarray,
-    joint_lower: np.ndarray,
-    joint_upper: np.ndarray,
-    joint_periods: np.ndarray,
-    threshold_rad: float,
-    joint_weights: np.ndarray | None = None,
-    reference_joints: np.ndarray | None = None,
-) -> np.ndarray:
-    """Choose limit-valid 2π-equivalent configurations for an entire open path.
-
-    Dynamic programming preserves strict base-reconfiguration → any-joint
-    reconfiguration → weighted-L2 ordering. Endpoint L2 distance to the optional
-    reference breaks globally shifted ties without changing reconfiguration tiers.
-    """
-    q_path = np.asarray(path, dtype=np.float64)
-    lower = np.asarray(joint_lower, dtype=np.float64)
-    upper = np.asarray(joint_upper, dtype=np.float64)
-    periods = np.asarray(joint_periods, dtype=np.float64)
-    weights = (np.ones(q_path.shape[1], dtype=np.float64) if joint_weights is None
-               else np.asarray(joint_weights, dtype=np.float64))
-    reference = (None if reference_joints is None
-                 else np.asarray(reference_joints, dtype=np.float64))
-    if q_path.ndim != 2 or q_path.shape[1] == 0:
-        raise ValueError("path must have shape (N, dof)")
-    dof = q_path.shape[1]
-    if any(x.shape != (dof,) for x in (lower, upper, periods, weights)):
-        raise ValueError("joint limit/period/weight arrays must match path dof")
-    if reference is not None and reference.shape != (dof,):
-        raise ValueError("reference_joints must match path dof")
-    if np.any(lower > upper) or threshold_rad <= 0.0:
-        raise ValueError("invalid joint limits or threshold")
-    if len(q_path) == 0:
-        return q_path.copy()
-
-    states: list[np.ndarray] = []
-    tol = 1e-9
-    for q in q_path:
-        choices = []
-        for j, value in enumerate(q):
-            if periods[j] > 0.0:
-                k_min = int(np.ceil((lower[j] - value - tol) / periods[j]))
-                k_max = int(np.floor((upper[j] - value + tol) / periods[j]))
-                vals = [value + k * periods[j] for k in range(k_min, k_max + 1)]
-            else:
-                vals = [float(value)] if lower[j] - tol <= value <= upper[j] + tol else []
-            if not vals:
-                raise ValueError(f"joint {j} has no equivalent value inside its limits")
-            choices.append(vals)
-        states.append(np.asarray(list(itertools.product(*choices)), dtype=np.float64))
-
-    # Each state cost is a strict tuple: (base count, any count, weighted L2).
-    prev_cost = [
-        (0, 0, 0.0 if reference is None
-         else float(np.linalg.norm((s - reference) * weights)))
-        for s in states[0]
-    ]
-    predecessors: list[np.ndarray] = []
-    for step in range(1, len(states)):
-        prev_states, cur_states = states[step - 1], states[step]
-        cur_cost = []
-        cur_pred = np.empty(len(cur_states), dtype=np.int32)
-        for ci, cur in enumerate(cur_states):
-            best_cost, best_pi = None, -1
-            for pi, prev in enumerate(prev_states):
-                delta = np.abs(cur - prev)
-                edge = (
-                    int(np.max(delta[:3]) > threshold_rad),
-                    int(np.max(delta) > threshold_rad),
-                    float(np.linalg.norm(delta * weights)),
-                )
-                candidate = (
-                    prev_cost[pi][0] + edge[0],
-                    prev_cost[pi][1] + edge[1],
-                    prev_cost[pi][2] + edge[2],
-                )
-                if best_cost is None or candidate < best_cost:
-                    best_cost, best_pi = candidate, pi
-            cur_cost.append(best_cost)
-            cur_pred[ci] = best_pi
-        predecessors.append(cur_pred)
-        prev_cost = cur_cost
-
-    if reference is None:
-        final = min(range(len(prev_cost)), key=lambda i: (prev_cost[i], i))
-    else:
-        final = min(
-            range(len(prev_cost)),
-            key=lambda i: (
-                prev_cost[i][0], prev_cost[i][1],
-                prev_cost[i][2] + float(np.linalg.norm((states[-1][i] - reference) * weights)),
-                i,
-            ),
-        )
-    indices = [final]
-    for pred in reversed(predecessors):
-        indices.append(int(pred[indices[-1]]))
-    indices.reverse()
-    return np.stack([states[i][indices[i]] for i in range(len(states))])
+# 1계층(base 이동량)의 눈금. 이진 임계가 아니라 등급이라 크기가 비용에 반영된다.
+# 거칠게 잡는 데는 이유가 둘 있다. (1) 곱게 잡으면 계층 단위가 성분 크기의 고차로 커져
+# Int64 를 넘는다(1 mrad 은 성분 400개에서 터진다). (2) 같은 칸 안에서는 하위 계층
+# (6축 reconfig → tilt → 가중 L2)이 계속 동점을 깨준다 — 눈금이 곱을수록 1계층이
+# 단독 목적함수가 되어 tilt·wrist 선호가 죽는다.
+BASE_TRAVEL_BUCKET_RAD = np.deg2rad(10.0)
 
 
 def effective_candidate_cap(
@@ -411,11 +305,7 @@ def build_gtsp_problem(
     reconfig_threshold_rad: float,
     joint_cost_scale: int = JOINT_COST_SCALE,
     joint_weights: np.ndarray | None = None,
-    reconfig_base_joints: tuple[int, ...] = (0, 1, 2),
-    reconfig_wrist_joints: tuple[int, ...] = (3, 4, 5),
-    reconfig_weight_base: float = 12.0,
-    reconfig_weight_wrist: float = 1.0,
-    reconfig_exclude_last: bool = False,
+    base_bucket_rad: float = BASE_TRAVEL_BUCKET_RAD,
     candidate_tilt_costs: list[np.ndarray] | None = None,
     joint_periods: np.ndarray | None = None,
 ) -> dict:
@@ -427,12 +317,20 @@ def build_gtsp_problem(
 
     The integer objective is strict lexicographic, in this order: number of
     base-joint (q0:q3) reconfigurations, number of any-six-joint
-    reconfigurations, accumulated vertex tilt cost, weighted joint L2 travel.
+    reconfigurations, quantised base-joint travel, accumulated vertex tilt cost,
+    weighted joint L2 travel.
+
+    Tier 1 grades base travel in ``base_bucket_rad`` steps instead of counting
+    threshold crossings. Counting made a 170-deg base swing cost exactly as much
+    as a 30-deg one, and made any number of sub-threshold moves free — measured
+    on real solutions, 100% of base rotation sat under the threshold and was
+    therefore invisible to the objective.
     Tilt vertex costs are placed on both incident symmetric edges, including
     dummy endpoint edges, so every selected pose contributes exactly twice.
 
-    The legacy reconfiguration arguments remain accepted for API compatibility;
-    the strict tiers deliberately use q0:q3 and q0:q6 to match the verifier.
+    Tier 1/2 join indices are fixed at q0:q3 and q0:q6 to match the verifier —
+    they are not configurable, because the verifier recomputes reconfiguration
+    boundaries with the same fixed indices and the two must not drift apart.
     """
     members = np.asarray(members, dtype=np.int32)
     if len(members) < 2:
@@ -441,6 +339,8 @@ def build_gtsp_problem(
         raise ValueError("reconfig_threshold_rad must be > 0")
     if joint_cost_scale <= 0:
         raise ValueError("joint_cost_scale must be > 0")
+    if base_bucket_rad <= 0.0:
+        raise ValueError("base_bucket_rad must be > 0")
 
     weights = (np.ones(6, dtype=np.float64) if joint_weights is None
                else np.asarray(joint_weights, dtype=np.float64))
@@ -493,6 +393,7 @@ def build_gtsp_problem(
     # selecting the exact lexicographic penalties.
     blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     max_joint_cost = 0
+    max_base_bucket = 0
     for a, b in sorted(allowed_view_edges):
         qa = np.asarray(representatives[a], dtype=np.float64)
         qb = np.asarray(representatives[b], dtype=np.float64)
@@ -506,9 +407,13 @@ def build_gtsp_problem(
             max_joint_cost = max(max_joint_cost, int(joint_cost.max()))
         absd = np.abs(diff)
         # Strict tiers use base q0:q3 and all joints q0:q6.
+        # 1계층은 base 이동량을 눈금으로 끊어 '얼마나' 움직이는지를 센다(개수가 아니다).
         linf_base = np.max(absd[..., base_idx], axis=2)
         linf_any = np.max(absd[..., any_idx], axis=2)
-        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, linf_any))
+        base_buckets = np.floor(linf_base / base_bucket_rad).astype(np.int64)
+        if base_buckets.size:
+            max_base_bucket = max(max_base_bucket, int(base_buckets.max()))
+        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, base_buckets, linf_any))
 
     # Exact tier bounds. Each unit is one larger than the maximum total cost of
     # all lower tiers, therefore no amount of lower-tier improvement can trade
@@ -518,25 +423,41 @@ def build_gtsp_problem(
     max_tilt_vertex = max(tilt_by_vertex, default=0)
     tilt_unit = max_l2_sum + 1
     max_tilt_sum = 2 * len(members) * max_tilt_vertex * tilt_unit
-    reconfig_unit_any = max_tilt_sum + max_l2_sum + 1
+    # 계층: base reconfig 개수 → 6축 reconfig 개수 → base 이동량 버킷 → tilt → L2.
+    #
+    # 버킷은 두 reconfig 개수를 **대체하지 않고 그 아래에 더한다.** 실측으로 확인:
+    #   버킷을 최상위로 교체 → scan base -22% 인데 reconfig 2->4, transit base +178%,
+    #                          실행 총량 +45% 악화
+    #   reconfig 개수만 위로   → base=0->1 로 팔 분기가 flip, transit base +226% 악화
+    # reconfig 간선은 verify 에서 **계획된 transit** 을 부르고, 그 transit 이 사다리 끝에서
+    # via-home 으로 빠지면 목적함수가 보지 못하는 큰 base 스윙이 된다. 특히 base reconfig
+    # 하나는 팔 분기 flip 이라 그 자체가 거대한 이동이다. 그래서 개수를 먼저 0 으로 누르고,
+    # **그 안에서** 임계 아래 누적을 버킷으로 줄인다.
+    base_travel_unit = max_tilt_sum + max_l2_sum + 1
+    max_base_sum = n_real_edges * max_base_bucket * base_travel_unit
+    reconfig_unit_any = max_base_sum + max_tilt_sum + max_l2_sum + 1
     max_any_sum = n_real_edges * reconfig_unit_any
-    reconfig_unit_base = max_any_sum + max_tilt_sum + max_l2_sum + 1
+    reconfig_unit_base = max_any_sum + max_base_sum + max_tilt_sum + max_l2_sum + 1
     max_allowed_tour = (
-        n_real_edges * reconfig_unit_base + max_any_sum
-        + max_tilt_sum + max_l2_sum
+        n_real_edges * reconfig_unit_base
+        + max_any_sum + max_base_sum + max_tilt_sum + max_l2_sum
     )
     forbidden_cost = max_allowed_tour + 1
     if forbidden_cost > np.iinfo(np.int64).max:
-        raise OverflowError("strict lexicographic GTSP costs exceed Int64")
+        raise OverflowError(
+            "strict lexicographic GTSP costs exceed Int64 "
+            f"({len(members)} viewpoints, bucket={np.rad2deg(base_bucket_rad):.1f} deg). "
+            "Use a coarser base_bucket_rad or split the component.")
     costs = np.full((n_vertices, n_vertices), forbidden_cost, dtype=np.int64)
     tilt_arr = np.asarray(tilt_by_vertex, dtype=np.int64)
 
-    for ids_a, ids_b, joint_cost, linf_base, linf_any in blocks:
+    for ids_a, ids_b, joint_cost, linf_base, base_buckets, linf_any in blocks:
         edge_tilt = tilt_arr[ids_a, None] + tilt_arr[ids_b][None, :]
         block = (
             joint_cost
             + (linf_base > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_base
             + (linf_any > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_any
+            + base_buckets * base_travel_unit
             + edge_tilt * tilt_unit
         )
         costs[np.ix_(ids_a, ids_b)] = block
@@ -554,14 +475,16 @@ def build_gtsp_problem(
         "vertex_viewpoint": np.asarray(vertex_viewpoint, dtype=np.int32),
         "vertex_candidate": np.asarray(vertex_candidate, dtype=np.int32),
         "dummy_vertex": int(dummy_vertex),
-        "reconfig_unit": int(reconfig_unit_base),
         "reconfig_unit_base": int(reconfig_unit_base),
+        "base_travel_unit": int(base_travel_unit),
+        "base_bucket_rad": float(base_bucket_rad),
+        "max_base_bucket": int(max_base_bucket),
         "reconfig_unit_any": int(reconfig_unit_any),
-        "reconfig_unit_wrist": int(reconfig_unit_any),  # v1 consumer compatibility
         "tilt_unit": int(tilt_unit),
         "max_l2_sum": int(max_l2_sum),
         "max_tilt_sum": int(max_tilt_sum),
         "max_any_sum": int(max_any_sum),
+        "max_base_sum": int(max_base_sum),
         "max_allowed_tour": int(max_allowed_tour),
         "forbidden_cost": int(forbidden_cost),
         "joint_cost_scale": int(joint_cost_scale),

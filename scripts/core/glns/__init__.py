@@ -8,10 +8,10 @@ from .problem import (
     expand_edges_by_hops,
     find_hamiltonian_open_path,
     induce_adjacency,
-    periodic_joint_delta,
     prune_candidate_sets,
-    unwrap_joint_path,
 )
+# 주기성은 core.trajectory.periodic 이 소유한다 — 기존 import 경로 호환을 위해 재수출.
+from core.trajectory.periodic import periodic_joint_delta, unwrap_joint_path
 from .ik_store import (
     augmentation_suffix,
     build_settings,

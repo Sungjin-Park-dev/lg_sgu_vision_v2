@@ -11,11 +11,8 @@ from curobo.types import GoalToolPose, Pose
 
 from common import config
 from .robot import _tick
+from .periodic import normalize_joints  # 주기성 규약은 periodic.py 소유
 from .settings import CANDIDATE_DEDUP_RAD, IK_RANDOM_SEED
-
-def normalize_joints(q):
-    """Joint angles를 [-π, π] 범위로 정규화. 형상 유지."""
-    return ((q + np.pi) % (2 * np.pi)) - np.pi
 
 
 # =========================================================================

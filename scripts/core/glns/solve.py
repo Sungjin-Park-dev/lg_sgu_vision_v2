@@ -31,9 +31,7 @@ from core.glns.candidates import (  # noqa: E402
     _build_pose_variants,
     _collision_filter_representatives,
     _joint_limits_and_periods,
-    _repair_branch_outliers,
     _solve_pose_variant_candidates,
-    _tilt_magnitudes,
 )
 from core.glns.ik_store import (  # noqa: E402
     build_settings,
@@ -72,8 +70,6 @@ DEFAULT_MAX_CANDIDATES = 16
 # weights gradient base>elbow>wrist>roll so even sub-threshold drift favours the
 # base staying still. See docs/glns_path.md.
 DEFAULT_JOINT_WEIGHTS = (1.0, 1.0, 0.5, 0.2, 0.2, 0.05)
-RECONFIG_BASE_JOINTS = (0, 1, 2)
-RECONFIG_WRIST_JOINTS = (3, 4, 5)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -103,13 +99,6 @@ def _parse_args() -> argparse.Namespace:
                         metavar=("PAN", "LIFT", "ELBOW", "W1", "W2", "W3"),
                         help="per-joint L2 동점-깨기 가중치 "
                              f"(default 차등 {list(DEFAULT_JOINT_WEIGHTS)})")
-    parser.add_argument("--reconfig-weight-base", type=float, default=12.0,
-                        help="base(pan/lift/elbow) reconfig 1회 비용 = N×wrist 1회 (default 12)")
-    parser.add_argument("--reconfig-weight-wrist", type=float, default=1.0,
-                        help="wrist reconfig 1회 비용 단위 (default 1)")
-    parser.add_argument("--uniform-reconfig", action="store_true",
-                        help="옛 동작: 6-DoF 단일 binary reconfig + 균일 L2 가중치(비교용). "
-                             "base/wrist 차등을 끈다.")
     parser.add_argument("--roll-augment", action="store_true",
                         help="add nonzero optical-axis roll IK pose variants")
     parser.add_argument("--roll-step-deg", type=float, default=30.0,
@@ -131,17 +120,6 @@ def _parse_args() -> argparse.Namespace:
                         default=DEFAULT_MAX_CANDIDATES)
     parser.add_argument("--matrix-target-mib", type=float, default=DEFAULT_MATRIX_TARGET_MIB,
                         help="automatic candidate-cap target per component (default: 256)")
-    parser.add_argument("--tilt-repair", action="store_true",
-                        help="GLNS 후 강제 big-base reconfig outlier viewpoint 를 ±tilt 재-IK 로 "
-                             "복구(이웃과 호환되는 해로 교체, 없으면 drop)")
-    parser.add_argument("--tilt-repair-max-deg", type=float, default=10.0,
-                        help="[--tilt-repair] 스캔 허용 off-normal tilt 최대각 deg (default: 10)")
-    parser.add_argument("--tilt-repair-azimuths", type=int, default=8,
-                        help="[--tilt-repair] tilt 방위 수 (default: 8)")
-    parser.add_argument("--big-base-deg", type=float, default=120.0,
-                        help="[--tilt-repair] catastrophic base reconfig 판정 L∞ deg (default: 120)")
-    parser.add_argument("--outlier-max-len", type=int, default=2,
-                        help="[--tilt-repair] outlier 로 볼 branch-run 최대 길이 (default: 2)")
     parser.add_argument("--glns-mode", choices=("fast", "default", "slow"), default="fast")
     parser.add_argument("--glns-timeout", type=int, default=30,
                         help="GLNS max time per component in seconds (default: 30)")
@@ -171,13 +149,6 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--reconfig-threshold-deg must be > 0")
     if not 0.0 < args.roll_step_deg <= 180.0:
         parser.error("--roll-step-deg must be in (0, 180]")
-    if args.tilt_repair:
-        if not 0.0 < args.tilt_repair_max_deg <= 45.0:
-            parser.error("--tilt-repair-max-deg must be in (0, 45]")
-        if args.tilt_repair_azimuths < 1 or args.outlier_max_len < 1 or args.big_base_deg <= 0.0:
-            parser.error("--tilt-repair-azimuths/--outlier-max-len/--big-base-deg must be positive")
-    if args.tilt_augment and args.tilt_repair:
-        parser.error("--tilt-augment and --tilt-repair are mutually exclusive")
     if any(a <= 0.0 or a > 45.0 for a in args.tilt_angles_deg):
         parser.error("--tilt-angles-deg values must be in (0, 45]")
     if args.tilt_azimuths < 1 or args.max_candidates_per_viewpoint < 1:
@@ -298,20 +269,13 @@ def main() -> int:
     # Resolve the joint-differentiated reconfiguration cost. --uniform-reconfig
     # collapses both tiers into a single 6-DoF binary with even L2 weights (the
     # legacy behaviour) for A/B comparison.
-    if args.uniform_reconfig:
-        joint_weights = np.ones(6, dtype=np.float64)
-        base_joints, wrist_joints = (0, 1, 2, 3, 4, 5), ()
-        weight_base, weight_wrist = 1.0, 1.0   # 옛 단일-binary magnitude 재현
-    else:
-        joint_weights = np.asarray(
-            args.joint_weights if args.joint_weights is not None else DEFAULT_JOINT_WEIGHTS,
-            dtype=np.float64,
-        )
-        base_joints, wrist_joints = RECONFIG_BASE_JOINTS, RECONFIG_WRIST_JOINTS
-        weight_base, weight_wrist = args.reconfig_weight_base, args.reconfig_weight_wrist
-    print(f"  Reconfig cost: base joints={base_joints}, wrist joints={wrist_joints}, "
-          f"L2 weights={joint_weights.round(3).tolist()}, "
-          f"penalty base:wrist = {weight_base}:{weight_wrist}")
+    joint_weights = np.asarray(
+        args.joint_weights if args.joint_weights is not None else DEFAULT_JOINT_WEIGHTS,
+        dtype=np.float64,
+    )
+    # 계층 순위(base 개수 → 6축 개수 → tilt → 가중 L2)는 build_gtsp_problem 에 고정돼 있다.
+    # 여기서 조절할 수 있는 것은 최하위 동점-깨기 가중치뿐이라, 그것만 보고한다.
+    print(f"  Cost tie-break L2 weights = {joint_weights.round(3).tolist()}")
     # Strict objective/verifier definitions: q0:q3 base, q0:q6 any.
     base_idx_arr = np.arange(3, dtype=int)
     any_idx_arr = np.arange(6, dtype=int)
@@ -435,8 +399,6 @@ def main() -> int:
     print("[5/6] Solving one open GTSP per component...")
     threshold_rad = np.deg2rad(args.reconfig_threshold_deg)
     component_results: list[dict] = []
-    repaired_all: list[int] = []        # tilt-repair: 교체된 outlier viewpoints
-    dropped_all: list[int] = []         # tilt-repair: tilt 실패로 drop 된 outlier viewpoints
     debug_root = None
     output_path = (args.output.resolve() if args.output is not None
                    else _default_output(args.object, n_viewpoints).resolve())
@@ -488,7 +450,7 @@ def main() -> int:
                 ).astype(np.int16)
                 base.update(
                     status="solved", reason="trivial singleton", solver_cost=0,
-                    reconfig_unit=1, reconfig_unit_base=1, reconfig_unit_wrist=1,
+                    reconfig_unit_base=1, base_travel_unit=1, reconfig_unit_any=1,
                     forbidden_cost=1, joint_cost_scale=1000,
                     viewpoint_order=np.array([viewpoint], dtype=np.int32),
                     selected_candidate_index=np.array([candidate], dtype=np.int32),
@@ -501,7 +463,7 @@ def main() -> int:
                     is_reconfiguration_wrist=np.empty((0,), dtype=bool),
                     num_reconfigurations=0, num_reconfigurations_base=0,
                     num_reconfigurations_any=0, num_reconfigurations_wrist=0,
-                    objective_base_cost=0, objective_any_cost=0,
+                    objective_base_buckets=0, objective_any_cost=0,
                     objective_tilt_cost=int(round((candidate_metadata[viewpoint]["tilt_deg"][candidate] / 5.0) ** 2)),
                     objective_joint_cost=0,
                     selected_pose_variant=np.asarray([candidate_metadata[viewpoint]["variant"][candidate]]),
@@ -531,11 +493,6 @@ def main() -> int:
                 problem = build_gtsp_problem(
                     members, representatives, induced_edges, threshold_rad,
                     joint_weights=joint_weights,
-                    reconfig_base_joints=base_joints,
-                    reconfig_wrist_joints=wrist_joints,
-                    reconfig_weight_base=weight_base,
-                    reconfig_weight_wrist=weight_wrist,
-                    reconfig_exclude_last=False,
                     candidate_tilt_costs=[
                         np.rint((np.asarray(md["tilt_deg"]) / 5.0) ** 2).astype(np.int64)
                         for md in candidate_metadata
@@ -584,10 +541,10 @@ def main() -> int:
                 ], dtype=np.int64)
                 base.update(
                     status="solved", solver_cost=decoded["cost"],
-                    reconfig_unit=problem["reconfig_unit"],
                     reconfig_unit_base=problem["reconfig_unit_base"],
+                    base_travel_unit=problem["base_travel_unit"],
+                    base_bucket_rad=problem["base_bucket_rad"],
                     reconfig_unit_any=problem["reconfig_unit_any"],
-                    reconfig_unit_wrist=problem["reconfig_unit_any"],
                     tilt_unit=problem["tilt_unit"],
                     forbidden_cost=problem["forbidden_cost"],
                     joint_cost_scale=problem["joint_cost_scale"],
@@ -603,7 +560,9 @@ def main() -> int:
                     num_reconfigurations_base=int(is_reconfig_base.sum()),
                     num_reconfigurations_any=int(is_reconfig_any.sum()),
                     num_reconfigurations_wrist=int(is_reconfig_any.sum()),
-                    objective_base_cost=int(is_reconfig_base.sum()),
+                    objective_base_count=int(is_reconfig_base.sum()),
+                    objective_base_buckets=int(np.floor(
+                        linf_base / float(problem["base_bucket_rad"])).sum()),
                     objective_any_cost=int(is_reconfig_any.sum()),
                     objective_tilt_cost=int(selected_tilt_cost.sum()),
                     objective_joint_cost=int(np.rint(weighted_l2 * problem["joint_cost_scale"]).sum()),
@@ -629,44 +588,6 @@ def main() -> int:
                       f"any={int(is_reconfig_any.sum())}), "
                       f"lifted_joints={int(np.count_nonzero(selected_turns))}, "
                       f"cost={decoded['cost']}, {elapsed:.2f}s")
-                if args.tilt_repair and len(order) >= 2:
-                    try:
-                        rep_order, rep_sel, rep_cand, repaired, dropped = _repair_branch_outliers(
-                            order, selected, candidates,
-                            world_poses=world_poses, world=world, robot_cfg=robot_cfg,
-                            wd_m=source["wd_m"], wrist3_fixed=wrist3_fixed,
-                            num_seeds=args.num_seeds, batch_size=args.ik_batch_size,
-                            big_base_rad=np.deg2rad(args.big_base_deg),
-                            outlier_max_len=args.outlier_max_len,
-                            tilt_magnitudes_deg=_tilt_magnitudes(args.tilt_repair_max_deg),
-                            n_azimuth=args.tilt_repair_azimuths, ik_seed=args.ik_seed)
-                    except Exception as rexc:  # noqa: BLE001 — keep the valid un-repaired solve
-                        print(f"    [tilt-repair warning] {rexc} - keeping un-repaired path")
-                        repaired, dropped = [], []
-                    if (repaired or dropped) and len(rep_sel) >= 1:
-                        rep_wrapped = np.stack(rep_sel)
-                        rep_sel = unwrap_joint_path(
-                            rep_wrapped, joint_lower, joint_upper, joint_periods,
-                            threshold_rad, joint_weights=joint_weights,
-                            reference_joints=np.asarray(config.ROBOT_START_STATE, dtype=np.float64),
-                        )
-                        rep_turns = np.zeros_like(rep_sel, dtype=np.int16)
-                        periodic = joint_periods > 0.0
-                        rep_turns[:, periodic] = np.rint(
-                            (rep_sel[:, periodic] - rep_wrapped[:, periodic])
-                            / joint_periods[periodic]
-                        ).astype(np.int16)
-                        fields = _path_reconfig_fields(
-                            rep_sel, threshold_rad, base_idx_arr, any_idx_arr)
-                        base.update(
-                            viewpoint_order=np.asarray(rep_order, dtype=np.int32),
-                            selected_candidate_index=np.asarray(rep_cand, dtype=np.int32),
-                            selected_joints=rep_sel, selected_joint_turns=rep_turns, **fields)
-                        repaired_all.extend(int(v) for v, _ in repaired)
-                        dropped_all.extend(int(v) for v in dropped)
-                        print(f"    Tilt-repair: repaired {[(v, round(d, 1)) for v, d in repaired]}, "
-                              f"dropped {dropped} -> base reconfigs "
-                              f"{int(is_reconfig_base.sum())}->{fields['num_reconfigurations_base']}")
             except Exception as exc:  # preserve other components and diagnostics
                 base.update(status="solver_failed", reason=str(exc), matrix_mib=matrix_mib)
                 print(f"    FAILED: {exc}")
@@ -715,19 +636,8 @@ def main() -> int:
         "joint_upper_rad": joint_upper.astype(float).tolist(),
         "joint_periods_rad": joint_periods.astype(float).tolist(),
         "joint_unwrapped": True,
-        "reconfig_base_joints": list(base_joints),
-        "reconfig_wrist_joints": list(wrist_joints),
-        "reconfig_weight_base": float(weight_base),
-        "reconfig_weight_wrist": float(weight_wrist),
-        "uniform_reconfig": bool(args.uniform_reconfig),
         "delaunay_expand_hops": int(args.delaunay_expand_hops),
         "graph_edge_count": int(len(graph_edges)),
-        "tilt_repair": bool(args.tilt_repair),
-        "tilt_repair_max_deg": float(args.tilt_repair_max_deg),
-        "big_base_deg": float(args.big_base_deg),
-        "outlier_max_len": int(args.outlier_max_len),
-        "tilt_repaired_viewpoints": [int(v) for v in repaired_all],
-        "tilt_dropped_viewpoints": [int(v) for v in dropped_all],
         "glns_mode": args.glns_mode,
         "glns_timeout_s": args.glns_timeout,
         "glns_seed": args.glns_seed,
@@ -751,9 +661,6 @@ def main() -> int:
     print(f"  solved={len(solved)}/{len(components)}, reconfigs={total_reconfigs} "
           f"(base={total_reconfigs_base}, any={total_reconfigs_any}), "
           f"unreachable={int((~reachable).sum())}")
-    if args.tilt_repair and (repaired_all or dropped_all):
-        print(f"  tilt-repair: repaired={len(repaired_all)} {repaired_all}, "
-              f"dropped={len(dropped_all)} {dropped_all}")
     return 2 if failed else 0
 
 
