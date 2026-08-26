@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""한 viewpoint 를 중심으로 카메라를 기울이는(tilt) 검사 모션 하나를 CSV(+npz)로 낸다.
+"""스캔 궤적의 **한 점**을 중심으로 카메라를 기울이는(tilt) 검사 모션을 CSV(+npz)로 낸다.
 
 스캔 궤적(`glns/solve.py` → `glns/verify.py`)이 "모든 viewpoint 를 한 번씩" 이라면, 이건
-그 반대다 — **viewpoint 하나**를 표면점 중심으로 공전(orbit)하며 여러 각도에서 본다.
+그 반대다 — **한 자리**를 표면점 중심으로 공전(orbit)하며 여러 각도에서 본다.
+
+중심은 궤적 CSV 의 행으로 고른다. CSV 가 각 행의 카메라 포즈를 이미 갖고 있어서(FK 산출)
+viewpoint 뿐 아니라 **보간으로 생긴 점, 모션플래너가 만든 점**도 중심이 될 수 있다 —
+viewpoint h5 에는 그런 점이 아예 없다. 각 행의 출처는 CSV 의 ``waypoint_kind`` 컬럼
+(viewpoint / interpolated / planned)에 있고, 이 스크립트가 고른 행의 라벨을 찍어 준다.
 정면에서 안 보이던 결함(광택면 반사, 단차, 그림자)을 각도로 잡아내는 용도라 순서 최적화
 (GTSP/GLNS)가 필요 없다: 방문 순서가 처음부터 정해져 있다.
 
@@ -26,8 +31,8 @@ Exit: 0 = 충돌-free CSV 생성, 2 = 중심 포즈 도달 불가 / 충돌 게�
 
 Usage:
     uv run --no-sync scripts/core/trajectory/tilt_motion.py \\
-        --object sample --viewpoints data/sample/viewpoint/74/viewpoints.h5 \\
-        --viewpoint-index 10 \\
+        --object sample --trajectory data/sample/trajectory/74/trajectory.csv \\
+        --row-index 120 \\
         --object-position -0.15 0.741 0.19 --object-quat 0.70710678 0 0 0.70710678 \\
         --pitch-min -20 --pitch-max 20 --pitch-n 40 \\
         --roll-min -20 --roll-max 20 --roll-n 40 \\
@@ -37,6 +42,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import sys
 from pathlib import Path
 
@@ -54,7 +61,6 @@ from core.glns.candidates import (  # noqa: E402
     _joint_limits_and_periods,
 )
 from core.trajectory.periodic import periodic_joint_delta  # noqa: E402
-from core.viewpoint import load_viewpoints_hdf5  # noqa: E402
 
 # 분기 전환(같은 포즈의 다른 팔 자세) 억제용 DP 페널티. 인접 waypoint 사이 L∞ 가
 # reconfig 임계를 넘으면 붙는다 - tilt 는 연속 모션이라 분기가 갈리면 안 된다.
@@ -77,9 +83,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--object", required=True, help="object name placed in the collision world")
-    p.add_argument("--viewpoints", required=True, type=Path, help="path to the viewpoints .h5")
-    p.add_argument("--viewpoint-index", required=True, type=int,
-                   help="index of the viewpoint to tilt around (h5 order, 0-based)")
+    p.add_argument("--trajectory", required=True, type=Path,
+                   help="scan trajectory CSV whose row is the tilt centre")
+    p.add_argument("--row-index", required=True, type=int,
+                   help="row of that CSV to tilt around (0-based). viewpoint 행뿐 아니라 "
+                        "보간·모션플래닝으로 생긴 행도 고를 수 있다")
     p.add_argument("--output", required=True, type=Path, help="output CSV path")
     p.add_argument("--object-position", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    default=None, help="object position (robot base_link frame, m)")
@@ -107,10 +115,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-clamp", dest="clamp", action="store_false",
                    help="fail instead of clamping when an angle is unreachable")
     p.set_defaults(clamp=True)
+    PT.add_timing_cli_arguments(p)
     args = p.parse_args()
 
-    if args.viewpoint_index < 0:
-        p.error("--viewpoint-index must be >= 0")
+    if args.row_index < 0:
+        p.error("--row-index must be >= 0")
     for name in ("pitch_n", "roll_n"):
         if getattr(args, name) < 2:
             p.error(f"--{name.replace('_', '-')} must be >= 2")
@@ -121,6 +130,49 @@ def parse_args() -> argparse.Namespace:
     if args.num_seeds <= 0 or args.batch_size <= 0:
         p.error("--num-seeds / --batch-size must be > 0")
     return args
+
+
+
+def load_trajectory_row(csv_path: Path, row_index: int):
+    """궤적 CSV 의 한 행 → (카메라 4x4 포즈, 라벨, 총 행 수).
+
+    CSV 는 이미 각 행의 카메라 포즈를 갖고 있다(target-POS_* / target-ROT_*, FK 산출).
+    그래서 viewpoint h5 를 다시 읽어 자세를 재구성할 필요가 없고, **보간·모션플래닝으로
+    생긴 행도 중심으로 삼을 수 있다** — viewpoint h5 에는 그런 점이 아예 없다.
+
+    라벨(waypoint_kind)은 있으면 읽고 없으면 "unknown". 옛 CSV 에는 그 컬럼이 없다.
+    """
+    with open(csv_path, "r", newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"trajectory CSV has no rows: {csv_path}")
+    if not 0 <= row_index < len(rows):
+        raise IndexError(f"row {row_index} out of range (CSV has {len(rows)} rows)")
+    row = rows[row_index]
+    need = ("target-POS_X", "target-POS_Y", "target-POS_Z",
+            "target-ROT_X", "target-ROT_Y", "target-ROT_Z", "target-ROT_W")
+    missing = [c for c in need if c not in row]
+    if missing:
+        raise ValueError(f"trajectory CSV lacks camera pose columns: {missing}")
+    pos = np.array([float(row[c]) for c in need[:3]], dtype=np.float64)
+    qx, qy, qz, qw = (float(row[c]) for c in need[3:])
+    pose = np.eye(4, dtype=np.float64)
+    # CSV 는 (x,y,z,w), quaternion_to_rotation_matrix 는 (w,x,y,z) 를 받는다.
+    pose[:3, :3] = quaternion_to_rotation_matrix(np.array([qw, qx, qy, qz]))
+    pose[:3, 3] = pos
+    return pose, (row.get("waypoint_kind") or "unknown"), len(rows)
+
+
+def load_trajectory_meta(csv_path: Path) -> dict:
+    """CSV 옆 npz sidecar 의 meta. 작업거리와 물체 배치가 거기 박혀 있다."""
+    npz = Path(csv_path).with_suffix(".npz")
+    if not npz.exists():
+        return {}
+    try:
+        with np.load(npz, allow_pickle=False) as d:
+            return json.loads(str(d["meta"])) if "meta" in d else {}
+    except (ValueError, TypeError, KeyError):
+        return {}
 
 
 # =============================================================================
@@ -225,8 +277,11 @@ def main() -> int:
     args = parse_args()
 
     print("=" * 64)
-    print("TILT MOTION (single viewpoint orbit)")
+    print("TILT MOTION (orbit around one trajectory row)")
     print("=" * 64)
+
+    # 충돌 게이트가 시간을 매기기 전에만 반영되면 된다. 여기가 그 앞이다.
+    PT.apply_timing_cli(args)
 
     # 물체 배치: 기본값 → CLI override (plan_move.py / solve.py 와 같은 관례).
     config.apply_object_placement(args.object)
@@ -235,30 +290,28 @@ def main() -> int:
     if args.object_quat is not None:
         config.TARGET_OBJECT["rotation"] = np.array(args.object_quat, dtype=np.float64)
 
-    viewpoint = load_viewpoints_hdf5(args.viewpoints)
-    n_viewpoints = viewpoint.count
-    if args.viewpoint_index >= n_viewpoints:
-        print(f"  x viewpoint index {args.viewpoint_index} out of range "
-              f"(file has {n_viewpoints})")
+    # 궤적 옆 npz meta 가 작업거리와 물체 배치를 갖고 있다 — 그 궤적이 계획된 바로 그 조건.
+    # CLI override 가 있으면 그쪽이 이긴다(호출자가 살아있는 기즈모 pose 를 줄 수 있다).
+    meta = load_trajectory_meta(args.trajectory)
+    if args.object_position is None and "object_position" in meta:
+        config.TARGET_OBJECT["position"] = np.asarray(meta["object_position"], dtype=np.float64)
+    if args.object_quat is None and "object_quat_wxyz" in meta:
+        config.TARGET_OBJECT["rotation"] = np.asarray(meta["object_quat_wxyz"], dtype=np.float64)
+    wd_m = float(meta.get("working_distance_mm", config.CAMERA_WORKING_DISTANCE_MM)) / 1000.0
+
+    try:
+        center_pose, row_kind, n_rows = load_trajectory_row(args.trajectory, args.row_index)
+    except (ValueError, IndexError) as exc:
+        print(f"  x {exc}")
         return 2
-    wd_m = viewpoint.working_distance_m
 
     print(f"  object    : {args.object}  pos="
           f"{np.round(config.TARGET_OBJECT['position'], 3).tolist()} "
           f"quat={np.round(config.TARGET_OBJECT['rotation'], 4).tolist()}")
-    print(f"  viewpoints: {args.viewpoints} ({n_viewpoints} pts, WD={wd_m * 1000:.1f} mm)")
-    print(f"  center    : viewpoint #{args.viewpoint_index}")
+    print(f"  trajectory: {args.trajectory} ({n_rows} rows, WD={wd_m * 1000:.1f} mm)")
+    print(f"  center    : row #{args.row_index}  [{row_kind}]")
     print(f"  pitch up/down : {args.pitch_max:+.1f} / {args.pitch_min:+.1f} deg  x{args.pitch_n}")
     print(f"  roll left/right: {args.roll_min:+.1f} / {args.roll_max:+.1f} deg  x{args.roll_n}")
-
-    # 중심 포즈 — 스캔 궤적이 이 viewpoint 를 볼 때 쓰는 바로 그 카메라 포즈다.
-    # 물체 배치는 robot base frame(config.TARGET_OBJECT) → 아래 포즈도 전부 robot frame.
-    object_pose = np.eye(4, dtype=np.float64)
-    object_pose[:3, :3] = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
-    object_pose[:3, 3] = config.TARGET_OBJECT["position"]
-    center_pose = camera_pose(
-        viewpoint.positions[args.viewpoint_index],
-        viewpoint.normals[args.viewpoint_index], wd_m, object_pose)
     print(f"  camera    : pos={np.round(center_pose[:3, 3], 4).tolist()} -> "
           f"surface={np.round(center_pose[:3, 3] + center_pose[:3, 2] * wd_m, 4).tolist()}")
 
@@ -295,7 +348,7 @@ def main() -> int:
 
     if not len(candidates[0]):
         print(f"  x no collision-free IK solution for the center pose "
-              f"(viewpoint #{args.viewpoint_index}) - cannot build a tilt here.")
+              f"(row #{args.row_index}) - cannot build a tilt here.")
         return 2
 
     # ---- leg 별 도달 가능 구간까지만 왕복 (요청 각도 축소) ------------------
@@ -337,7 +390,7 @@ def main() -> int:
             print(f"      {item['leg']}: {item['requested_deg']:+.1f} -> "
                   f"{item['reached_deg']:+.1f} deg")
         print("    narrow the range, move the object closer to the robot, "
-              "or pick another viewpoint.")
+              "or pick another row.")
 
     if len(sequence) < 2:
         print("  x only the center pose is reachable - no tilt span to move through.")
@@ -366,10 +419,16 @@ def main() -> int:
     gate = PT.collision_gate_and_save(
         traj, is_transit, robot_cfg=robot_cfg, world_config=world_config,
         out_csv=args.output,
+        # 모든 행이 **명령한 orbit 포즈의 IK 해**다. 여기는 resample 이 없어서 행과 포즈가
+        # 1:1 이고, 보간점도 플래너가 만든 점도 섞이지 않는다 → 전부 viewpoint.
+        # (안 주면 tilt CSV 만 라벨 없는 파일이 되어, 그걸 다시 tilt 기준으로 골랐을 때
+        #  패널이 unknown 만 띄운다.)
+        kinds=np.full(len(traj), PT.WAYPOINT_VIEWPOINT, dtype=np.int8),
         meta={
             "kind": "tilt",
-            "viewpoints": str(args.viewpoints),
-            "viewpoint_index": int(args.viewpoint_index),
+            "trajectory": str(args.trajectory),
+            "row_index": int(args.row_index),
+            "row_kind": row_kind,
             "working_distance_m": float(wd_m),
             "pitch_deg": [float(args.pitch_min), float(args.pitch_max)],
             "roll_deg": [float(args.roll_min), float(args.roll_max)],

@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
                    help="working distance [m]. 주면 사다리에 via-tilt 단계가 추가된다")
     p.add_argument("--no-via", action="store_true",
                    help="via 사다리(roll/tilt/home) 없이 direct 만 시도")
+    PT.add_timing_cli_arguments(p)
     return p.parse_args()
 
 
@@ -109,6 +110,8 @@ def main() -> int:
         config.TARGET_OBJECT["rotation"] = np.array(args.object_quat, dtype=np.float64)
     print(f"  placement pos={np.round(config.TARGET_OBJECT['position'], 3).tolist()} "
           f"quat={np.round(config.TARGET_OBJECT['rotation'], 4).tolist()}")
+    # 충돌 게이트가 시간을 매기기 전에만 반영되면 된다. 여기가 그 앞이다.
+    PT.apply_timing_cli(args)
 
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     world_config = PT.build_collision_world(args.object)
@@ -139,7 +142,7 @@ def main() -> int:
 
         # 이동 전체가 transit 이므로 마스크는 all-True. (2행 입력의 첫 노드를 scan 으로
         # 타이핑하는 interpolate_and_resample 의 기본 동작을 덮는다 — resample_seam 과 동일.)
-        traj, _is_transit, _dropped, _runs = PT.interpolate_and_resample(
+        traj, _is_transit, _dropped, _runs, _kinds = PT.interpolate_and_resample(
             selected, {0: waypoints}, robot_cfg,
             mode=PT.RESAMPLE_MODE, spacing=args.spacing,
             reconfig_threshold_rad=np.deg2rad(PT.RECONFIG_THRESHOLD_DEG),
@@ -148,9 +151,11 @@ def main() -> int:
     is_transit = np.ones(len(traj), dtype=bool)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    # 이 CLI 가 내는 것은 전 구간이 계획된 이동이다(양 끝 자세는 검사 자세가 아니라 요청값).
     gate = PT.collision_gate_and_save(
         traj, is_transit, robot_cfg=robot_cfg, world_config=world_config,
         out_csv=args.output,
+        kinds=np.full(len(traj), PT.WAYPOINT_PLANNED, dtype=np.int8),
     )
     if not gate["collision_free"]:
         print(f"  x collision gate failed: {gate['n_collisions']} collisions - not saved.")

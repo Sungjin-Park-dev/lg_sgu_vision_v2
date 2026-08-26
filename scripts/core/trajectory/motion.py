@@ -414,14 +414,38 @@ def plan_reconfig_transits(
 # Phase 5: Uniform resample + collision check
 # =========================================================================
 
-def _resample_uniform(joints, spacing, robot_cfg=None):
+# 궤적 행의 출처. 어떻게 만들어진 점인지가 후속 작업(예: tilt 중심 고르기)에서 의미가
+# 달라서 구분한다.
+#   VIEWPOINT     GLNS 가 고른 실제 검사 자세 — 카메라가 그 표면점을 보라고 계획된 점
+#   INTERPOLATED  인접 viewpoint 사이를 직선 보간해 채운 점 (스캔 이동)
+#   PLANNED       모션 플래너(MotionGen)가 만든 재배치/seam 경로의 점
+WAYPOINT_INTERPOLATED = 0
+WAYPOINT_VIEWPOINT = 1
+WAYPOINT_PLANNED = 2
+WAYPOINT_KIND_NAMES = {
+    WAYPOINT_INTERPOLATED: "interpolated",
+    WAYPOINT_VIEWPOINT: "viewpoint",
+    WAYPOINT_PLANNED: "planned",
+}
+
+
+def _resample_uniform(joints, spacing, robot_cfg=None, is_vp=None):
     """waypoint를 균일 간격으로 재분할 → 상수 dt 재생 시 속도가 일정해진다.
 
     robot_cfg 가 주어지면 EE position arc-length(m), 아니면 joint-space L∞(max-joint, rad)
     기준으로 인접 출력 간 거리 ≈ spacing 이 되도록 분할한다. (scan은 EE, transit은 joint 기준)
+
+    ``is_vp`` (입력 행이 실제 viewpoint 자세인지)를 주면 **그 자세를 출력에 그대로 남기고**
+    (출력, 출력_is_vp) 를 돌려준다. 균일 격자만 쓰면 viewpoint 가 보간되어 사라지고, 로봇은
+    계획된 검사 자세에서 최대 spacing/2 만큼(EE 기준 수 mm) 벗어난 곳을 지난다 — 검사
+    자세는 "그 표면점을 그 각도에서 본다"는 계획 자체라 근사하면 안 된다.
+
+    그래서 샘플 위치를 **균일 격자 ∪ viewpoint 호 위치** 로 만든다. viewpoint 위치는 입력
+    노드라 np.interp 가 원래 값을 정확히 돌려준다. 격자점이 viewpoint 에 너무 붙으면
+    (< spacing/2) 그 격자점은 버려서, 거의 같은 행이 둘 생기지 않게 한다.
     """
     if len(joints) < 2:
-        return joints
+        return (joints, is_vp) if is_vp is not None else joints
     if robot_cfg is not None:
         ee_positions, _ = compute_fk(joints, robot_cfg)  # (M, 3)
         diffs = np.linalg.norm(np.diff(ee_positions, axis=0), axis=1)
@@ -430,13 +454,32 @@ def _resample_uniform(joints, spacing, robot_cfg=None):
     cum_len = np.concatenate([[0], np.cumsum(diffs)])
     total_len = cum_len[-1]
     if total_len < 1e-9:
-        return joints
+        return (joints, is_vp) if is_vp is not None else joints
     n_out = max(2, int(np.ceil(total_len / spacing)) + 1)
     uniform_s = np.linspace(0, total_len, n_out)
-    out = np.zeros((n_out, joints.shape[1]), dtype=np.float64)
+
+    if is_vp is None:
+        sample_s, out_vp = uniform_s, None
+    else:
+        src = np.flatnonzero(np.asarray(is_vp, dtype=bool))
+        s_vp = np.unique(cum_len[src]) if len(src) else np.empty(0)
+        if len(s_vp):
+            # viewpoint 에 붙어 있는 격자점은 버린다 — 거의 같은 두 행을 만들지 않는다.
+            too_close = np.min(np.abs(uniform_s[:, None] - s_vp[None, :]), axis=1) <= 0.5 * spacing
+            grid = uniform_s[~too_close]
+        else:
+            grid = uniform_s
+        sample_s = np.concatenate([grid, s_vp])
+        flags = np.concatenate([np.zeros(len(grid), dtype=bool),
+                                np.ones(len(s_vp), dtype=bool)])
+        order = np.argsort(sample_s, kind="stable")
+        sample_s, out_vp = sample_s[order], flags[order]
+
+    out = np.zeros((len(sample_s), joints.shape[1]), dtype=np.float64)
     for j in range(joints.shape[1]):
-        out[:, j] = np.interp(uniform_s, cum_len, joints[:, j])
-    return out
+        # viewpoint 위치는 입력 노드라 np.interp 가 원래 자세를 정확히 돌려준다.
+        out[:, j] = np.interp(sample_s, cum_len, joints[:, j])
+    return out if is_vp is None else (out, out_vp)
 
 
 def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
@@ -584,23 +627,46 @@ def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad)
     각 세그먼트는 시작/끝 viewpoint config 를 모두 포함하므로, 인접 세그먼트는 경계
     config 를 공유한다(stitch_trajectory_pieces 가 중복 제거).
 
+    각 dense 행이 **실제 viewpoint 자세인지**(GLNS 가 고른 selected[i]) 함께 표시한다.
+    보간으로 채운 내부점과 구분해야 나중에 라벨을 붙일 수 있다.
+
     Returns:
-        list[(kind, dense (K,6))], kind ∈ {"scan", "transit"}
+        list[(kind, dense (K,6), is_vp (K,))], kind ∈ {"scan", "transit"}
     """
     segments = []
     scan_buf = [selected[run_idx[0]:run_idx[0] + 1]]   # 첫 viewpoint 로 시작
+    vp_buf = [np.ones(1, dtype=bool)]
+
+    def _flush():
+        buf = np.concatenate(scan_buf, axis=0)
+        if len(buf) >= 1:
+            segments.append(("scan", buf, np.concatenate(vp_buf)))
+
     for a in range(len(run_idx) - 1):
         cur = run_idx[a]
         nxt = run_idx[a + 1]
         if nxt == cur + 1 and cur in transit_segments:
             # 현재까지 모은 스캔 이동을 flush (selected[cur]에서 끝남)
-            buf = np.concatenate(scan_buf, axis=0)
-            if len(buf) >= 1:
-                segments.append(("scan", buf))
-            # transit 전체(양 끝 = selected[cur]≈transit[0], selected[nxt]≈transit[-1] 포함)
-            segments.append(("transit", transit_segments[cur]))
+            _flush()
+            # transit 전체(양 끝이 selected[cur]/selected[nxt] 에 해당). 양 끝은 viewpoint
+            # 자세이므로 그렇게 표시한다 — 계획된 이동의 시작/끝이지만 그 자세 자체는 검사
+            # 자세다.
+            #
+            # 플래너 출력의 양 끝은 요청 자세의 **근사값**이다(수e-7 rad). 그대로 두면
+            # stitch 의 중복 제거가 앞 조각을 남기는 규칙 때문에 transit→scan 경계에서
+            # 근사값이 살아남고 정확한 selected[nxt] 가 버려진다. 우리가 아는 값이므로
+            # 그냥 박아 넣는다. 차이가 무시할 수준이라 계획된 경로의 충돌-free 성질은
+            # 그대로다(최종 densify 게이트가 어차피 다시 검사한다).
+            tseg = np.array(transit_segments[cur], dtype=np.float64, copy=True)
+            tvp = np.zeros(len(tseg), dtype=bool)
+            if len(tseg):
+                tseg[0] = selected[cur]
+                tseg[-1] = selected[nxt]
+                tvp[0] = tvp[-1] = True
+            segments.append(("transit", tseg, tvp))
             # 다음 스캔 버퍼는 selected[nxt]에서 새로 시작
             scan_buf = [selected[nxt:nxt + 1]]
+            vp_buf = [np.ones(1, dtype=bool)]
         else:
             # selected[cur]→selected[nxt] 직선 보간의 내부점(양 끝 제외)을 dense하게 채운다
             q0, q1 = selected[cur], selected[nxt]
@@ -608,30 +674,47 @@ def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad)
             if n_steps > 1:
                 alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
                 scan_buf.append(q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :])
+                vp_buf.append(np.zeros(len(alphas), dtype=bool))
             scan_buf.append(selected[nxt:nxt + 1])
-    buf = np.concatenate(scan_buf, axis=0)
-    if len(buf) >= 1:
-        segments.append(("scan", buf))
+            vp_buf.append(np.ones(1, dtype=bool))
+    _flush()
     return segments
 
 
-def stitch_trajectory_pieces(pieces, masks, dup_tol_rad=5e-3):
+def stitch_trajectory_pieces(pieces, masks, dup_tol_rad=5e-3, kinds=None):
     """resample된 sub-path 들을 이어붙인다. 인접 piece 가 공유하는 경계 waypoint 는
-    한 번만 남긴다(중복 제거). pieces/masks 는 길이가 같은 list."""
-    out_j, out_m = [], []
-    for p, m in zip(pieces, masks):
+    한 번만 남긴다(중복 제거). pieces/masks 는 길이가 같은 list.
+
+    ``kinds`` (piece 별 행 라벨 배열)를 주면 **같은 중복 제거 규칙**으로 함께 이어붙여
+    (joints, mask, kinds) 3-튜플을 돌려준다. 라벨이 행과 어긋나면 안 되므로 여기서 같이
+    처리한다 — 밖에서 따로 이어붙이면 dedup 규칙이 갈린다.
+    """
+    want_kinds = kinds is not None
+    kinds = kinds if want_kinds else [None] * len(pieces)
+    out_j, out_m, out_k = [], [], []
+    for p, m, k in zip(pieces, masks, kinds):
         if len(p) == 0:
             continue
         if out_j and len(p) >= 1 and \
                 float(np.max(np.abs(p[0] - out_j[-1][-1]))) <= dup_tol_rad:
             p, m = p[1:], m[1:]
+            if want_kinds:
+                # 경계 행을 버릴 때 라벨이 정보를 잃지 않게: 앞 piece 의 마지막 행에
+                # viewpoint 를 물려준다(계획 이동의 시작점이 곧 검사 자세인 경우).
+                if len(k) and k[0] == WAYPOINT_VIEWPOINT and len(out_k):
+                    out_k[-1][-1] = WAYPOINT_VIEWPOINT
+                k = k[1:]
         if len(p) == 0:
             continue
         out_j.append(p)
         out_m.append(m)
+        if want_kinds:
+            out_k.append(np.asarray(k, dtype=np.int8).copy())
     if not out_j:
-        return np.zeros((0, 6), dtype=np.float64), np.zeros((0,), dtype=bool)
-    return np.concatenate(out_j, axis=0), np.concatenate(out_m, axis=0)
+        empty = (np.zeros((0, 6), dtype=np.float64), np.zeros((0,), dtype=bool))
+        return empty + (np.zeros((0,), dtype=np.int8),) if want_kinds else empty
+    joined = (np.concatenate(out_j, axis=0), np.concatenate(out_m, axis=0))
+    return joined + (np.concatenate(out_k),) if want_kinds else joined
 
 
 def interpolate_and_resample(selected, transit_segments, robot_cfg,
@@ -696,10 +779,10 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     #   scan    → EE arc-length(또는 joint, mode에 따라). 검사 spacing 그대로.
     #   transit → joint-space L∞ arc-length(sparse). EE 호 길이와 무관하게 재배치.
     segments = _typed_segments_for_run(selected, transit_segments, kept, dense_step_rad)
-    pieces, masks = [], []
-    for kind, dense in segments:
+    pieces, masks, kinds = [], [], []
+    for kind, dense, dense_vp in segments:
         if kind == "transit":
-            rs = _resample_uniform(dense, transit_spacing_rad)
+            rs, rs_vp = _resample_uniform(dense, transit_spacing_rad, is_vp=dense_vp)
             # sparse joint resample은 코너에서 직선을 그어 MotionGen이 충돌-free로 보장한
             # 곡선 경로를 잘라낼 수 있다(특히 물체로 재진입하는 via-home 재접근 leg). 그러면
             # 최종 densify 충돌검사에서 관통이 잡혀 저장이 거부된다. world_scene이 주어지면
@@ -709,19 +792,26 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
                 isc, _ = batch_collision_check(
                     densify_for_collision_check(rs), robot_cfg, world_scene)
                 if bool(isc.any()):
-                    rs = dense
+                    rs, rs_vp = dense, dense_vp
             mk = np.ones((len(rs),), dtype=bool)
+            kd = np.full(len(rs), WAYPOINT_PLANNED, dtype=np.int8)
         elif mode == "ee":
-            rs = _resample_uniform(dense, spacing, robot_cfg)
+            rs, rs_vp = _resample_uniform(dense, spacing, robot_cfg, is_vp=dense_vp)
             mk = np.zeros((len(rs),), dtype=bool)
+            kd = np.full(len(rs), WAYPOINT_INTERPOLATED, dtype=np.int8)
         else:  # mode == "joint"
-            rs = _resample_uniform(dense, spacing)
+            rs, rs_vp = _resample_uniform(dense, spacing, is_vp=dense_vp)
             mk = np.zeros((len(rs),), dtype=bool)
+            kd = np.full(len(rs), WAYPOINT_INTERPOLATED, dtype=np.int8)
+        # viewpoint 가 가장 구체적인 사실이라 다른 라벨을 덮는다: 계획 이동의 시작/끝이어도
+        # 그 자세 자체는 검사 자세다.
+        kd[np.asarray(rs_vp, dtype=bool)] = WAYPOINT_VIEWPOINT
         pieces.append(rs)
         masks.append(mk)
+        kinds.append(kd)
 
-    resampled, is_transit = stitch_trajectory_pieces(pieces, masks)
-    return resampled, is_transit, dropped, runs_info
+    resampled, is_transit, kind_arr = stitch_trajectory_pieces(pieces, masks, kinds=kinds)
+    return resampled, is_transit, dropped, runs_info, kind_arr
 
 
 def densify_for_collision_check(trajectory: np.ndarray) -> np.ndarray:

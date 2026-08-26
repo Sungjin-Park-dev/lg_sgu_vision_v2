@@ -74,6 +74,14 @@ COLLISION_EXCLUDE_LINKS = ("base_link_inertia",)
 RESAMPLE_MODE = "ee"
 DEFAULT_SPACING_M = 0.01
 
+# ── 실행 속도 노브 ────────────────────────────────────────────────────────────
+# 아래 6개(+ 코너 2개)가 CSV 의 time 열을 정하고, **그 열이 곧 실행 속도다** — Isaac 고스트
+# 재생도 실로봇 publish 도 이 열을 그대로 따른다. 값은 생성 시점에 궤적에 구워지므로 바꾸면
+# 다시 생성해야 한다(CSV 를 나중에 다시 시간매김하는 경로는 없다).
+#
+# collision_gate_and_save 는 이 값들을 **모듈 속성으로 호출 시점에** 읽는다. 그래서
+# apply_timing_cli() 로 여기를 덮어쓰면 그대로 걸린다 — `from .settings import EE_SPEED_MM_S`
+# 처럼 값을 복사해 가면 override 가 조용히 무시되니 하지 말 것.
 EE_SPEED_MM_S = 10.0
 EE_ANGULAR_SPEED_DEG_S = 20.0
 MAX_JOINT_VEL_RAD_S = 0.3
@@ -88,4 +96,86 @@ TRANSIT_RESAMPLE_SPACING_RAD = 0.05   # ~2.9°, transit resample 간격(가장 �
 
 CORNER_ANGLE_THRESHOLD_DEG = 30.0
 CORNER_MAX_SLOWDOWN = 2.5
+
+
+# =============================================================================
+# 속도 노브의 CLI 진입점
+# =============================================================================
+# 궤적 CSV 를 내는 스크립트는 셋이다(glns/verify.py, trajectory/plan_move.py,
+# trajectory/tilt_motion.py). 플래그를 각자 정의하면 이름과 기본값이 조용히 어긋나므로
+# scene_config.add_cli_argument 와 같은 방식으로 한 곳에 둔다.
+#
+# (CLI 플래그, 이 모듈의 이름, 도움말)
+TIMING_KNOBS = (
+    ("--ee-speed-mm-s", "EE_SPEED_MM_S",
+     "스캔 구간 EE 선속도 [mm/s]. 0 이면 이 제한을 끈다"),
+    ("--ee-angular-speed-deg-s", "EE_ANGULAR_SPEED_DEG_S",
+     "스캔 구간 EE 각속도 [deg/s]. 0 이면 이 제한을 끈다"),
+    ("--max-joint-vel-rad-s", "MAX_JOINT_VEL_RAD_S",
+     "관절 속도 상한 [rad/s]. 스캔과 transit 양쪽에 걸린다 — transit 시간은 이 값만으로 정해진다"),
+    ("--min-segment-dt-s", "MIN_SEGMENT_DT_S",
+     "segment 최소 소요시간 [s]. 짧은 구간이 순간적으로 빨라지는 것을 막는 바닥값"),
+    ("--corner-angle-threshold-deg", "CORNER_ANGLE_THRESHOLD_DEG",
+     "이 각도보다 급한 꺾임부터 감속을 시작한다 [deg]"),
+    ("--corner-max-slowdown", "CORNER_MAX_SLOWDOWN",
+     "가장 급한 꺾임에서의 감속 배수 (1.0 = 감속 없음)"),
+)
+
+
+def _non_negative(text: str) -> float:
+    """argparse ``type=`` — 음수 속도/시간은 조용히 이상하게 동작하므로 여기서 막는다.
+
+    0 은 막지 않는다: compute_trajectory_times 에서 "이 제한을 쓰지 않는다" 는 뜻이다.
+    """
+    import argparse
+
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"could not parse as a number ({exc})")
+    if value < 0.0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value})")
+    return value
+
+
+def add_timing_cli_arguments(parser) -> None:
+    """속도 노브 플래그를 parser 에 단다 — CSV 를 내는 스크립트는 전부 이걸 쓴다."""
+    group = parser.add_argument_group(
+        "timing (실행 속도)",
+        "CSV 의 time 열을 정한다 = 실행 속도. 생성 시점에 궤적에 구워지므로 "
+        "바꾸면 다시 생성해야 반영된다.")
+    for flag, name, help_text in TIMING_KNOBS:
+        group.add_argument(flag, type=_non_negative, default=None,
+                           help=f"{help_text} (기본 {globals()[name]})")
+
+
+def apply_timing_cli(args, *, verbose: bool = True) -> dict:
+    """받은 override 를 이 모듈에 반영하고 **최종 값 전부**를 dict 로 돌려준다.
+
+    반환값은 npz meta 로 간다(collision_gate_and_save 가 자동으로 넣는다) — 어떤 속도로
+    구운 궤적인지는 CSV 를 봐서는 복원할 수 없는 정보다.
+    """
+    values, changed = {}, []
+    for flag, name, _help in TIMING_KNOBS:
+        override = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if override is not None and float(override) != globals()[name]:
+            changed.append(f"{name} {globals()[name]} -> {float(override)}")
+        if override is not None:
+            globals()[name] = float(override)
+        values[name] = globals()[name]
+    if verbose:
+        print(f"  Timing: EE {values['EE_SPEED_MM_S']:g} mm/s, "
+              f"{values['EE_ANGULAR_SPEED_DEG_S']:g} deg/s, joint "
+              f"{values['MAX_JOINT_VEL_RAD_S']:g} rad/s, min dt "
+              f"{values['MIN_SEGMENT_DT_S']:g} s, corner "
+              f">{values['CORNER_ANGLE_THRESHOLD_DEG']:g} deg x"
+              f"{values['CORNER_MAX_SLOWDOWN']:g}")
+        if changed:
+            print("           overridden: " + "; ".join(changed))
+    return values
+
+
+def timing_values() -> dict:
+    """지금 이 모듈에 걸려 있는 속도 노브 전부. CLI 를 안 쓰는 호출자용."""
+    return {name: globals()[name] for _flag, name, _help in TIMING_KNOBS}
 

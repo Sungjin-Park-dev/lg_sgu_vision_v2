@@ -187,12 +187,15 @@ def resample_seam(q_from, q_to, seam_wp, *, robot_cfg, world_config, reconfig_ra
     seam 의 첫 점은 stitch dedup 으로 사라지지만, 맨 앞 HOME 브래킷의 첫 점은 안 사라진다.
     """
     sel = np.stack([np.asarray(q_from, np.float64), np.asarray(q_to, np.float64)])
-    traj, _is_transit, _, _ = PT.interpolate_and_resample(
+    traj, _is_transit, _, _, _kinds = PT.interpolate_and_resample(
         sel, {0: seam_wp}, robot_cfg,
         mode=PT.RESAMPLE_MODE, spacing=spacing,
         reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
     )
-    return traj, np.ones(len(traj), dtype=bool)
+    # seam 은 전부 모션 플래너가 만든 이동이다. 양 끝은 성분의 viewpoint 와 겹치는데,
+    # stitch dedup 이 그 행을 성분 쪽 라벨로 남긴다.
+    return (traj, np.ones(len(traj), dtype=bool),
+            np.full(len(traj), PT.WAYPOINT_PLANNED, dtype=np.int8))
 
 
 def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
@@ -220,9 +223,14 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     for idx, rev in order:
         c = included[idx]
         traj, mask = c["final_traj"], c["final_is_transit"]
+        kinds_c = c.get("final_kinds")
+        if kinds_c is None:
+            kinds_c = np.full(len(traj), PT.WAYPOINT_INTERPOLATED, dtype=np.int8)
+        kinds_c = np.asarray(kinds_c, dtype=np.int8)
         if rev:
             traj, mask = traj[::-1].copy(), mask[::-1].copy()
-        oriented.append({"cid": c["cid"], "traj": traj, "mask": mask,
+            kinds_c = kinds_c[::-1].copy()      # 라벨은 행에 붙어 있으므로 같이 뒤집는다
+        oriented.append({"cid": c["cid"], "traj": traj, "mask": mask, "kinds": kinds_c,
                          "entry": traj[0], "exit": traj[-1]})
 
     # seam pairs(방문 순서): [front HOME?] inter-comp… [back HOME?]
@@ -252,22 +260,29 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     ]
 
     # 조각 stitch: [front?, traj0, seam01, traj1, …, trajK-1, back?]
-    pieces, masks, si = [], [], 0
+    pieces, masks, kinds, si = [], [], [], 0
+
+    def _push_seam(idx):
+        pieces.append(seam_trajs[idx][0]); masks.append(seam_trajs[idx][1])
+        kinds.append(seam_trajs[idx][2])
+
     if home_bracket:
-        pieces.append(seam_trajs[si][0]); masks.append(seam_trajs[si][1]); si += 1
+        _push_seam(si); si += 1
     for j, o in enumerate(oriented):
         pieces.append(o["traj"]); masks.append(o["mask"])
+        kinds.append(o["kinds"])
         if j < len(oriented) - 1:
-            pieces.append(seam_trajs[si][0]); masks.append(seam_trajs[si][1]); si += 1
+            _push_seam(si); si += 1
     if home_bracket:
-        pieces.append(seam_trajs[si][0]); masks.append(seam_trajs[si][1]); si += 1
+        _push_seam(si); si += 1
 
-    joined_traj, joined_is_transit = PT.stitch_trajectory_pieces(pieces, masks)
+    joined_traj, joined_is_transit, joined_kinds = PT.stitch_trajectory_pieces(
+        pieces, masks, kinds=kinds)
     # 방향·seam 이 확정된 뒤에 표현을 고른다 — 여기가 마지막 기회다.
     joined_traj, _aligned = align_path_to_start(joined_traj, start_q, robot_cfg)
     gate = collision_gate_and_save(
         joined_traj, joined_is_transit, robot_cfg=robot_cfg,
-        world_config=world_config, out_csv=out_csv, meta=meta,
+        world_config=world_config, out_csv=out_csv, meta=meta, kinds=joined_kinds,
     )
     return {
         "order": [o["cid"] for o in oriented],

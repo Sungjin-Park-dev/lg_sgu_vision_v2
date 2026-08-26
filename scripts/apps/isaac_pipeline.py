@@ -3,12 +3,19 @@
 Omni UI panel for the trajectory pipeline inside Isaac Sim.
 
 Boots Isaac Sim through the shared ``core.isaac.scene`` runtime, then opens
-an Omni UI window with four panels:
+an Omni UI window whose panels follow the order of the work:
 
     A) Load object (dropdown + native viewport gizmo move)
-    B) GLNS trajectory parameters + [Generate Trajectory]  (subprocess)
-    C) Ghost preview with Play/Pause/Stop/Slider            (in-process; sim, ROS-free)
-    D) Execute trajectory on Isaac UR20 or real robot       (subprocess)
+    B) Solve IK        — IK candidate options + [Check and Save IK]  (subprocess)
+    C) Motion Speed    — the timing knobs baked into every generated CSV
+    D) Generate Trajectory — scan (GLNS) and tilt motion              (subprocess)
+    E) Ghost preview with Play/Pause/Stop/Slider            (in-process; sim, ROS-free)
+    F) Execute trajectory on Isaac UR20 or real robot       (subprocess)
+
+B is split out from D because it is a separate, reusable step: its output
+(data/{object}/ik/{N}/*.h5) is keyed by the candidate options, and D reuses that
+file only when the options still match. Speed sits between them because it
+changes nothing about IK and everything about what D writes.
 
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
@@ -64,6 +71,30 @@ IK_RANDOM_SEED = 123
 # Must match scripts/core/trajectory/settings.py::CANDIDATE_DEDUP_RAD (default dedup
 # threshold for the Check-and-Save-IK / GLNS IK candidate stage).
 CANDIDATE_DEDUP_RAD = 0.08
+
+# 실행 속도 노브 — scripts/core/trajectory/settings.py::TIMING_KNOBS 의 UI 쪽 짝이다.
+# 이 값들이 CSV 의 time 열을 정하고, 두 실행기(고스트 재생 / 실로봇 publish)가 그 열을
+# 그대로 따른다. 생성 시점에 궤적에 구워지므로 바꾸면 다시 생성해야 반영된다.
+# 플래그와 기본값은 settings.py 와 같아야 한다 — 여기 값을 복사해 두는 이유는 IK_RANDOM_SEED
+# 와 같다(이 모듈은 Isaac 번들 파이썬에서 도는데 settings 를 import 하면 cuRobo 가 딸려온다).
+# (CLI 플래그, 필드 키, 라벨, 기본값)
+TIMING_FIELDS = (
+    ("--ee-speed-mm-s", "timing_ee_speed", "scan EE speed [mm/s]", 10.0),
+    ("--ee-angular-speed-deg-s", "timing_ee_angular", "scan EE angular [deg/s]", 20.0),
+    ("--max-joint-vel-rad-s", "timing_joint_vel", "max joint vel [rad/s]", 0.3),
+    ("--min-segment-dt-s", "timing_min_dt", "min segment dt [s]", 0.05),
+    ("--corner-angle-threshold-deg", "timing_corner_deg", "corner threshold [deg]", 30.0),
+    ("--corner-max-slowdown", "timing_corner_slow", "corner max slowdown [x]", 2.5),
+)
+
+# waypoint_kind 라벨 색 (omni.ui 0xAABBGGRR). Tilt 패널의 중심 행 라벨에 쓴다 —
+# 어떤 종류의 점을 중심으로 고르는지가 한눈에 보여야 한다.
+WAYPOINT_KIND_COLOR = {
+    "viewpoint": 0xFF66DD66,      # green  - 검사 자세 그 자체
+    "interpolated": 0xFF999999,   # grey   - 선형 보간으로 생긴 점
+    "planned": 0xFFEEAA55,        # blue   - 모션 플래너가 만든 점
+}
+WAYPOINT_KIND_COLOR_UNKNOWN = 0xFF8888CC   # 라벨 없는 옛 CSV / 읽기 실패
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
 
@@ -935,6 +966,12 @@ class PipelineWindow:
         self._log_model = ui.SimpleStringModel("")
         self._csv_path_model = ui.SimpleStringModel("")
         self._h5_path_model = ui.SimpleStringModel("")
+        # Tilt 의 중심 행을 고르는 **기준 궤적**. Preview/Execute 의 CSV 칸과 일부러 따로
+        # 둔다: 그 칸은 "지금 재생·실행할 것" 을 가리키고, 여기는 "어느 궤적의 몇 번째 행을
+        # 중심으로 삼을 것인가" 를 가리킨다. 하나로 묶으면 tilt 를 한 번 만드는 순간 그 칸이
+        # 방금 만든 tilt CSV 로 바뀌어(생성 결과를 바로 재생하는 동작) 다음 tilt 의 기준이
+        # 스캔이 아니라 직전 tilt 가 돼버린다.
+        self._tilt_base_csv_model = ui.SimpleStringModel("")
 
         # ONE editable camera spec (mm) shared by both inspection cameras. 프리뷰 고스트와
         # 실 로봇은 같은 물리 카메라의 두 표현이라, 스펙이 갈리면 프리뷰가 실제와 다른 화각을
@@ -1015,6 +1052,8 @@ class PipelineWindow:
         self._btn_tilt_cancel = None
         self._btn_tilt_fan = None
         self._tilt_fan_on = False
+        self._tilt_kind_label = None
+        self._tilt_kinds_cache = None   # ((경로, mtime_ns), [kind, ...])
         # 장시간 작업이 도는 동안 유일하게 살아 있는 위젯(그 작업의 Cancel). None = 유휴.
         self._busy_cancel = None
         self._slider_model: Optional["ui.SimpleFloatModel"] = None
@@ -1073,6 +1112,12 @@ class PipelineWindow:
                     self._build_panel_pipeline_mode()
                     self._build_panel_mode()
                     self._build_panel_object()
+                    # IK 는 궤적 생성과 다른 단계다 — 산출물(ik/{N}/*.h5)이 따로 남고
+                    # 여러 번의 Generate 가 그걸 재사용한다. 그래서 패널도 따로 둔다.
+                    self._build_panel_solve_ik()
+                    # 생성기 셋(스캔/tilt/Plan to Start·HOME)이 공유하는 값이라 어느 한
+                    # 생성기 밑에 넣을 수 없다. 무엇을 굽는지 정하는 값이므로 Generate 위다.
+                    self._build_panel_speed()
                     self._build_panel_generate()
                     self._build_panel_preview()
                     self._build_panel_publish()
@@ -1669,38 +1714,52 @@ class PipelineWindow:
                 # 카메라 스펙 입력은 Preview / Execute 패널로 옮겼다. Show Viewpoints 는
                 # 여전히 h5 스냅샷으로 그 공유 스펙을 채워준다(_sync_camera_spec_from_h5).
 
+    def _build_panel_solve_ik(self):
+        """IK 후보를 풀어 data/{object}/ik/{N}/*.h5 로 저장하는 단계.
+
+        Generate 와 나눠 둔 이유: 이건 물체·viewpoint 당 한 번만 하면 되는 일이고, 산출된
+        h5 를 여러 번의 Generate 가 재사용한다. **단, 재사용은 아래 옵션이 그대로일 때만
+        일어난다** — 값이 바뀌면 Generate 가 IK 를 다시 푼다(_ik_candidate_tokens 가 같은
+        값을 solve.py 에 그대로 넘긴다).
+        """
+        ui = self._ui
+        frame = ui.CollapsableFrame("Solve IK", height=0, collapsed=False)
+        self._inspection_frames.append(frame)
+        with frame:
+            with ui.VStack(spacing=4):
+                # viewpoint h5 는 위 "Load Object & Viewpoints" 에서 고른 것(_h5_path_model)을
+                # 그대로 입력으로 쓴다.
+                self._fields["glns_roll_augment"] = self._checkbox_row("roll augment", True)
+                self._fields["glns_roll_step"] = self._row("    roll-step-deg", 30.0)
+                self._fields["glns_tilt_augment"] = self._checkbox_row("tilt augment", True)
+                self._fields["glns_tilt_angles"] = self._row("    tilt-angles-deg", "5 10")
+                self._fields["glns_tilt_azimuths"] = self._row("    tilt-azimuths", 8)
+                self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
+                self._fields["glns_dedup_rad"] = self._row(
+                    "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
+                self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
+                self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_check_ik = self._lock(ui.Button(
+                        "Check and Save IK",
+                        clicked_fn=self._on_check_ik_reachability,
+                    ))
+                    self._btn_cancel_ik = self._lock(ui.Button(
+                        "Cancel IK Check", clicked_fn=self._on_cancel_ik))
+                ui.Label(
+                    "Generate Scan Motion reuses the saved IK only while these options "
+                    "stay the same; change one and it solves IK again.",
+                    height=30, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+
     def _build_panel_generate(self):
         ui = self._ui
         frame = ui.CollapsableFrame("Generate Trajectory", height=0)
         self._inspection_frames.append(frame)
         with frame:
             with ui.VStack(spacing=4):
-                # ui.Label("Pick the object's viewpoints .h5 and Generate. Object name + viewpoint "
-                #          "count are read from the h5 path; the object's live pose comes from the "
-                #          "scene — load & place it in panel A first.",
-                #          height=40, word_wrap=True)
-                # viewpoint h5 선택은 위 "Load Object & Viewpoints" 로 옮겼다 —
-                # 여기서는 그 h5(_h5_path_model)를 입력으로 쓰기만 한다.
-                # IK 후보 옵션 — Check and Save IK 와 Generate 가 공유한다. 값이 같아야 Generate
-                # 가 저장된 IK(data/{object}/ik/{N}/*.h5)를 그대로 재사용한다. 기본 펼침.
-                with ui.CollapsableFrame("IK options", height=0, collapsed=False):
-                    with ui.VStack(spacing=4):
-                        self._fields["glns_roll_augment"] = self._checkbox_row("roll augment", True)
-                        self._fields["glns_roll_step"] = self._row("    roll-step-deg", 30.0)
-                        self._fields["glns_tilt_augment"] = self._checkbox_row("tilt augment", True)
-                        self._fields["glns_tilt_angles"] = self._row("    tilt-angles-deg", "5 10")
-                        self._fields["glns_tilt_azimuths"] = self._row("    tilt-azimuths", 8)
-                        self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
-                        self._fields["glns_dedup_rad"] = self._row(
-                            "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
-                        self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
-                        self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
-                with ui.HStack(height=28, spacing=6):
-                    self._btn_check_ik = self._lock(ui.Button(
-                        "Check and Save IK",
-                        clicked_fn=self._on_check_ik_reachability,
-                    ))
-                    self._btn_cancel_ik = self._lock(ui.Button("Cancel IK Check", clicked_fn=self._on_cancel_ik))
+                # 입력은 위 두 패널이 정한다: viewpoint h5("Load Object & Viewpoints"),
+                # IK 후보 옵션("Solve IK"), 시간 매김("Motion Speed"). 물체 pose 는 스테이지의
+                # 살아있는 기즈모 값이다.
                 with ui.CollapsableFrame("Scan options (GLNS)", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 2)
@@ -1717,14 +1776,27 @@ class PipelineWindow:
                 # 자리가 스캔과 같아서 같은 패널에 둔다. 재생/실행은 아래 공용 Preview/Execute.
                 with ui.CollapsableFrame("Tilt options", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
+                        # 중심 행을 고르는 기준 궤적 — Preview/Execute 의 CSV 칸과 별개다.
+                        # 그쪽은 "지금 재생·실행할 파일", 여기는 "행을 세는 자"다.
+                        # 비어 있으면 스캔을 생성할 때 그 결과로 한 번 채워 준다.
                         with ui.HStack(height=22, spacing=6):
-                            ui.Label("center viewpoint idx", width=140)
+                            ui.Label("base trajectory", width=140)
+                            self._lock(ui.StringField(model=self._tilt_base_csv_model))
+                            self._lock(ui.Button("Browse...", width=90,
+                                                 clicked_fn=self._on_browse_tilt_base))
+                        with ui.HStack(height=22, spacing=6):
+                            ui.Label("center row idx", width=140)
                             field = ui.IntField()
                             field.model.set_value(0)
                             self._fields["tilt_index"] = field.model
                             self._lock(field)
                             self._lock(ui.Button("Highlight", width=90,
                                                  clicked_fn=self._on_highlight_tilt_viewpoint))
+                        # 고른 행이 무엇인지는 로그가 아니라 여기서 바로 보여야 한다 —
+                        # 번호를 바꿔가며 고르는 중에 로그를 뒤지게 만들 이유가 없다.
+                        with ui.HStack(height=20, spacing=6):
+                            ui.Label("", width=140)      # 위 칸과 열 맞춤
+                            self._tilt_kind_label = ui.Label("pick a base trajectory")
                         # pitch(down/up) = 카메라 y축 둘레 공전, roll(left/right) = x축 둘레.
                         # n 은 '중심 → 끝' 한쪽의 샘플 수(중심 포함)라 leg 당 새 포즈는 n-1 개다.
                         with ui.HStack(height=22, spacing=6):
@@ -1743,6 +1815,12 @@ class PipelineWindow:
                                     "tilt_pitch_n", "tilt_roll_min", "tilt_roll_max",
                                     "tilt_roll_n"):
                             self._fields[key].add_value_changed_fn(self._refresh_tilt_fan)
+                        # 행 번호와 기준 궤적 둘 중 하나만 바뀌어도 라벨은 낡는다.
+                        self._fields["tilt_index"].add_value_changed_fn(
+                            self._refresh_tilt_row_label)
+                        self._tilt_base_csv_model.add_value_changed_fn(
+                            self._refresh_tilt_row_label)
+                        self._refresh_tilt_row_label()
                         self._fields["tilt_num_seeds"] = self._row("num-seeds", 32)
                         self._fields["tilt_batch_size"] = self._row("ik-batch-size", 128)
                         self._fields["tilt_clamp"] = self._checkbox_row(
@@ -1757,6 +1835,48 @@ class PipelineWindow:
                         "Show Tilt Fan", clicked_fn=self._on_toggle_tilt_fan))
                     self._lock(ui.Button("Clear Tilt Fan",
                                          clicked_fn=self._on_clear_tilt_fan))
+
+    def _build_panel_speed(self):
+        """실행 속도 노브 — settings.py 의 타이밍 값을 그대로 CLI 로 넘긴다.
+
+        생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to Start·HOME)이
+        모두 같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로, 이 값을 바꾸면
+        **다시 생성해야** 로봇 속도가 바뀐다 — 이미 만든 CSV 를 다시 시간매김하는 경로는 없다.
+        그래서 Generate 패널 **위**에 둔다: 굽기 전에 정하는 값이다.
+        """
+        ui = self._ui
+        frame = ui.CollapsableFrame("Motion Speed", height=0, collapsed=True)
+        self._inspection_frames.append(frame)
+        with frame:
+            with ui.VStack(spacing=4):
+                ui.Label(
+                    "Sets the CSV time column - the speed both executors follow (ghost "
+                    "playback and the real robot). Baked in at generate time, so set "
+                    "these BEFORE generating; an existing CSV keeps its old timing. "
+                    "Also used by Plan to Start / Plan to HOME.",
+                    height=58, word_wrap=True)
+                for _flag, key, label, default in TIMING_FIELDS:
+                    with ui.HStack(height=22, spacing=6):
+                        ui.Label(label, width=200)
+                        # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
+                        # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
+                        self._fields[key] = self._num_field(default, width=90)
+                ui.Label(
+                    "Scan segments obey all of EE speed, EE angular speed and joint "
+                    "velocity (slowest wins). Transit segments obey joint velocity only. "
+                    "0 disables that one limit.",
+                    height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+
+    def _timing_cli_args(self) -> str:
+        """속도 노브 → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
+
+        음수는 settings.py 의 argparse type 이 rc=2 로 거절한다. 여기서 미리 막지 않는 것은
+        UI 가 조용히 값을 고쳐 놓으면 입력한 값과 실제 값이 달라지기 때문이다 — 거절은
+        로그에 남는 편이 낫다.
+        """
+        return " ".join(
+            f"{flag} {float(self._get_field(key, float)):g}"
+            for flag, key, _label, _default in TIMING_FIELDS)
 
     def _build_panel_preview(self):
         ui = self._ui
@@ -3461,7 +3581,9 @@ class PipelineWindow:
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
-            f"--no-home-bracket --output-dir {trajectory_dir!r}{start_arg}"
+            f"--no-home-bracket --output-dir {trajectory_dir!r}{start_arg} "
+            # 속도는 solve 가 아니라 verify 가 CSV 에 굽는다 — 여기에만 붙인다.
+            f"{self._timing_cli_args()}"
         )
         cmd = ["bash", "-c", shell]
 
@@ -3479,6 +3601,11 @@ class PipelineWindow:
                 self._csv_path_model.set_value(csv)
                 generated_csv_path[:] = [csv]
                 self._append_log(f"[generate] captured CSV: {csv}")
+                # Tilt 의 기준 궤적이 아직 비어 있으면 여기서 한 번 채운다. 이미 값이 있으면
+                # 손대지 않는다 — 사용자가 고른 기준을 스캔 한 번에 갈아치우면 안 된다.
+                if not self._tilt_base_csv():
+                    self._tilt_base_csv_model.set_value(csv)
+                    self._append_log(f"[tilt] base trajectory set to the new scan: {csv}")
 
         def on_exit(rc: int):
             self._append_log(
@@ -3801,6 +3928,7 @@ class PipelineWindow:
             f"--object-quat {' '.join(f'{v:.6f}' for v in quat_wxyz)} "
             f"--from-joints={','.join(f'{v:.6f}' for v in current_q)!r} "
             f"--to-joints={','.join(f'{v:.6f}' for v in target_q)!r} "
+            f"{self._timing_cli_args()} "
             f"--output {str(out_csv)!r}"
         )
         self._append_log(
@@ -3816,53 +3944,129 @@ class PipelineWindow:
     def _tilt_index(self) -> int:
         return max(0, int(self._get_field("tilt_index", int)))
 
-    def _tilt_viewpoints(self):
-        """Tilt 가 쓸 (h5 경로, object, viewpoint 수) — 없거나 못 읽으면 None.
+    def _tilt_base_csv(self) -> str:
+        """Tilt 의 기준 궤적 경로. Preview/Execute 의 CSV 칸과 무관하다."""
+        return self._tilt_base_csv_model.get_value_as_string().strip()
 
-        입력은 Generate 와 완전히 같다: 위 패널에서 고른 viewpoints .h5 하나. 물체 이름과
-        viewpoint 수는 그 표준 경로에서 읽는다(data/{object}/viewpoint/{N}/...).
+    def _tilt_row_kinds(self):
+        """기준 궤적의 waypoint_kind 열 → list[str], 또는 읽을 수 없으면 None.
+
+        (경로, mtime) 로 캐시한다 — 행 번호를 한 자 칠 때마다 불리므로 매번 파싱하면
+        입력이 끊긴다. core.trajectory 의 로더를 쓰지 않는 것도 같은 이유다: 그쪽을
+        import 하면 cuRobo/torch 가 딸려 와 UI 스레드가 몇 초 멈춘다. 여기서 필요한 건
+        컬럼 하나뿐이라 stdlib csv 로 충분하다.
+
+        라벨 컬럼이 없는 옛 CSV 는 전부 "unknown" 이 된다(빈 리스트가 아니다) — 행 수는
+        여전히 맞으므로 중심을 고르는 데는 지장이 없다.
         """
-        h5 = self._h5_path_model.get_value_as_string().strip()
-        if not h5:
-            self._append_log("[tilt] pick a viewpoints .h5 first (Browse...).")
+        path = self._tilt_base_csv()
+        if not path:
+            self._tilt_kinds_cache = None
             return None
-        if not Path(h5).exists():
-            self._append_log(f"[tilt] h5 not found: {h5}")
+        try:
+            key = (path, Path(path).stat().st_mtime_ns)
+        except OSError:
+            self._tilt_kinds_cache = None
             return None
-        obj, n_vp = self._parse_h5_meta(h5)
-        if obj is None:
-            obj = (self._current_object or "").strip()
-        return h5, obj, n_vp
+        if self._tilt_kinds_cache is not None and self._tilt_kinds_cache[0] == key:
+            return self._tilt_kinds_cache[1]
+        try:
+            with open(path, "r", newline="") as f:
+                kinds = [(row.get("waypoint_kind") or "unknown")
+                         for row in csv.DictReader(f)]
+        except OSError:
+            self._tilt_kinds_cache = None
+            return None
+        self._tilt_kinds_cache = (key, kinds)
+        return kinds
+
+    def _refresh_tilt_row_label(self, *_args):
+        """Tilt 패널의 중심 행 라벨을 갱신한다. 색은 라벨 종류를 그대로 나타낸다."""
+        if self._tilt_kind_label is None:
+            return
+        kinds = self._tilt_row_kinds()
+        if not kinds:
+            self._tilt_kind_label.text = (
+                "pick a base trajectory" if not self._tilt_base_csv()
+                else "base trajectory cannot be read")
+            self._tilt_kind_label.style = {"color": WAYPOINT_KIND_COLOR_UNKNOWN}
+            return
+        index, last = self._tilt_index(), len(kinds) - 1
+        if index > last:
+            self._tilt_kind_label.text = f"row {index} / {last} - out of range"
+            self._tilt_kind_label.style = {"color": WAYPOINT_KIND_COLOR_UNKNOWN}
+            return
+        kind = kinds[index]
+        self._tilt_kind_label.text = (
+            f"row {index} / {last}   {kind}"
+            f"   ({sum(1 for k in kinds if k == kind)} of {len(kinds)} rows)")
+        self._tilt_kind_label.style = {
+            "color": WAYPOINT_KIND_COLOR.get(kind, WAYPOINT_KIND_COLOR_UNKNOWN)}
+
+    def _tilt_center(self):
+        """Tilt 중심 → (물체-로컬 카메라 4x4, wd_m, 라벨, 총 행수, 로봇프레임 위치) 또는 None.
+
+        중심은 **기준 궤적 CSV 의 한 행**이다(예전에는 viewpoint h5 인덱스였다). CSV 가 각
+        행의 카메라 포즈를 이미 갖고 있어서(FK 산출) viewpoint 뿐 아니라 **보간으로 생긴 점,
+        모션플래너가 만든 점**도 중심이 될 수 있다 — viewpoint h5 에는 그런 점이 없다.
+
+        기준 궤적은 Tilt 패널의 전용 칸(_tilt_base_csv_model)에서 온다. Preview/Execute 의
+        CSV 칸을 쓰지 않는 이유는 그 모델 선언부 주석 참고.
+
+        부채꼴은 물체 프림 아래(로컬 좌표)에 그리므로, CSV 의 robot-frame 포즈를 그 궤적이
+        계획될 때의 물체 배치(npz meta)로 나눠 로컬로 옮긴다.
+        """
+        from core.trajectory.tilt_motion import load_trajectory_meta, load_trajectory_row
+
+        csv = self._tilt_base_csv()
+        if not csv or not Path(csv).exists():
+            self._append_log(f"[tilt] base trajectory not found: {csv!r} - "
+                             "Browse one in Tilt options (or generate a scan first).")
+            return None
+        index = self._tilt_index()
+        try:
+            center_robot, kind, n_rows = load_trajectory_row(Path(csv), index)
+        except (ValueError, IndexError) as exc:
+            self._append_log(f"[tilt] {exc}")
+            return None
+        meta = load_trajectory_meta(Path(csv))
+        from common import config as _cfg
+        wd_m = float(meta.get("working_distance_mm", _cfg.CAMERA_WORKING_DISTANCE_MM)) / 1000.0
+
+        obj_pose = np.eye(4, dtype=np.float64)
+        if "object_position" in meta and "object_quat_wxyz" in meta:
+            obj_pose = _np_from_pos_quat(meta["object_position"], meta["object_quat_wxyz"])
+        center_local = np.linalg.inv(obj_pose) @ center_robot
+        return center_local, wd_m, kind, n_rows, center_robot[:3, 3]
 
     def _on_highlight_tilt_viewpoint(self):
-        """고른 중심 viewpoint 를 스테이지에서 크고 노랗게 표시한다(어느 점인지 확인용)."""
-        picked = self._tilt_viewpoints()
-        if picked is None:
-            return
-        h5 = picked[0]
-
+        """고른 중심 행을 스테이지에 표시하고 **그 행의 라벨**을 알려준다."""
         import omni.usd
+        from pxr import Gf, UsdGeom, Vt
 
         stage = omni.usd.get_context().get_stage()
         target_prim = stage.GetPrimAtPath(TARGET_OBJECT_PRIM)
         if not target_prim or not target_prim.IsValid():
             self._append_log("[tilt] no target object on stage - Load Object first.")
             return
-        try:
-            points_local, wd_m = self._load_camera_viewpoint_points(h5)
-        except Exception as e:  # noqa: BLE001 — 파일/스키마 문제를 UI 로 보고
-            self._append_log(f"[tilt] viewpoint load failed: {e}")
+        picked = self._tilt_center()
+        if picked is None:
             return
-        index = self._tilt_index()
-        if index >= len(points_local):
-            self._append_log(
-                f"[tilt] center index {index} out of range - this file has "
-                f"{len(points_local)} viewpoints.")
-            return
-        self._draw_camera_viewpoint_points(points_local, highlight=index)
+        center_local, wd_m, kind, n_rows, _pos_robot = picked
+
+        scope = f"{TARGET_OBJECT_PRIM}/{TILT_FAN_SCOPE_NAME}_center"
+        from isaacsim.core.utils import prims
+        if prims.is_prim_path_valid(scope):
+            prims.delete_prim(scope)
+        UsdGeom.Xform.Define(stage, scope)
+        marker = UsdGeom.Points.Define(stage, f"{scope}/Center")
+        marker.CreatePointsAttr(Vt.Vec3fArray([
+            Gf.Vec3f(*(float(v) for v in center_local[:3, 3]))]))
+        marker.CreateWidthsAttr(Vt.FloatArray([TILT_FAN_CENTER_WIDTH_M]))
+        marker.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*TILT_LEG_COLORS["up"])]))
         self._append_log(
-            f"[tilt] center = viewpoint #{index} / {len(points_local)} "
-            f"(yellow point, WD={wd_m * 1000:.1f} mm)")
+            f"[tilt] center = row {self._tilt_index()} / {n_rows - 1}  "
+            f"[{kind}]  (yellow marker, WD={wd_m * 1000:.1f} mm)")
 
     # ---- Tilt 부채꼴 시각화 -------------------------------------------------
     @staticmethod
@@ -3883,23 +4087,12 @@ class PipelineWindow:
         기하는 CLI(tilt_motion.py)와 같은 common.tilt_geometry 를 쓴다 — 화면의 부채꼴이
         실제로 생성될 포즈와 어긋날 수 없다.
         """
-        from common.tilt_geometry import camera_pose, tilt_legs
-        from core.viewpoint.storage import load_viewpoints_hdf5
+        from common.tilt_geometry import tilt_legs
 
-        picked = self._tilt_viewpoints()
+        picked = self._tilt_center()
         if picked is None:
             return None
-        viewpoint = load_viewpoints_hdf5(picked[0])
-        index = self._tilt_index()
-        if index >= viewpoint.count:
-            self._append_log(
-                f"[tilt-fan] center index {index} out of range - this file has "
-                f"{viewpoint.count} viewpoints.")
-            return None
-
-        wd_m = viewpoint.working_distance_m
-        center = camera_pose(viewpoint.positions[index], viewpoint.normals[index],
-                             wd_m, np.eye(4))
+        center, wd_m, _kind, _n_rows, _pos = picked
         target, legs = tilt_legs(
             center, wd_m,
             pitch_min=float(self._get_field("tilt_pitch_min", float)),
@@ -4002,7 +4195,7 @@ class PipelineWindow:
         centre_marker.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.15, 0.15)]))
 
         self._append_log(
-            f"[tilt-fan] viewpoint #{self._tilt_index()}: {len(wp_pts)} waypoints, "
+            f"[tilt-fan] row #{self._tilt_index()}: {len(wp_pts)} waypoints, "
             f"{len(ray_counts)} view rays, deg [{', '.join(summary)}] under {scope_path}")
         return True
 
@@ -4037,7 +4230,11 @@ class PipelineWindow:
         return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}.csv"
 
     def _on_generate_tilt(self):
-        """중심 viewpoint 하나를 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
+        """스캔 궤적의 한 행을 중심으로 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
+
+        중심은 Tilt 패널의 **기준 궤적** + 행 번호다(Preview/Execute 의 CSV 칸이 아니다).
+        viewpoint 행뿐 아니라 보간·모션플래닝으로 생긴 행도 중심이 될 수 있고, 어떤 행인지는
+        패널의 라벨과 로그에 함께 남는다.
 
         _gen_runner 를 쓰므로 Generate 와 동시에 돌 수 없고, Cancel 버튼이 그대로 듣는다.
         성공하면 CSV 경로가 공용 칸에 들어가고 프리뷰가 자동 로드된다 — Generate 와 동일.
@@ -4045,19 +4242,16 @@ class PipelineWindow:
         if self._gen_runner.running:
             self._append_log("[tilt] a generate/plan is already running")
             return
-        picked = self._tilt_viewpoints()
+        picked = self._tilt_center()
         if picked is None:
             return
-        h5, obj, n_vp = picked
+        _center, _wd, row_kind, n_rows, _pos = picked
+        source_csv = self._tilt_base_csv()
+        obj = (self._current_object or "").strip()
         if not obj:
-            self._append_log(
-                "[tilt] couldn't read object from h5 path and no object is loaded.")
+            self._append_log("[tilt] no object is loaded - pick one and Load Object.")
             return
-        if self._current_object and obj != self._current_object:
-            self._append_log(
-                f"[tilt] WARNING: h5 object '{obj}' != loaded scene object "
-                f"'{self._current_object}'. Pose & collision mesh come from the SCENE "
-                "object - load the matching object or pick the matching h5.")
+        _h5obj, n_vp = self._parse_h5_meta(self._h5_path_model.get_value_as_string().strip())
 
         pose = self._read_object_world_pose()
         if pose is None:
@@ -4069,6 +4263,8 @@ class PipelineWindow:
 
         index = self._tilt_index()
         out_csv = self._tilt_output_path(obj, n_vp, index)
+        self._append_log(f"[tilt] centre = row {index} / {n_rows - 1} [{row_kind}] "
+                         f"of {source_csv}")
 
         # anchor = 로봇의 현재 자세. tilt 는 팔 분기를 자유롭게 고를 수 있어서, 지금 있는
         # 자리에서 가장 가까운 분기로 시작해야 진입 이동(Move to Tilt Start)이 짧아진다.
@@ -4085,7 +4281,7 @@ class PipelineWindow:
         clamp = self._get_field("tilt_clamp", bool)
         shell = (
             f"{self._uv} run --no-sync scripts/core/trajectory/tilt_motion.py "
-            f"--object {obj!r} --viewpoints {h5!r} --viewpoint-index {index} "
+            f"--object {obj!r} --trajectory {source_csv!r} --row-index {index} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--pitch-min {float(self._get_field('tilt_pitch_min', float)):.3f} "
             f"--pitch-max {float(self._get_field('tilt_pitch_max', float)):.3f} "
@@ -4096,11 +4292,12 @@ class PipelineWindow:
             f"--num-seeds {max(1, int(self._get_field('tilt_num_seeds', int)))} "
             f"--batch-size {max(1, int(self._get_field('tilt_batch_size', int)))}"
             f"{'' if clamp else ' --no-clamp'}{anchor} "
+            f"{self._timing_cli_args()} "
             f"--output {str(out_csv)!r}"
         )
 
         self._set_busy(self._btn_tilt_cancel)
-        self._append_log(f"[tilt] center viewpoint #{index} -> {out_csv}")
+        self._append_log(f"[tilt] output -> {out_csv}")
         self._append_log("[tilt] $ " + shell)
         generated_csv_path: list[str] = []
 
@@ -4201,6 +4398,12 @@ class PipelineWindow:
         start_dir = self._start_dir_for(self._csv_path_model, "trajectory")
         self._open_file_picker("Select trajectory CSV", self._csv_path_model,
                                "CSV (*.csv)", ".csv", start_dir)
+
+    def _on_browse_tilt_base(self):
+        """Tilt 의 기준 궤적을 고른다 — Preview/Execute 의 CSV 칸은 건드리지 않는다."""
+        start_dir = self._start_dir_for(self._tilt_base_csv_model, "trajectory")
+        self._open_file_picker("Select base trajectory CSV (tilt centre)",
+                               self._tilt_base_csv_model, "CSV (*.csv)", ".csv", start_dir)
 
     def _on_browse_h5(self):
         """Open Omni file picker pre-rooted at data/{object}/viewpoint/."""
@@ -4430,6 +4633,9 @@ class PipelineWindow:
             self._gate_accum = 0.0
             try:
                 self._sync_mode_ui()
+                # 같은 경로로 CSV 를 다시 구우면 모델 값이 안 바뀌어 콜백이 안 온다.
+                # 여기서 mtime 만 확인한다(캐시가 맞으면 stat 한 번이 전부다).
+                self._refresh_tilt_row_label()
             except Exception:  # noqa: BLE001 — UI 갱신이 루프를 죽이면 안 된다
                 pass
         self.step_preview(dt)

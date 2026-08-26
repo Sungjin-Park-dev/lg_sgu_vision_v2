@@ -12,6 +12,10 @@ from .motion import (
     build_reconfig_motion_planner,
     densify_for_collision_check,
     find_colliding_interpolation_edges,
+    WAYPOINT_INTERPOLATED,
+    WAYPOINT_KIND_NAMES,
+    WAYPOINT_PLANNED,
+    WAYPOINT_VIEWPOINT,
     interpolate_and_resample,
     plan_reconfig_transits,
     stitch_trajectory_pieces,
@@ -24,6 +28,10 @@ from .robot import (
     resolve_robot_config,
 )
 from .settings import (
+    add_timing_cli_arguments,
+    apply_timing_cli,
+    timing_values,
+    TIMING_KNOBS,
     CORNER_ANGLE_THRESHOLD_DEG,
     CORNER_MAX_SLOWDOWN,
     DEFAULT_SPACING_M,

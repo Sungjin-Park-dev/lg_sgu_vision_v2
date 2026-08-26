@@ -124,6 +124,7 @@ def _parse_args() -> argparse.Namespace:
                         default="both",
                         help="with --home-transitions-only, plan both legs or only "
                              "HOME→start / end→HOME (default: both)")
+    PT.add_timing_cli_arguments(parser)
     args = parser.parse_args()
     if not args.result.exists():
         parser.error(f"Result not found: {args.result}")
@@ -194,7 +195,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
 
     # --- Phase 5: transit 병합 + uniform resample (연속 scan edge 를 densify-충돌검증) ---
     try:
-        final_traj, final_is_transit, skipped_vps, runs_info = PT.interpolate_and_resample(
+        final_traj, final_is_transit, skipped_vps, runs_info, final_kinds = PT.interpolate_and_resample(
             selected, transit_segments, robot_cfg,
             mode=PT.RESAMPLE_MODE, spacing=spacing,
             reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
@@ -207,6 +208,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
         "ok": True,
         "final_traj": final_traj,
         "final_is_transit": final_is_transit,
+        "final_kinds": final_kinds,
         "entry": np.asarray(final_traj[0], dtype=np.float64),
         "exit": np.asarray(final_traj[-1], dtype=np.float64),
         "M": M,
@@ -241,6 +243,7 @@ def _singleton_component(component):
         "reconfig_mismatch": 0, "csv": None,
         "final_traj": selected,
         "final_is_transit": np.zeros(1, dtype=bool),   # scan point (transit 아님)
+        "final_kinds": np.full(1, PT.WAYPOINT_VIEWPOINT, dtype=np.int8),
         "entry": selected[0].copy(), "exit": selected[0].copy(),
     }
 
@@ -264,7 +267,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": 0,
             "reconfig_mismatch": pr.get("reconfig_mismatch", 0), "csv": None,
-            "final_traj": None, "final_is_transit": None,
+            "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None, "error": pr["error"],
         }
     if require_full_coverage and pr["dropped"]:
@@ -281,12 +284,12 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": len(pr["final_traj"]),
             "reconfig_mismatch": pr["reconfig_mismatch"], "csv": None,
-            "final_traj": None, "final_is_transit": None,
+            "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None,
             "error": "full coverage required but viewpoint(s) were skipped",
         }
     gate = collision_gate_and_save(
-        pr["final_traj"], pr["final_is_transit"],
+        pr["final_traj"], pr["final_is_transit"], kinds=pr.get("final_kinds"),
         robot_cfg=robot_cfg, world_config=world_config, out_csv=out_csv,
     )
     return {
@@ -297,6 +300,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
         "collision_fallback_req": pr["collision_fallback_req"],
         "collision_fallback_ok": pr["collision_fallback_ok"],
         "final_traj": pr["final_traj"], "final_is_transit": pr["final_is_transit"],
+        "final_kinds": pr.get("final_kinds"),
         "entry": pr["entry"], "exit": pr["exit"], **gate,
     }
 
@@ -313,6 +317,9 @@ def main() -> int:
     print("=" * 64)
     print("VERIFY GLNS TRAJECTORY (collision-aware, per component)")
     print("=" * 64)
+
+    # 충돌 게이트가 시간을 매기기 전에만 반영되면 된다. 여기가 그 앞이다.
+    PT.apply_timing_cli(args)
 
     result = read_result_hdf5(args.result)
     meta = result["metadata"]
@@ -449,6 +456,7 @@ def main() -> int:
             join_inputs.append({
                 "cid": cid, "final_traj": res["final_traj"],
                 "final_is_transit": res["final_is_transit"],
+                "final_kinds": res.get("final_kinds"),
                 "entry": res["entry"], "exit": res["exit"],
             })
 

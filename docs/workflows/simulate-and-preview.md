@@ -14,10 +14,12 @@ uv run scripts/apps/isaac_pipeline.py
 
 1. `Load Object & Viewpoints`에서 물체를 불러오고 viewport gizmo로 배치한다.
 2. 같은 패널에서 `Viewpoints (h5)`를 고르고 `Show Viewpoints`로 배치 상태를 확인한다.
-3. `Generate Trajectory`의 `Check IK Reachability`로 도달성을 확인한다.
-4. `Generate Scan Motion`으로 궤적을 만든다.
-5. `Preview in Simulation`에서 CSV를 열고 `Load & Preview`를 누른다.
-6. `Play`, 시간 슬라이더, 충돌 구와 FOV 평면으로 동작을 확인한다.
+3. `Solve IK`의 `Check and Save IK`로 도달성을 확인하고 IK 후보를 저장한다.
+4. `Motion Speed`에서 실행 속도를 정한다. 이 값은 생성 시점에 CSV의 `time` 열로 구워지므로
+   **다음 단계 전에** 정해야 한다 — 이미 만든 CSV는 옛 속도를 그대로 갖고 있다.
+5. `Generate Trajectory`의 `Generate Scan Motion`으로 궤적을 만든다.
+6. `Preview in Simulation`에서 CSV를 열고 `Load & Preview`를 누른다.
+7. `Play`, 시간 슬라이더, 충돌 구와 FOV 평면으로 동작을 확인한다.
 
 Ghost preview는 실제 UR20 articulation과 ROS2 컨트롤러를 움직이지 않는다. `Execute Trajectory`는 별도 동작이므로 미리보기 확인 전에는 사용하지 않는다.
 
@@ -26,7 +28,9 @@ Ghost preview는 실제 UR20 articulation과 ROS2 컨트롤러를 움직이지 �
 | 패널 | 역할 |
 |---|---|
 | `Load Object & Viewpoints` | 물체, 그 물체의 viewpoint h5, 카메라 스펙 |
-| `Generate Trajectory` | IK 확인과 궤적 생성 |
+| `Solve IK` | IK 후보 옵션 + 도달성 확인·저장 (`data/{물체}/ik/{N}/*.h5`) |
+| `Motion Speed` | 생성될 CSV의 `time` 열 = 실행 속도 |
+| `Generate Trajectory` | 스캔(GLNS) 궤적과 tilt 궤적 생성 |
 | `Preview in Simulation` | ghost 로봇으로 재생 |
 | `Execute Trajectory` | 실제 로봇 실행 ([로봇에서 실행하기](execute-on-robot.md)) |
 
