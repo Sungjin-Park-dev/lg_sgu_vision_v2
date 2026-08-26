@@ -1,6 +1,12 @@
 """Public viewpoint-generation and storage API."""
 
-from .adjacency import build_local_delaunay_adjacency, components_from_edges
+from .adjacency import (
+    build_local_delaunay_adjacency,
+    canonical_edge_set,
+    components_from_edges,
+    cut_vertices,
+    expand_edges_by_hops,
+)
 from .clustering import cluster_coacd, cluster_delaunay
 from .mesh import load_meshes
 from .models import (
@@ -33,6 +39,9 @@ __all__ = [
     "cluster_coacd",
     "cluster_delaunay",
     "components_from_edges",
+    "cut_vertices",
+    "expand_edges_by_hops",
+    "canonical_edge_set",
     "compute_path_length",
     "generate_viewpoints_core",
     "load_meshes",

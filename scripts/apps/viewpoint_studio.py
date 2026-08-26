@@ -64,6 +64,8 @@ from core.viewpoint import (
     cluster_and_order,
     cluster_coacd,
     components_from_edges,
+    cut_vertices,
+    expand_edges_by_hops,
     load_meshes,
     load_viewpoints_hdf5,
     prepare_grid as prepare_viewpoints,
@@ -106,6 +108,13 @@ STAGE1_KEY = {STAGE1_DELAUNAY: "delaunay", STAGE1_COACD: "coacd"}
 # 화면 색을 무엇으로 칠할지 — 저장된 클러스터냐, 그래프의 원시 연결성분이냐.
 COLOR_BY_CLUSTERS = "Clusters"
 COLOR_BY_COMPONENTS = "Delaunay components"
+
+# GLNS 가 이 그래프 위에 얹는 확장(--delaunay-expand-hops). 성분 수는 이걸로 안 바뀐다
+# (N-hop 안에 있다는 건 이미 경로가 있다는 뜻이라 같은 성분이다) — 바뀌는 것은 간선 수,
+# 즉 GLNS 가 순서를 고를 자유도다. 그래서 여기서는 "GLNS 가 실제로 몇 개의 간선 위에서
+# 푸는가" 를 보여준다.
+DEFAULT_GLNS_HOPS = 2
+MAX_GLNS_HOPS = 4
 COLOR_BY_OPTIONS = [COLOR_BY_CLUSTERS, COLOR_BY_COMPONENTS]
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -347,6 +356,10 @@ class Studio:
         with g.add_folder("Layers"):
             self.colorby_dd = g.add_dropdown(
                 "Color by", options=COLOR_BY_OPTIONS, initial_value=COLOR_BY_CLUSTERS)
+            # 재생성 없이 "GLNS 가 볼 간선" 으로 관점만 바꾸는 노브다.
+            self.sl_hops = g.add_slider(
+                "GLNS expand hops", min=1, max=MAX_GLNS_HOPS, step=1,
+                initial_value=DEFAULT_GLNS_HOPS)
             self.cb_mesh = g.add_checkbox("Mesh", initial_value=True)
             self.cb_surface = g.add_checkbox("Surface points", initial_value=True)
             self.cb_markers = g.add_checkbox("Markers", initial_value=True)
@@ -422,6 +435,7 @@ class Studio:
         self.object_dd.on_update(lambda _: self._on_object_change())
         self.existing_dd.on_update(lambda _: self._on_existing_change())
         self.colorby_dd.on_update(lambda _: self._on_colorby_change())
+        self.sl_hops.on_update(lambda _: self._on_colorby_change())
         for cb in (self.cb_mesh, self.cb_surface, self.cb_markers,
                    self.cb_paths, self.cb_transitions, self.cb_delaunay, self.cb_coacd):
             cb.on_update(lambda _: self._apply_visibility())
@@ -433,6 +447,19 @@ class Studio:
             handle.on_update(lambda _: self._on_camera_spec_change())
         self._apply_subcluster_visibility()
         self._apply_stage1_visibility()
+
+    def _expanded_edges(self, adjacency, n) -> tuple[np.ndarray, int]:
+        """(hop 확장된 간선, hop 수) — GLNS 가 실제로 푸는 그래프.
+
+        h5 에 저장된 간선은 항상 1-hop 이다. solve.py 가 --delaunay-expand-hops 로 확장한
+        뒤에 성분을 세므로, 화면도 같은 것을 보여줘야 "이 물체가 몇 조각인가" 라는 질문에
+        같은 답이 나온다.
+        """
+        edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
+        hops = int(self.sl_hops.value)
+        if hops > 1 and len(edges):
+            edges = np.asarray(expand_edges_by_hops(edges, n, hops), dtype=np.int32)
+        return edges, hops
 
     def _current_overlap_pct(self) -> float:
         return float(self.nb_overlap.value)
@@ -807,7 +834,8 @@ class Studio:
             print("  [warn] no mesh to display; skipping mesh layer")
 
         if use_components:
-            _, group_id = components_from_edges(adjacency["edges"], data["n"])
+            expanded, _ = self._expanded_edges(adjacency, data["n"])
+            _, group_id = components_from_edges(expanded, data["n"])
             group_order = np.unique(group_id)
         else:
             group_id = cid
@@ -888,11 +916,30 @@ class Studio:
         if adjacency is not None:
             edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
             n_components, _ = components_from_edges(edges, data["n"])
+            expanded, hops = self._expanded_edges(adjacency, data["n"])
             adjacency_info = (
                 f"**Delaunay:** `{len(edges)} edges` · "
-                f"`{n_components} components` · "
+                f"`{n_components} component{'s' if n_components != 1 else ''}` · "
                 f"`{int(adjacency.get('stats', {}).get('num_isolated', 0))} isolated`"
+                f"\n\n**GLNS solves on:** `{len(expanded)} edges` ({hops}-hop)"
             )
+            # 그래프가 몇 조각인지보다 중요한 것: **한 점만 빠지면 조각나는가.**
+            # viewpoint 하나가 IK 에 실패해 빠지는 것만으로 갈라질 수 있고, 갈라지면 그
+            # 사이를 잇는 transit 이 생겨 base 가 크게 돈다. 스튜디오는 IK 를 못 돌리지만
+            # "어느 점이 그런 다리인가" 는 그래프만으로 알 수 있다 — 그걸 여기서 경고한다.
+            bridges = cut_vertices(expanded, data["n"])
+            if len(bridges):
+                shown = ", ".join(f"vp{int(b)}" for b in bridges[:8])
+                more = f" +{len(bridges) - 8}" if len(bridges) > 8 else ""
+                adjacency_info += (
+                    f"\n\n⚠ **Fragile:** `{len(bridges)}` bridge viewpoint(s) — "
+                    f"IK 가 하나라도 실패하면 그래프가 갈라진다 (`{shown}{more}`)"
+                )
+            if n_components > 1:
+                adjacency_info += (
+                    "\n\n⚠ **Split graph** — 조각 사이를 잇는 transit 이 생긴다. "
+                    "`delaunay max normal angle` 을 올려보세요."
+                )
         lines = [
             f"**Source:** `{self.scene_source}`",
             f"**Color by:** `{self.colorby_dd.value}`",

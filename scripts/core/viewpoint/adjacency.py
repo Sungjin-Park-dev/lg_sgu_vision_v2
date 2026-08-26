@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Iterable
+
 import numpy as np
 from scipy.spatial import Delaunay, QhullError, cKDTree
 from scipy.sparse import coo_matrix
@@ -12,6 +14,110 @@ from .models import (
     DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
     DEFAULT_DELAUNAY_NEIGHBORS,
 )
+
+def canonical_edge_set(edges: Iterable[tuple[int, int]]) -> set[tuple[int, int]]:
+    return {(min(int(a), int(b)), max(int(a), int(b))) for a, b in edges}
+
+
+def expand_edges_by_hops(edges: np.ndarray, n_nodes: int, hops: int) -> np.ndarray:
+    """Relax the Delaunay graph to all node pairs within ``hops`` hops.
+
+    ``hops=1`` returns the input edge set unchanged (canonicalized, undirected).
+    ``hops>=2`` adds every pair of nodes joined by a Delaunay path of length
+    ``<= hops``, giving GLNS more routing freedom than strict Delaunay adjacency
+    while staying on the surface graph (unlike a raw 3D k-NN, this never bridges
+    geometrically-close-but-topologically-far patches). Returned shape is (E, 2).
+    """
+    if hops < 1:
+        raise ValueError("hops must be >= 1")
+    edges = np.asarray(edges, dtype=np.int64)
+    base = canonical_edge_set(edges) if len(edges) else set()
+    if hops == 1 or not base:
+        return np.asarray(sorted(base), dtype=np.int32).reshape(-1, 2)
+
+    adjacency: list[list[int]] = [[] for _ in range(n_nodes)]
+    for a, b in base:
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    result = set(base)
+    for src in range(n_nodes):
+        visited = {src}
+        frontier = {src}
+        for _ in range(hops):
+            nxt: set[int] = set()
+            for u in frontier:
+                for v in adjacency[u]:
+                    if v not in visited:
+                        nxt.add(v)
+            visited |= nxt
+            frontier = nxt
+            if not frontier:
+                break
+        for dst in visited:
+            if dst != src:
+                result.add((min(src, dst), max(src, dst)))
+    return np.asarray(sorted(result), dtype=np.int32).reshape(-1, 2)
+
+
+def cut_vertices(edges: np.ndarray, n_points: int) -> np.ndarray:
+    """제거되면 그래프가 더 조각나는 정점(articulation point) 인덱스.
+
+    왜 필요한가: viewpoint 하나가 IK 에 실패해 빠지는 것만으로 그래프가 갈라질 수 있고,
+    갈라지면 그 사이를 잇는 transit 이 생긴다. 실측(sample/74)에서 그 transit 하나가
+    궤적 전체 base 회전의 69% 를 차지했다 — 원인은 두 면을 잇는 유일한 다리 vp39 의
+    IK 실패였다. 이 함수는 IK 를 돌리지 않고도 "어느 viewpoint 가 그런 다리인가" 를
+    알려주므로, 생성 단계에서 그래프의 취약점을 미리 볼 수 있다.
+
+    반복 없는 DFS 로 Hopcroft-Tarjan 을 돈다(깊은 그래프에서 재귀 한계를 피한다).
+    """
+    n = int(n_points)
+    e = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for a, b in e:
+        a, b = int(a), int(b)
+        if a != b:
+            adj[a].append(b)
+            adj[b].append(a)
+
+    disc = [-1] * n
+    low = [0] * n
+    parent = [-1] * n
+    is_cut = [False] * n
+    timer = 0
+    for root in range(n):
+        if disc[root] != -1:
+            continue
+        root_children = 0
+        stack = [(root, iter(adj[root]))]
+        disc[root] = low[root] = timer
+        timer += 1
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nb in it:
+                if disc[nb] == -1:
+                    parent[nb] = node
+                    disc[nb] = low[nb] = timer
+                    timer += 1
+                    if node == root:
+                        root_children += 1
+                    stack.append((nb, iter(adj[nb])))
+                    advanced = True
+                    break
+                if nb != parent[node]:
+                    low[node] = min(low[node], disc[nb])
+            if not advanced:
+                stack.pop()
+                if stack:
+                    up = stack[-1][0]
+                    low[up] = min(low[up], low[node])
+                    if up != root and low[node] >= disc[up]:
+                        is_cut[up] = True
+        if root_children > 1:
+            is_cut[root] = True
+    return np.flatnonzero(np.asarray(is_cut, dtype=bool)).astype(np.int32)
+
 
 def components_from_edges(edges: np.ndarray, n_points: int) -> tuple[int, np.ndarray]:
     """무방향 edge 목록에서 연결성분을 구한다 — ``edges``가 유일한 진실이다.

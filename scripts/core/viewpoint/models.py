@@ -13,7 +13,13 @@ from common import config
 
 DEFAULT_DELAUNAY_NEIGHBORS = 12
 DEFAULT_DELAUNAY_DISTANCE_FACTOR = 2.5
-DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG = 75.0
+# 90° = "두 법선이 서로 반대 반구를 향하면 자른다" — 물체를 관통하는 간선을 막는
+# 물리적 경계다. 예전 75° 는 그보다 15° 더 조여서, 모서리처럼 꺾인 실제 표면까지
+# 잘라 viewpoint 그래프를 조각냈다. 실측(sample/74): 75° 는 윗면 57개와 측면 17개가
+# 따로 놀아 두 조각 사이를 잇는 transit 하나가 궤적 전체 base 회전의 69% 를 차지했다.
+# 90° 로 올리면 간선 2개가 더해지며 한 덩어리가 되고 base 회전이 613° -> 285° 다.
+# 다른 물체 확인: curved 무변화, cylinder 성분 그대로, square 3 -> 2조각.
+DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG = 90.0
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,12 @@ from scipy.sparse.csgraph import connected_components
 # 주기성 규약은 core/trajectory/periodic.py 한 곳이 소유한다. 여기서는 쓰기만 한다
 # (예전에는 이 파일이 갖고 있어서 trajectory -> glns 역방향 import 가 생겼다).
 from core.trajectory.periodic import periodic_joint_delta, unwrap_joint_path
+# 순수 그래프 연산이라 components_from_edges 옆(core/viewpoint/adjacency.py)이 소유한다.
+# 여기서는 기존 import 경로 호환을 위해 재수출만 한다.
+from core.viewpoint.adjacency import (  # noqa: F401
+    canonical_edge_set,
+    expand_edges_by_hops,
+)
 
 RESULT_FORMAT_VERSION = 2
 JOINT_COST_SCALE = 1000
@@ -194,47 +200,6 @@ def induce_adjacency(
         for cid in range(int(n_components))
     ]
     return induced.astype(np.int32), component_id, components
-
-
-def expand_edges_by_hops(edges: np.ndarray, n_nodes: int, hops: int) -> np.ndarray:
-    """Relax the Delaunay graph to all node pairs within ``hops`` hops.
-
-    ``hops=1`` returns the input edge set unchanged (canonicalized, undirected).
-    ``hops>=2`` adds every pair of nodes joined by a Delaunay path of length
-    ``<= hops``, giving GLNS more routing freedom than strict Delaunay adjacency
-    while staying on the surface graph (unlike a raw 3D k-NN, this never bridges
-    geometrically-close-but-topologically-far patches). Returned shape is (E, 2).
-    """
-    if hops < 1:
-        raise ValueError("hops must be >= 1")
-    edges = np.asarray(edges, dtype=np.int64)
-    base = canonical_edge_set(edges) if len(edges) else set()
-    if hops == 1 or not base:
-        return np.asarray(sorted(base), dtype=np.int32).reshape(-1, 2)
-
-    adjacency: list[list[int]] = [[] for _ in range(n_nodes)]
-    for a, b in base:
-        adjacency[a].append(b)
-        adjacency[b].append(a)
-
-    result = set(base)
-    for src in range(n_nodes):
-        visited = {src}
-        frontier = {src}
-        for _ in range(hops):
-            nxt: set[int] = set()
-            for u in frontier:
-                for v in adjacency[u]:
-                    if v not in visited:
-                        nxt.add(v)
-            visited |= nxt
-            frontier = nxt
-            if not frontier:
-                break
-        for dst in visited:
-            if dst != src:
-                result.add((min(src, dst), max(src, dst)))
-    return np.asarray(sorted(result), dtype=np.int32).reshape(-1, 2)
 
 
 def find_hamiltonian_open_path(
@@ -494,7 +459,3 @@ def build_gtsp_problem(
         "reconfig_any_joints": any_idx,
         "allowed_view_edges": allowed_view_edges,
     }
-
-
-def canonical_edge_set(edges: Iterable[tuple[int, int]]) -> set[tuple[int, int]]:
-    return {(min(int(a), int(b)), max(int(a), int(b))) for a, b in edges}
