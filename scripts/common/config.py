@@ -28,13 +28,14 @@ CAMERA_FOV_WIDTH_MM = 50.0
 CAMERA_FOV_HEIGHT_MM = 50.0
 
 # WD = frame_standoff (mm): optical_frame(= 렌즈 배럴 앞면 = **카메라의 끝**) → object_plane 거리.
-#   CAD(camera_asm_wo_light.stp) 실측: lens_front=flange+218.770, VIEW_1(검사면)=flange+391.0
-#   → 391.0 - 218.770 = 172.230. poses.py 가 이 값으로 viewpoint 를 표면에서 띄운다.
-#   ⚠️ 2026-08-27 에 기준점이 body_face(flange+141.0) → lens_front 로 77.770mm 앞으로 왔다.
-#      **구 기준 값 환산: 새 WD = 구 WD − 77.770** (벤더 공칭 250 → 172.23, 273 → 195.23).
-#      검사면은 그대로 flange+391.0 이라 로봇 자세·IK·도달성은 이전과 동일하다.
+#   poses.py 가 이 값으로 viewpoint 를 표면에서 띄운다. 검사면은 flange+(218.770 + WD).
+#   ⚠️ 2026-08-27 에 기준점이 body_face(flange+141.0) → lens_front(flange+218.770) 로
+#      77.770mm 앞으로 왔다. **구 기준 값 환산: 새 WD = 구 WD − 77.770**
+#      (벤더 공칭 250 → 172.23, 실사용 273 → 195.23).
+#   기본값 195.23 은 **실사용 값**(구 기준 273)이다. CAD 의 VIEW_1 판(flange+391.0)은
+#   벤더 공칭 250 에 대응하는 자리라 기본값과 다르다 — 그쪽을 쓰려면 172.23 을 넣는다.
 #   바꾸면 물체면이 실제로 이동 → viewpoint h5 재생성 + 도달성/충돌 재검증 필요.
-CAMERA_WORKING_DISTANCE_MM = 172.23
+CAMERA_WORKING_DISTANCE_MM = 195.23
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5

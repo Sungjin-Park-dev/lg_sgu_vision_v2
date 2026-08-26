@@ -10,11 +10,14 @@
 ## A. 기준점 (광축 위, flange 프레임 기준 미터)
 
 ```
-flange ──── sensor ──── body_face ──[?pupil]── optical_frame ──────── object_plane
+flange ──── sensor ──── body_face ──[?pupil]── optical_frame ──────── VIEW_1
  0.000      0.1243        0.141                 0.21877                 0.391   [m]
-                                                └──── WD 0.17223 ─────────┘
                           └──────── 벤더 공칭 WD 0.250 (구 기준) ──────────┘
+                                                └──── WD 0.17223 ─────────┘
 ```
+
+위 `VIEW_1`(0.391)은 **벤더 공칭 WD 에 대응하는 CAD 랜드마크**다. config 기본 WD 는
+실사용 값 **0.19523** 이라 검사면은 flange+**0.414** 에 놓인다 — CAD 판보다 23mm 앞이다.
 
 | 표준어 | 뜻 | 위치 | 근거 |
 |---|---|---|---|
@@ -23,24 +26,26 @@ flange ──── sensor ──── body_face ──[?pupil]── optical_f
 | **body_face** | 카메라 커버 앞면 | 0.141 | 벤더 공칭 WD 250mm 의 기준점. **2026-08-27 부터 코드 기준점 아님** |
 | **pupil** | 광학중심(입사동공) | 렌즈 내부(미확정) | 핀홀 투영중심. CAD에 없음 |
 | **lens_front** = **optical_frame** | 렌즈 앞면(배럴 끝) = **카메라의 끝** | **0.21877** | `MFA121-U50` 배럴 Ø38.6. **코드 tool frame**, WD 기준점 |
-| **object_plane** | 물체면 = 검사면 = 초점면 | 0.391 | `VIEW_1` — 50×50mm 판의 근접면 |
+| **object_plane** | 물체면 = 검사면 = 초점면 | **WD 따라 이동** | `VIEW_1`(0.391)은 벤더 공칭 WD 자리. config 기본 WD 로는 0.414 |
 
 ## B. 거리 — 이름에 기준점을 못박음
 
 | 표준어 | 정의 (from → to) | 값 | 코드 심볼 |
 |---|---|---|---|
 | **mount_offset** | flange → optical_frame | 0.21877 m | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` (URDF가 소유) |
-| **WD** = **frame_standoff** | optical_frame(= 카메라 끝) → object_plane | **172.23 mm** | `CAMERA_WORKING_DISTANCE_MM` |
-| **flange_to_object** | flange → object_plane | 391 mm | mount_offset + WD |
-| **body_face_WD** | body_face → object_plane | 250 mm | 벤더 공칭 WD. 구 기준의 `CAMERA_WORKING_DISTANCE_MM` (지금은 코드에 없음) |
-| **sensor_to_object** | sensor → object_plane | 266.7 mm | (코드에 없음) |
+| **WD** = **frame_standoff** | optical_frame(= 카메라 끝) → object_plane | **195.23 mm** (config 기본, 실사용 값) | `CAMERA_WORKING_DISTANCE_MM` |
+| **flange_to_object** | flange → object_plane | 414 mm | mount_offset + WD |
+| **body_face_WD** | body_face → object_plane | 273 mm | 구 기준의 `CAMERA_WORKING_DISTANCE_MM` (지금은 코드에 없음). 벤더 공칭은 250 |
+| **sensor_to_object** | sensor → object_plane | 289.7 mm | (코드에 없음) |
+
+표의 아래 세 행(`flange_to_object` · `body_face_WD` · `sensor_to_object`)은 **config 기본 WD(195.23) 기준**이다 — WD 를 바꾸면 같이 움직인다.
 
 > **WD 는 카메라의 끝에서 잰다** (2026-08-27 이전). `optical_frame` 이 렌즈 배럴 앞면에
 > 놓여 있어, 현장에서 자로 "카메라 끝 → 물체" 를 재면 그게 곧 이 값이다.
 >
 > ⚠️ **벤더 공칭 250mm 는 `body_face` 기준이라 이 값과 다른 숫자다.** 환산은
-> **`새 WD = 구 WD − 77.770`** (250 → 172.23, 273 → 195.23). 검사면(flange+391.0)은
-> 이전과 같은 자리라 로봇 자세·IK·도달성은 바뀌지 않았다 — 숫자의 의미만 바뀌었다.
+> **`새 WD = 구 WD − 77.770`** (250 → 172.23, 273 → 195.23). 환산한 값을 쓰면 검사면이
+> 이전과 같은 자리에 남으므로 로봇 자세·IK·도달성이 바뀌지 않는다 — 숫자의 의미만 바뀐다.
 
 ### WD 를 실제로 조절하는 법
 
@@ -122,9 +127,10 @@ uv run --no-sync scripts/setup/inspect_camera_step.py   # 아래 표를 재출�
 [build_camera_mesh.py](../../scripts/setup/build_camera_mesh.py) `EXPECT_HI` 의 x_max
 **0.21877 m** 와 일치 → STEP → flange 프레임 매핑이 확정.
 
-**391.0 − 218.770 = 172.230** 이 현재 `CAMERA_WORKING_DISTANCE_MM` 이다.
 **391.0 − 141.0 = 250.0** 은 벤더 공칭 WD 와 정확히 일치한다 — 벤더가 `body_face` 를
-기준으로 쓴다는 증거이고, 그래서 벤더 스펙을 코드에 넣을 때는 77.770 을 빼야 한다.
+기준으로 쓴다는 증거이고, 그래서 벤더 스펙을 코드에 넣을 때는 77.770 을 빼야 한다
+(250 → **172.230**). `CAMERA_WORKING_DISTANCE_MM` 기본값은 그 벤더 값이 아니라
+실사용 값 195.23 이라 검사면이 `VIEW_1` 과 일치하지 않는다.
 
 ### 해소된 파킹 항목
 
@@ -132,8 +138,8 @@ uv run --no-sync scripts/setup/inspect_camera_step.py   # 아래 표를 재출�
   78mm 는 배럴 길이(218.77 − 141.0 = 77.77)였을 뿐 기준점 불일치가 아니었다.
   **2026-08-27**: 그 77.77mm 를 이번엔 의도적으로 넘어가 `optical_frame` 을 배럴 끝으로
   옮겼다 — CAD 없이는 못 찾는 `body_face` 대신 자로 잴 수 있는 카메라 끝을 기준으로
-  삼기 위해서다. 검사면은 flange+391.0 그대로 두고 WD 만 250 → 172.23 으로 낮췄으므로
-  로봇 기하는 불변(cylinder_sample/132 도달성 118/132 로 변경 전과 동일 확인).
+  삼기 위해서다. 같은 검사면을 유지하려면 WD 를 77.770 만큼 낮추면 되고, 그때 로봇
+  기하는 불변이다(cylinder_sample/132: 273 → 195.23 에서 도달성 118/132 로 동일 확인).
 - ~~**optical_frame 이 렌즈보다 127mm 앞 허공**~~ — 그 위치(0.346)는 어셈블리에서
   제거된 조명박스 `LIGHT_1` 의 앞면이었다. 2026-07-27 에 body_face 로 이전.
 

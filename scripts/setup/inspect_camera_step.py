@@ -35,7 +35,8 @@ EXPECT = {
     "lens barrel tip": (218.770, "URDF camera_optical_joint xyz / TOOL_TO_CAMERA_OPTICAL_OFFSET_M"
                                  " / build_camera_mesh.EXPECT_HI[0] = 0.21877 m"),
     "body_face": (141.000, "커버 앞면. 2026-08-27 부터 코드 기준점이 아니다 — CAD 랜드마크로만 남는다"),
-    "object_plane": (391.000, "lens barrel tip + CAMERA_WORKING_DISTANCE_MM"),
+    "object_plane": (391.000, "VIEW_1 판 = 벤더 공칭 WD 250mm 의 물체면(body_face+250)."
+                              " config 기본 WD 는 실사용 값이라 여기와 다르다"),
 }
 TOL_MM = 1e-3
 

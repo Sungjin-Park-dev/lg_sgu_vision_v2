@@ -83,8 +83,9 @@ BBOX_TOL = 1e-4
 # and the datum working distance is measured from. CAD (camera_asm_wo_light.stp, flange, mm):
 #   flange 0 | PCB_2 122.7..124.3 | body_face 141.0 | lens barrel 157.5..218.770
 #   | VIEW_1 (50x50 inspection plane) 391.0..392.0
-# 391.0 - 218.770 = 172.230, which is CAMERA_WORKING_DISTANCE_MM. The tip is the one datum
-# you can check with a ruler on site; body_face needs the CAD to locate at all.
+# VIEW_1 sits at 391.0 = body_face + 250, the vendor's nominal WD; from the tip that is
+# 172.230. CAMERA_WORKING_DISTANCE_MM defaults to the value actually in use, not that one.
+# The tip is the one datum you can check with a ruler on site; body_face needs the CAD.
 # History: 0.346 (front face of LIGHT_1, an illumination box later removed from the assembly)
 # -> 0.141 (body_face, the vendor's 250 mm WD datum, 2026-07-27) -> 0.21877 (2026-08-27).
 # Same x_max as EXPECT_HI[0] above -- the frame now sits exactly on the baked mesh's tip.
