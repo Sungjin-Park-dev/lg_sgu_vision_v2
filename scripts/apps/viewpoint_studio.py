@@ -5,7 +5,7 @@ Two ways to put viewpoints on screen, both object-centric:
 
   * **Generate** — pick an object, tune clustering parameters, and
     regenerate viewpoints in-process via the ``viewpoint/cli.py`` seam
-    (``load_meshes`` / ``prepare_grid`` / ``cluster_coacd`` / ``cluster_and_order``).
+    (``load_meshes`` / ``prepare_viewpoints`` / ``cluster_coacd`` / ``cluster_and_order``).
     Viewpoints are generated with surface sampling only. Surface spacing is derived
     from camera FOV and overlap; CoACD is cached per (object, spacing, threshold)
     so tuning sub-cluster parameters is fast (~2s).
@@ -24,9 +24,8 @@ transitions, and — for generated results — translucent CoACD part overlays.
 Layers toggle independently; a playback slider scrubs/auto-plays the visit order.
 **Color by** switches between the file's own clusters and the raw graph components.
 
-Scope: sampling is fixed to ``surface`` and ordering to ``lawnmower`` in this app.
-Grid sampling remains available in ``viewpoint/cli.py`` for CLI/batch use.
-Material filtering and bottom-filter tuning are not exposed. Found parameters can
+Scope: sampling is surface FPS (the only mode) and ordering is fixed to ``lawnmower``
+in this app. Material filtering and bottom-filter tuning are not exposed. Found parameters can
 be persisted with **Save** for the downstream plan_trajectory step.
 
 Usage:
@@ -68,7 +67,7 @@ from core.viewpoint import (
     expand_edges_by_hops,
     load_meshes,
     load_viewpoints_hdf5,
-    prepare_grid as prepare_viewpoints,
+    prepare_viewpoints,
     save_viewpoints_hdf5,
 )
 from core.viewpoint.visualization import _BOLD_COLORS, _PART_COLORS
@@ -147,12 +146,14 @@ def eps_default_mm(surface_spacing_mm: float) -> int:
 
 
 def surface_key(obj: str, p: dict) -> tuple:
-    """prepare_grid 결과를 식별하는 캐시 키.
+    """prepare_viewpoints 결과를 식별하는 캐시 키.
 
     WD 가 들어가는 이유: ``camera_positions = positions + normals × WD`` 이고 클러스터링과
     Delaunay 그래프가 전부 그 위에서 돈다. 빠뜨리면 WD 를 바꿔도 캐시 히트로 옛 결과가 나온다.
-    row/col 이 따로 들어가는 이유: surface spacing 은 ``min(row, col)`` 이라 FOV 60×40 과
-    40×60 이 같은 키가 되는데, 캐시된 dict 의 row/col_spacing_m 은 lawnmower 순서를 좌우한다.
+    row/col 이 따로 들어가는 이유: 순서 때문이 아니다 — lawnmower 도 ``min(row, col)`` 만 써서
+    FOV 60×40 과 40×60 은 같은 순서를 낸다. 하지만 캐시된 dict 의 row/col_spacing_m 이 그대로
+    h5 ``metadata/row_spacing_mm``/``col_spacing_mm`` 로 저장되므로, 키에서 빼면 60×40 으로 만든
+    h5 가 40×60 이라고 기록된다.
     """
     return (
         obj,
@@ -479,7 +480,7 @@ class Studio:
 
         유도값(row/col/surface spacing = FOV × (1-overlap))은 화면에 띄우지 않는다 —
         입력칸이 바로 위에 있어 중복이고, 실제 사용된 값은 생성 시 콘솔에 찍힌다
-        (``prepare_grid`` 의 "Row/Col spacing", "Working distance").
+        (``prepare_viewpoints`` 의 "Row/Col spacing", "Working distance").
         """
         _, _, surface_mm = self._current_spacing()
         self.sl_eps.value = eps_default_mm(surface_mm)
@@ -578,7 +579,6 @@ class Studio:
         fov_w_mm, fov_h_mm = self._current_fov_mm()
         p = {
             "obj": self.object_dd.value,
-            "sampling_mode": "surface",
             "ordering_mode": "lawnmower",
             "surface_overlap_pct": self._current_overlap_pct(),
             "surface_spacing_mm": surface_spacing_mm,
@@ -616,7 +616,6 @@ class Studio:
                 self.surface_cache[gkey] = prepare_viewpoints(
                     target_mesh,
                     ViewpointGenParams(
-                        sampling_mode="surface",
                         ordering_mode="lawnmower",
                         surface_spacing_mm=sp,
                         row_spacing_mm=p["row_spacing_mm"],
@@ -649,8 +648,6 @@ class Studio:
                 positions=surface["positions"], normals=surface["normals"],
                 camera_positions=surface["camera_positions"], target_mesh=target_mesh,
                 row_spacing_m=surface["row_spacing_m"], col_spacing_m=surface["col_spacing_m"],
-                grid_row_index=surface["grid_row_index"],
-                cam_axis1=surface["cam_axis1"], cam_axis2=surface["cam_axis2"],
                 original_path_length_mm=surface["original_path_length_mm"],
                 normal_weight=p["normal_weight"], ordering_mode=p["ordering_mode"],
                 adjacency_edges=adjacency["edges"],
@@ -720,14 +717,14 @@ class Studio:
             "fov_height_mm": p["fov_height_mm"],
             "working_distance_mm": p["working_distance_mm"],
         }
-        sm = p.get("sampling_mode", "surface")
         om = p.get("ordering_mode", "lawnmower")
         sp = p.get("surface_spacing_mm")
         metadata = {
             "timestamp": datetime.now().isoformat(),
             "input_mesh": str(L["input_path"]),
-            "method": f"{sm}+{om}",
-            "sampling_mode": sm,
+            # sampling_mode 는 이제 상수다 — 기존 h5 와 키/값을 맞춘다.
+            "method": f"surface+{om}",
+            "sampling_mode": "surface",
             "ordering_mode": om,
             "row_spacing_mm": surface["row_spacing_m"] * 1000.0,
             "col_spacing_mm": surface["col_spacing_m"] * 1000.0,

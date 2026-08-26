@@ -18,7 +18,7 @@ from .models import (
     ViewpointGenParams,
     ViewpointResult,
 )
-from .pipeline import cluster_and_order, generate_viewpoints_core, prepare_grid
+from .pipeline import cluster_and_order, generate_viewpoints_core, prepare_viewpoints
 from .sampling import compute_path_length
 from .storage import (
     load_viewpoints_hdf5,
@@ -46,7 +46,7 @@ __all__ = [
     "generate_viewpoints_core",
     "load_meshes",
     "load_viewpoints_hdf5",
-    "prepare_grid",
+    "prepare_viewpoints",
     "save_viewpoints_hdf5",
     "write_adjacency_into_h5",
 ]

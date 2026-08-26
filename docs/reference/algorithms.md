@@ -4,7 +4,7 @@
 
 물체 표면을 sampling하고 working distance만큼 떨어진 카메라 pose를 만든다. stage 1(Delaunay 표면 성분 또는 CoACD 볼록 파트)과 sub-clustering으로 검사 영역을 나누고 lawnmower 경로와 Delaunay 인접 그래프를 저장한다.
 
-Viewpoint Studio는 surface sampling을 기본으로 사용한다. grid와 세부 실험 옵션은 내부 CLI에 남아 있다.
+Sampling은 메시 표면 직접 FPS 하나뿐이다. PCA 평면에 격자를 깔고 투영하던 grid 모드는 곡면·측벽을 놓치고 속 빈 물체의 지붕을 잃어 2026-08-26 제거했다. 세부 실험 옵션은 내부 CLI에 남아 있다.
 
 ## GLNS 궤적
 

@@ -130,9 +130,9 @@ class ViewpointGenParams:
     coacd_threshold: float = 0.05
     target_size: int = 12
     max_span_mm: Optional[float] = None
-    sampling_mode: str = "grid"
+    # 샘플링은 메시 표면 직접 FPS 하나뿐이다(grid 모드는 2026-08-26 제거).
     surface_spacing_mm: Optional[float] = None
-    ordering_mode: str = "zigzag"
+    ordering_mode: str = "lawnmower"
     build_delaunay: bool = True
     delaunay_neighbors: int = DEFAULT_DELAUNAY_NEIGHBORS
     delaunay_distance_factor: float = DEFAULT_DELAUNAY_DISTANCE_FACTOR

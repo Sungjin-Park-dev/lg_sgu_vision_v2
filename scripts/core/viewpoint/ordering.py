@@ -7,7 +7,6 @@ import itertools
 import numpy as np
 
 from .adjacency import _tangent_basis
-from .sampling import compute_pca_axes, reorder_zigzag
 
 def _edge_cost(pos_from, pos_to, nrm_from, nrm_to, normal_weight):
     """두 점 사이의 위치+법선 비용 (미터 단위)."""
@@ -393,19 +392,11 @@ def compute_cluster_internal_order(
     normals: np.ndarray,
     row_spacing_m: float,
     col_spacing_m: Optional[float] = None,
-    grid_row_index: Optional[np.ndarray] = None,
-    global_axis1: Optional[np.ndarray] = None,
-    global_axis2: Optional[np.ndarray] = None,
-    ordering_mode: str = 'zigzag',
+    ordering_mode: str = 'lawnmower',
 ) -> dict:
     """각 클러스터의 내부 방문 순서를 사전 계산.
 
     TSP 전에 호출하여 클러스터별 start/end point를 확보한다.
-
-    grid_row_index가 주어지면 전역 축(global_axis1/axis2)을 사용하여
-    클러스터별 PCA를 생략한다. row_index_override가 행 구분을 담당하므로
-    로컬 PCA의 axis1은 불필요하고, axis2는 클러스터 간 열 방향 일관성을
-    위해 이미 전역 값을 사용해야 하기 때문이다.
 
     Args:
         cluster_ids: (N,) 클러스터 ID
@@ -414,9 +405,7 @@ def compute_cluster_internal_order(
         normals: (N, 3) 법선
         row_spacing_m: 행 간격 (미터)
         col_spacing_m: 열 간격 (미터). lawnmower row 간격은 min(row, col)을 사용.
-        grid_row_index: (N,) 그리드 생성 시 할당된 원본 행 인덱스. None이면 양자화로 추정.
-        global_axis1: (3,) 전역 행 방향 축. grid_row_index 사용 시 전달 (proj1 계산용, 행 구분에는 미사용).
-        global_axis2: (3,) 전역 열 방향 축. grid_row_index 사용 시 행 내 정렬에 사용.
+        ordering_mode: 'lawnmower'(탄젠트 row sweep) | 'graph'(NN + open-path 2-opt).
 
     Returns:
         dict[cluster_id] → {
@@ -448,22 +437,12 @@ def compute_cluster_internal_order(
             perm = order_cluster_graph(camera_positions[indices], normals[indices])
             sorted_indices = [indices[i] for i in perm]
         else:
-            cluster_cam = camera_positions[indices]
-
-            if grid_row_index is not None:
-                cluster_row_idx = grid_row_index[indices]
-                axis1 = global_axis1 / np.linalg.norm(global_axis1)
-                axis2 = global_axis2 / np.linalg.norm(global_axis2)
-                local_order, _, _ = reorder_zigzag(
-                    cluster_cam, axis1, axis2, row_spacing_m,
-                    row_index_override=cluster_row_idx,
-                )
-            else:
-                _, axis1, axis2 = compute_pca_axes(cluster_cam.astype(np.float64))
-                local_order, _, _ = reorder_zigzag(cluster_cam, axis1, axis2, row_spacing_m)
-
-            sorted_local = np.argsort(local_order)
-            sorted_indices = [indices[i] for i in sorted_local]
+            # 예전에는 전역 PCA 축 zigzag 가 여기 있었다. 그건 grid 샘플링이 만들어 주는
+            # 행 인덱스가 있어야 뜻이 통했고, grid 제거 후에는 클러스터별 PCA 폴백만 남아
+            # 클러스터링 안 한 경로보다 긴 순서를 냈다(cylinder_sample 10015mm vs
+            # baseline 5651mm). 조용히 나쁜 순서를 내느니 거절한다.
+            raise ValueError(
+                f"Unknown ordering_mode: {ordering_mode!r} (expected 'lawnmower' or 'graph')")
 
         result[cid] = {
             'sorted_indices': sorted_indices,

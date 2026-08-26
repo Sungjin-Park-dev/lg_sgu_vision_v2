@@ -27,16 +27,12 @@ from .ordering import (
 from .sampling import (
     _nn_path_length,
     compute_path_length,
-    compute_pca_axes,
     filter_interior_viewpoints,
-    generate_grid_viewpoints,
     generate_surface_viewpoints,
-    reorder_zigzag,
 )
 
 def cluster_and_order(label, method, *, positions, normals, camera_positions, target_mesh,
-                      row_spacing_m, col_spacing_m, grid_row_index, cam_axis1, cam_axis2,
-                      original_path_length_mm, **kwargs):
+                      row_spacing_m, col_spacing_m, original_path_length_mm, **kwargs):
     """한 가지 클러스터링 설정을 실행하고 결과 dict를 반환.
 
     아래 dispatch만 방법마다 다르고, 그 뒤(내부 순서 → GTSP 클러스터 순서 → 전역
@@ -115,8 +111,7 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
     c_internal = compute_cluster_internal_order(
         cids, positions, camera_positions, normals, row_spacing_m,
         col_spacing_m=col_spacing_m,
-        grid_row_index=grid_row_index, global_axis1=cam_axis1, global_axis2=cam_axis2,
-        ordering_mode=kwargs.get('ordering_mode', 'zigzag'),
+        ordering_mode=kwargs.get('ordering_mode', 'lawnmower'),
     )
     c_order, c_direction = order_clusters_gtsp(cids, camera_positions, c_internal, nw)
     t_gtsp = time.perf_counter() - t0
@@ -150,15 +145,23 @@ def cluster_and_order(label, method, *, positions, normals, camera_positions, ta
     return result
 
 
-def prepare_grid(target_mesh, params: ViewpointGenParams):
-    """그리드 뷰포인트 생성 + 지그재그 정렬 + bottom 필터 (클러스터링 전 단계).
+def prepare_viewpoints(target_mesh, params: ViewpointGenParams):
+    """표면 뷰포인트 생성 + bottom/interior 필터 (클러스터링 전 단계).
 
-    Returns: dict — positions, normals, camera_positions, path_order, row_index,
-        grid_row_index, cam_axis1, cam_axis2, row_spacing_m, col_spacing_m,
-        original_path_length_mm, pca_center, pca_axis1, pca_axis2
+    샘플링은 메시 표면 직접 FPS 하나뿐이다. 예전에는 PCA 평면에 격자를 깔고
+    ``closest_point`` 로 표면에 투영하는 grid 모드가 있었지만, 평면 투영이라 곡면·측벽을
+    놓치고 속 빈 물체에서는 안쪽 면이 더 가까워 지붕을 통째로 잃었다. 저장된 h5 는 전부
+    surface 로 만들어졌고 grid 산출물은 하나도 없어 2026-08-26 에 제거했다.
+
+    Returns: dict — positions, normals, camera_positions,
+        row_spacing_m, col_spacing_m, original_path_length_mm
+
+    방문 순서는 만들지 않는다 — cluster_and_order 가 클러스터 내부 순서와 GTSP 클러스터
+    순서에서 새로 만든다. row/col spacing 은 lawnmower 의 row 간격(min)과 h5 metadata 로
+    쓰이므로 유도값이라도 반환한다.
     """
-    # 3. spacing — row/col 을 직접 준 게 없으면 FOV×(1-overlap) 로 유도한다.
-    #    FOV·overlap·WD 는 params 가 소유한다(__post_init__ 이 config 로 해소).
+    # spacing — row/col 을 직접 준 게 없으면 FOV×(1-overlap) 로 유도한다.
+    # FOV·overlap·WD 는 params 가 소유한다(__post_init__ 이 config 로 해소).
     if params.row_spacing_mm:
         row_spacing_m = params.row_spacing_mm / 1000.0
     else:
@@ -177,34 +180,13 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
     # 이 한 줄이 곧 h5 → IK/궤적/GLNS 로 흘러가는 값이다(camera_positions 기준).
     wd_m = params.working_distance_mm / 1000.0
 
-    if params.sampling_mode == 'surface':
-        # 4'. 표면 직접 균일 샘플링 (FPS) — 곡면 커버리지
-        spacing_m = (params.surface_spacing_mm / 1000.0) if params.surface_spacing_mm \
-            else min(row_spacing_m, col_spacing_m)
-        positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = \
-            generate_surface_viewpoints(target_mesh, spacing_m)
-        camera_positions = positions + normals * wd_m
-        # 전역 zigzag 생략(cluster ordering이 담당). axis/row는 placeholder.
-        grid_row_index = row_index.copy()
-        cam_axis1, cam_axis2 = pca_axis1, pca_axis2
-    else:
-        # 4. grid viewpoints (PCA)
-        print(f"Generating grid viewpoints (PCA)...")
-        positions, normals, path_order, row_index, pca_center, pca_axis1, pca_axis2 = generate_grid_viewpoints(
-            target_mesh, row_spacing_m, col_spacing_m,
-        )
-        print(f"  Generated: {len(positions)} viewpoints")
+    # 표면 직접 균일 샘플링 (FPS) — 곡면 커버리지
+    spacing_m = (params.surface_spacing_mm / 1000.0) if params.surface_spacing_mm \
+        else min(row_spacing_m, col_spacing_m)
+    positions, normals = generate_surface_viewpoints(target_mesh, spacing_m)
+    camera_positions = positions + normals * wd_m
 
-        # Camera positions
-        camera_positions = positions + normals * wd_m
-
-        # 5. PCA 축 기준 지그재그 정렬
-        grid_row_index = row_index.copy()  # 그리드 생성 시 확정된 원본 행 인덱스 보존
-        _, cam_axis1, cam_axis2 = compute_pca_axes(camera_positions.astype(np.float64))
-        path_order, row_index, n_rows = reorder_zigzag(camera_positions, cam_axis1, cam_axis2, row_spacing_m)
-        print(f"  Ordered with PCA-axis on camera positions: {n_rows} rows")
-
-    # 7. Filter bottom-facing viewpoints
+    # Filter bottom-facing viewpoints
     if params.filter_bottom:
         R_obj = quaternion_to_rotation_matrix(config.TARGET_OBJECT["rotation"])
         world_normals = (R_obj @ normals.T).T
@@ -216,16 +198,12 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
             positions = positions[keep]
             normals = normals[keep]
             camera_positions = camera_positions[keep]
-            row_index = row_index[keep]
-            grid_row_index = grid_row_index[keep]
-            old_order = path_order[keep]
-            path_order = np.argsort(np.argsort(old_order)).astype(np.int32)
             print(f"  Filtered {n_removed} bottom-facing viewpoints (within {params.bottom_angle}° from down)")
             print(f"  Remaining: {len(positions)} viewpoints")
         else:
             print(f"  No bottom-facing viewpoints to filter")
 
-    # 7'. Filter inner-skin viewpoints → 바깥 껍데기만 (hollow parts: 안쪽 면 viewpoint 가 공동 안에 생김)
+    # Filter inner-skin viewpoints → 바깥 껍데기만 (hollow parts: 안쪽 면 viewpoint 가 공동 안에 생김)
     if params.filter_interior:
         keep = filter_interior_viewpoints(
             target_mesh, positions, normals,
@@ -234,39 +212,30 @@ def prepare_grid(target_mesh, params: ViewpointGenParams):
             positions = positions[keep]
             normals = normals[keep]
             camera_positions = camera_positions[keep]
-            row_index = row_index[keep]
-            grid_row_index = grid_row_index[keep]
-            path_order = np.argsort(np.argsort(path_order[keep])).astype(np.int32)
 
-    # Path length (before clustering) — surface는 PCA 무관 NN baseline
-    if params.sampling_mode == 'surface':
-        original_path_length_mm = _nn_path_length(camera_positions) * 1000.0
-    else:
-        original_path_length_mm = compute_path_length(camera_positions, path_order) * 1000.0
+    # Path length (before clustering) — PCA 무관 NN baseline
+    original_path_length_mm = _nn_path_length(camera_positions) * 1000.0
     print(f"  Total path length: {original_path_length_mm:.1f} mm")
     print()
 
     return {
         'positions': positions, 'normals': normals, 'camera_positions': camera_positions,
-        'path_order': path_order, 'row_index': row_index, 'grid_row_index': grid_row_index,
-        'cam_axis1': cam_axis1, 'cam_axis2': cam_axis2,
         'row_spacing_m': row_spacing_m, 'col_spacing_m': col_spacing_m,
         'original_path_length_mm': original_path_length_mm,
-        'pca_center': pca_center, 'pca_axis1': pca_axis1, 'pca_axis2': pca_axis2,
     }
 
 
 def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> ViewpointResult:
-    """그리드 생성 → 클러스터링 → 경로 순서 최적화 (단일 method). 파일 IO 없음.
+    """표면 샘플링 → 클러스터링 → 경로 순서 최적화 (단일 method). 파일 IO 없음.
 
     Phase B(viser 실시간 재생성)가 호출할 import 시임.
     """
-    grid = prepare_grid(target_mesh, params)
+    surface = prepare_viewpoints(target_mesh, params)
     adjacency = None
     if params.build_delaunay:
         print("Building local tangent Delaunay adjacency...")
         adjacency = build_local_delaunay_adjacency(
-            grid['camera_positions'], grid['normals'],
+            surface['camera_positions'], surface['normals'],
             k_neighbors=params.delaunay_neighbors,
             distance_factor=params.delaunay_distance_factor,
             max_normal_angle_deg=params.delaunay_max_normal_angle_deg,
@@ -284,12 +253,10 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
                   "routing will require parameter adjustment or explicit bridge edges.")
 
     common = dict(
-        positions=grid['positions'], normals=grid['normals'],
-        camera_positions=grid['camera_positions'], target_mesh=target_mesh,
-        row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
-        grid_row_index=grid['grid_row_index'],
-        cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
-        original_path_length_mm=grid['original_path_length_mm'],
+        positions=surface['positions'], normals=surface['normals'],
+        camera_positions=surface['camera_positions'], target_mesh=target_mesh,
+        row_spacing_m=surface['row_spacing_m'], col_spacing_m=surface['col_spacing_m'],
+        original_path_length_mm=surface['original_path_length_mm'],
         ordering_mode=params.ordering_mode,
         adjacency_edges=adjacency['edges'] if adjacency is not None else None,
     )
@@ -375,7 +342,7 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
         'clustering_method': method,
         'num_clusters': result['num_clusters'],
         'clustered_path_length_mm': result['path_length_mm'],
-        'original_path_length_mm': grid['original_path_length_mm'],
+        'original_path_length_mm': surface['original_path_length_mm'],
         'clustering_timestamp': datetime.now().isoformat(),
     }
     if method == 'dbscan':
@@ -414,13 +381,13 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams) -> Viewpoi
             cluster_meta['target_size'] = params.target_size
 
     return ViewpointResult(
-        positions=grid['positions'], normals=grid['normals'],
-        camera_positions=grid['camera_positions'],
+        positions=surface['positions'], normals=surface['normals'],
+        camera_positions=surface['camera_positions'],
         path_order=result['path_order'],
         cluster_id=result['cluster_ids'], cluster_order=result['cluster_order'],
         coacd_parts=result.get('coacd_parts'), coacd_ids=result.get('coacd_ids'),
-        row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
-        original_path_length_mm=grid['original_path_length_mm'],
+        row_spacing_m=surface['row_spacing_m'], col_spacing_m=surface['col_spacing_m'],
+        original_path_length_mm=surface['original_path_length_mm'],
         clustered_path_length_mm=result['path_length_mm'],
         num_clusters=result['num_clusters'],
         cluster_meta=cluster_meta, adjacency=adjacency, method=method, label=label,

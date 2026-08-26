@@ -27,7 +27,7 @@ from core.viewpoint import (  # noqa: E402
     compute_path_length,
     generate_viewpoints_core,
     load_meshes,
-    prepare_grid,
+    prepare_viewpoints,
     save_viewpoints_hdf5,
 )
 from core.viewpoint.visualization import visualize_clusters_html  # noqa: E402
@@ -103,15 +103,13 @@ Examples:
                         help='[coacd] concavity threshold (낮을수록 더 많은 파트, 기본: 0.05)')
 
     # --- Sampling / Ordering ---
-    parser.add_argument('--sampling-mode', type=str, default='grid',
-                        choices=['grid', 'surface'],
-                        help='뷰포인트 배치: grid(PCA 평면 투영) | surface(표면 FPS, 곡면 커버리지). 기본: grid')
+    # 샘플링은 표면 FPS 하나뿐이다 — grid(PCA 평면 투영) 모드는 제거했다.
     parser.add_argument('--surface-spacing', type=float, default=None,
-                        help='[surface] FPS 목표 표면 간격 mm (기본: FOV 작은 축)')
-    parser.add_argument('--ordering-mode', type=str, default='zigzag',
-                        choices=['zigzag', 'graph', 'lawnmower'],
-                        help='클러스터 내부 순서: zigzag(전역 PCA) | graph(NN+2opt) | '
-                             'lawnmower(탄젠트 row sweep). 기본: zigzag')
+                        help='FPS 목표 표면 간격 mm (기본: FOV 작은 축)')
+    parser.add_argument('--ordering-mode', type=str, default='lawnmower',
+                        choices=['lawnmower', 'graph'],
+                        help='클러스터 내부 순서: lawnmower(탄젠트 row sweep) | graph(NN+2opt). '
+                             '기본: lawnmower')
 
     # --- Viewpoint adjacency (future GLNS constraint graph) ---
     parser.add_argument('--no-delaunay', action='store_true',
@@ -234,7 +232,6 @@ def main():
         coacd_threshold=args.coacd_threshold,
         target_size=args.target_size,
         max_span_mm=args.max_span,
-        sampling_mode=args.sampling_mode,
         surface_spacing_mm=args.surface_spacing,
         ordering_mode=args.ordering_mode,
         build_delaunay=not args.no_delaunay,
@@ -250,22 +247,20 @@ def main():
     # Compare mode: 파라미터 스윕 → 드롭다운 HTML
     # ------------------------------------------------------------------
     if args.compare:
-        grid = prepare_grid(target_mesh, params)
+        surface = prepare_viewpoints(target_mesh, params)
         adjacency = None
         if params.build_delaunay:
             adjacency = build_local_delaunay_adjacency(
-                grid['camera_positions'], grid['normals'],
+                surface['camera_positions'], surface['normals'],
                 k_neighbors=params.delaunay_neighbors,
                 distance_factor=params.delaunay_distance_factor,
                 max_normal_angle_deg=params.delaunay_max_normal_angle_deg,
             )
         common = dict(
-            positions=grid['positions'], normals=grid['normals'],
-            camera_positions=grid['camera_positions'], target_mesh=target_mesh,
-            row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
-            grid_row_index=grid['grid_row_index'],
-            cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
-            original_path_length_mm=grid['original_path_length_mm'],
+            positions=surface['positions'], normals=surface['normals'],
+            camera_positions=surface['camera_positions'], target_mesh=target_mesh,
+            row_spacing_m=surface['row_spacing_m'], col_spacing_m=surface['col_spacing_m'],
+            original_path_length_mm=surface['original_path_length_mm'],
             ordering_mode=params.ordering_mode,
             adjacency_edges=adjacency['edges'] if adjacency is not None else None,
         )
@@ -294,7 +289,7 @@ def main():
             print(f"Comparing CoACD+DBSCAN (coacd_threshold={t} fixed, eps variations)...")
             # CoACD 1회 실행 후 캐싱
             t0 = time.perf_counter()
-            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
+            cached_coacd = cluster_coacd(target_mesh, surface['positions'], t)
             t_coacd = time.perf_counter() - t0
             print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
             for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
@@ -326,7 +321,7 @@ def main():
         elif method == 'coacd+agglomerative':
             t = args.coacd_threshold
             t0 = time.perf_counter()
-            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
+            cached_coacd = cluster_coacd(target_mesh, surface['positions'], t)
             t_coacd = time.perf_counter() - t0
             print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
             if args.max_span:
@@ -380,12 +375,12 @@ def main():
         # 비교 HTML 저장
         if not args.dry_run:
             html_path = str(config.get_viewpoint_path(
-                args.object, len(grid['positions']), filename=f"compare_{method}.html",
+                args.object, len(surface['positions']), filename=f"compare_{method}.html",
             ))
             os.makedirs(os.path.dirname(html_path), exist_ok=True)
             visualize_clusters_html(
-                mesh, grid['positions'], grid['camera_positions'],
-                compare_results, grid['original_path_length_mm'],
+                mesh, surface['positions'], surface['camera_positions'],
+                compare_results, surface['original_path_length_mm'],
                 html_path,
                 adjacency_edges=adjacency['edges'] if adjacency is not None else None,
             )
@@ -417,8 +412,8 @@ def main():
         metadata = {
             'timestamp': datetime.now().isoformat(),
             'input_mesh': str(input_path),
-            'method': f"{params.sampling_mode}+{params.ordering_mode}",
-            'sampling_mode': params.sampling_mode,
+            'method': f"surface+{params.ordering_mode}",
+            'sampling_mode': 'surface',
             'ordering_mode': params.ordering_mode,
             'surface_spacing_mm': params.surface_spacing_mm if params.surface_spacing_mm
                 else min(res.row_spacing_m, res.col_spacing_m) * 1000.0,
