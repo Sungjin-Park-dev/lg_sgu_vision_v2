@@ -93,10 +93,27 @@ def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg
 def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
                                    num_seeds, batch_size, wrist3_fixed,
                                    lock_nominal_wrist3, joint_periods=None,
-                                   ik_seed=PT.IK_RANDOM_SEED, dedup_rad=None):
+                                   ik_seed=PT.IK_RANDOM_SEED, dedup_rad=None,
+                                   reference_joints=None,
+                                   joint_lower=None, joint_upper=None):
+    """IK 후보를 푼다.
+
+    reference_joints 를 주면 각 해를 **그 자세에 가장 가까운 2π 등가로 옮긴다**
+    (`PT.align_to_reference`). 같은 자세를 가리키는 값이 여러 개일 때 덜 움직이는 표현을
+    고르는 것이라 자세·도달성·충돌 결과는 그대로고, 그 viewpoint 로 갈 때의 회전량만 준다
+    (예: 현재 -140°, 해 210° → -150°. 350° 회전이 10° 가 된다).
+
+    cuRobo 쪽에는 이 기능이 없다 — seed 는 어느 팔 분기로 수렴할지를 편향시킬 뿐,
+    같은 분기 안의 2π 표현 선택은 하지 않는다. 게다가 solve_ik_multi_seed 가 해를
+    [-π, π] 로 접어 내보내므로 여기서 되돌려야 한다.
+
+    한계 밖으로 나가는 등가는 고르지 않는다(align_to_reference 가 보장). UR20 은 6축 중
+    5축이 ±360° 라 등가가 실재하고, elbow(±180°)만 선택지가 없어 그대로 남는다.
+    """
     # dedup_rad: L∞ 관절 임계값(rad). None 이면 기본 CANDIDATE_DEDUP_RAD, 음수면 dedup 끔
     # (어떤 후보도 서로 임계 이내로 판정되지 않아 전부 남는다).
     thr = PT.CANDIDATE_DEDUP_RAD if dedup_rad is None else float(dedup_rad)
+    ref = None if reference_joints is None else np.asarray(reference_joints, dtype=np.float64)
     sols, success = PT.solve_ik_multi_seed(
         robot_cfg, world, targets["position"], targets["quaternion"],
         num_seeds=num_seeds, batch_size=batch_size, random_seed=ik_seed,
@@ -110,6 +127,11 @@ def _solve_pose_variant_candidates(targets, n_viewpoints, world, robot_cfg,
         for pose_idx in np.flatnonzero(targets["viewpoint"] == vp):
             for q in sols[pose_idx][success[pose_idx]]:
                 q = np.asarray(q, dtype=np.float64).copy()
+                if ref is not None and joint_periods is not None:
+                    # wrist3 lock 보다 **먼저** 정렬한다 — lock 은 고정값 대입이라
+                    # 뒤에 정렬하면 그 값이 2π 밀려 lock 의 의미가 깨진다.
+                    q = PT.align_to_reference(q, ref, joint_periods,
+                                              joint_lower, joint_upper)
                 if lock_nominal_wrist3:
                     q[-1] = wrist3_fixed
                 if any(np.max(np.abs(periodic_joint_delta(q - prior, joint_periods)))

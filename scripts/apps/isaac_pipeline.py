@@ -2515,6 +2515,16 @@ class PipelineWindow:
         cmd += ["--scene", self._scene]
         cmd += ["--object-position", *(f"{v:.6f}" for v in pos_robot)]
         cmd += ["--object-quat", *(f"{v:.6f}" for v in quat_wxyz)]
+        # IK 해를 **지금 로봇 자세에 가장 가까운 2π 등가**로 정렬한다. 자세·도달성·충돌은
+        # 그대로고 그 viewpoint 까지의 회전량만 줄어든다(예: 현재 -140°, 해 210° → -150°).
+        # 항상 켠다 — 덜 도는 표현이 손해인 경우가 없어서 고를 이유가 없다.
+        # NB: --reference-joints=<v> (등호). 첫 값이 음수면 argparse 가 옵션으로 오인한다.
+        try:
+            current_q = self._sim_executor.current_joints()
+            cmd += [f"--reference-joints={','.join(f'{v:.6f}' for v in current_q)}"]
+        except Exception as exc:  # noqa: BLE001 — 로봇/스테이지 미준비면 정렬 없이 진행
+            self._append_log(
+                f"[ik] no current joint state, solving without alignment: {exc}")
 
         self._set_busy(self._btn_cancel_ik)
         self._append_log("[ik] $ " + " ".join(cmd))
