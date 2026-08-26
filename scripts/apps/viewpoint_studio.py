@@ -637,15 +637,18 @@ class Studio:
                 surface["positions"], surface["normals"], out, metadata, camera_spec,
                 adjacency=L["adjacency"],
             )
-            self.gen_status.content = f"**Saved** → `{out}`"
-            self._refresh_existing_options(
-                select=f"{out_path.parent.name}/{out_path.name}")
+            # 패널에는 짧은 이름만 — 절대경로를 코드 스팬으로 찍으면 마크다운이 '/' 에서
+            # 줄바꿈을 못 해 패널이 가로로 넘친다(24em). 전체 경로는 콘솔에 남고, 어느
+            # 파일인지는 바로 위 Saved viewpoints 드롭다운이 같은 라벨로 가리킨다.
+            label = f"{out_path.parent.name}/{out_path.name}"
+            self.gen_status.content = f"**Saved** → `{label}`"
+            self._refresh_existing_options(select=label)
             print(f"[save] wrote {out}")
         except OSError as exc:
             self.gen_status.content = (
-                f"**Save failed** ({exc.__class__.__name__}) → `{out}`\n\n"
-                f"디렉토리 권한 확인 (root 소유일 수 있음).")
-            print(f"[save] {exc}")
+                f"**Save failed** ({exc.__class__.__name__})\n\n"
+                f"디렉토리 권한 확인 (root 소유일 수 있음). 경로는 콘솔 로그에.")
+            print(f"[save] {out}: {exc}")
 
     def _on_hops_change(self) -> None:
         """hop 확장은 재생성 없이 색과 진단만 바꾼다(GLNS 가 볼 그래프로 관점 전환)."""
