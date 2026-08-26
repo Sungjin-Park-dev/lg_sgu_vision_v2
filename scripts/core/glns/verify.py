@@ -71,17 +71,6 @@ def _decode(value):
     return value
 
 
-def _parse_joints(text):
-    """"q0,...,q5" → (6,) ndarray. None/빈 문자열이면 None."""
-    if not text:
-        return None
-    values = [v for v in str(text).replace(",", " ").split() if v]
-    q = np.asarray([float(v) for v in values], dtype=np.float64)
-    if q.shape != (6,):
-        raise SystemExit(f"--start-joints needs 6 values, got {len(values)}")
-    return q
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Feed a GLNS-selected path through plan_trajectory's "
@@ -94,11 +83,6 @@ def _parse_args() -> argparse.Namespace:
     # 기본값은 h5 에 박제된 씬 스냅샷이다(재현). 이 플래그는 "다른 셀이면 어떻게 되나"를
     # 물어보는 실험용 override 라, 쓰면 경고를 찍는다.
     scene_config.add_cli_argument(parser)
-    # 첫 값이 음수면 argparse 가 옵션으로 오인한다 — 호출자는 --start-joints=<v> 형태로.
-    parser.add_argument("--start-joints", type=str, default=None,
-                        help='스캔 시작을 이 자세에 가까운 끝점으로 고정한다 "q0,...,q5" [rad]. '
-                             '보통 로봇의 현재 관절값. 성분 순서와 방향 선택에만 쓰이고 '
-                             'GTSP 해 자체는 바꾸지 않는다')
     parser.add_argument("--spacing", type=float, default=PT.DEFAULT_SPACING_M,
                         help=f"Scan resample spacing in meters (default: {PT.DEFAULT_SPACING_M})")
     parser.add_argument("--output-dir", type=Path, default=None,
@@ -532,7 +516,7 @@ def main() -> int:
                     reconfig_rad=reconfig_rad, enable_via_ladder=not args.no_via,
                     home_bracket=args.home_bracket, order_strategy=args.order,
                     out_csv=joined_csv, motion_planner=motion_planner,
-                    meta=joined_meta, start_q=_parse_joints(args.start_joints),
+                    meta=joined_meta,
                 )
             except SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} - cannot bridge (via-home included). joined not written.")
