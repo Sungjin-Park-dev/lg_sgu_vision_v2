@@ -313,27 +313,40 @@ class Studio:
                     "Working distance (mm)", initial_value=float(config.CAMERA_WORKING_DISTANCE_MM),
                     min=WD_MIN_MM, max=WD_MAX_MM, step=1.0)
 
-            self.generate_folder = g.add_folder("Generate (surface FPS + Delaunay graph)")
+            self.generate_folder = g.add_folder("Generate viewpoints")
             with self.generate_folder:
-                # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**다 — FOV×(1-overlap) 로
-                # 표면 간격을 정할 뿐이라 h5 camera_spec 에 들어가지 않는다. 그래서 스펙칸이
-                # 아니라 여기 있다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
-                # 슬라이더가 아니라 number 로 — 끌어도 Generate 전까지 화면이 바뀌지 않아
-                # 드래그 어포던스가 지키지 못할 약속을 한다. 나머지 입력과 방식도 통일된다.
+                # 노브 이름은 알고리즘이 아니라 **무엇의 상한인지**를 말하게 한다.
+                # 'delaunay' 접두사는 붙이지 않는다 — 그건 폴더/hint 가 이미 말한다.
+                # 넷 다 슬라이더가 아니라 number 다: 끌어도 Generate 전까지 화면이
+                # 바뀌지 않아, 드래그 어포던스가 지키지 못할 약속을 하기 때문이다.
+                #
+                # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**라 h5 camera_spec 이
+                # 아니라 여기 산다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
                 self.nb_overlap = g.add_number(
                     "FOV overlap (%)", initial_value=initial_overlap,
-                    min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1)
-                # 아래 셋이 GLNS 의 순서 제약 그래프를 만든다 — 이 앱에서 다음 단계를
-                # 실제로 바꾸는 노브는 overlap 과 이 셋뿐이다.
-                self.sl_knn = g.add_slider(
-                    "delaunay k_neighbors", min=3, max=30, step=1,
-                    initial_value=DEFAULT_DELAUNAY_NEIGHBORS)
-                self.sl_distfactor = g.add_slider(
-                    "delaunay distance factor", min=1.0, max=5.0, step=0.1,
-                    initial_value=DEFAULT_DELAUNAY_DISTANCE_FACTOR)
-                self.sl_maxangle = g.add_slider(
-                    "delaunay max normal angle (deg)", min=15, max=180, step=5,
-                    initial_value=DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG)
+                    min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1,
+                    hint="이웃 촬영 영역이 겹치는 비율 — 표면 점 간격 = min(FOV) × (1-overlap)")
+                # 아래 셋이 GLNS 의 순서 제약 그래프를 만든다. 앞의 둘이 그래프 '모양' 을
+                # 정하고, k 는 '탐색 폭' 이라 성격이 달라 맨 아래에 둔다.
+                #
+                # 간선 길이 상한을 mm 로 미리 보여주고 싶어지는데, 하지 않는다: factor 는
+                # 표면 간격이 아니라 **카메라 위치** 간격에 곱해지고, 카메라는 WD 만큼
+                # 떨어져 곡면에서 부챗살처럼 벌어진다(cylinder_sample: 표면 9.5mm vs
+                # 카메라 31.1mm, 국소 최대 152mm). 생성 전에는 맞는 값을 낼 수 없다.
+                self.nb_distfactor = g.add_number(
+                    "Max edge length (×)",
+                    initial_value=DEFAULT_DELAUNAY_DISTANCE_FACTOR,
+                    min=1.0, max=5.0, step=0.1,
+                    hint="간선 길이 상한 — 주변 카메라 위치 간격의 배수")
+                self.nb_maxangle = g.add_number(
+                    "Max normal angle (°)",
+                    initial_value=DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
+                    min=15, max=180, step=5,
+                    hint="두 점의 법선이 이보다 벌어지면 잇지 않는다 (90° = 반대편 면 차단)")
+                self.nb_knn = g.add_number(
+                    "Neighbor search (k)", initial_value=DEFAULT_DELAUNAY_NEIGHBORS,
+                    min=3, max=30, step=1,
+                    hint="삼각분할 후보로 볼 이웃 수")
                 # 실행과 상태는 자기가 쓰는 노브 바로 아래에 둔다.
                 self.btn_generate = g.add_button("Generate")
                 self.btn_save = g.add_button("Save h5")
@@ -489,9 +502,9 @@ class Studio:
             "fov_width_mm": fov_w_mm,
             "fov_height_mm": fov_h_mm,
             "working_distance_mm": self._current_wd_mm(),
-            "k_neighbors": int(self.sl_knn.value),
-            "distance_factor": float(self.sl_distfactor.value),
-            "max_normal_angle_deg": float(self.sl_maxangle.value),
+            "k_neighbors": int(self.nb_knn.value),
+            "distance_factor": float(self.nb_distfactor.value),
+            "max_normal_angle_deg": float(self.nb_maxangle.value),
         }
         threading.Thread(target=self._generate_worker, args=(p,), daemon=True).start()
 
