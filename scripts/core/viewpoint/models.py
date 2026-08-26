@@ -123,16 +123,8 @@ class ViewpointGenParams:
     bottom_angle: float = 80.0
     filter_interior: bool = False
     interior_hull_align_min: float = 0.3
-    cluster_method: str = "dbscan"
-    eps_mm: Optional[float] = None
-    min_samples: int = 2
-    normal_weight: float = 0.0
-    coacd_threshold: float = 0.05
-    target_size: int = 12
-    max_span_mm: Optional[float] = None
-    sampling_mode: str = "grid"
+    # 샘플링은 메시 표면 직접 FPS 하나뿐이다(grid 모드는 2026-08-26 제거).
     surface_spacing_mm: Optional[float] = None
-    ordering_mode: str = "zigzag"
     build_delaunay: bool = True
     delaunay_neighbors: int = DEFAULT_DELAUNAY_NEIGHBORS
     delaunay_distance_factor: float = DEFAULT_DELAUNAY_DISTANCE_FACTOR
@@ -166,22 +158,17 @@ class ViewpointGenParams:
 
 @dataclass
 class ViewpointResult:
-    """In-memory generation result; persistence remains the caller's choice."""
+    """In-memory generation result; persistence remains the caller's choice.
+
+    방문 순서와 클러스터 라벨은 없다 — 순서는 GLNS 가 IK 자세와 함께 푼다.
+    ``nn_path_length_mm`` 은 greedy nearest-neighbor 베이스라인(보고용)일 뿐
+    실행 순서가 아니다.
+    """
 
     positions: np.ndarray
     normals: np.ndarray
     camera_positions: np.ndarray
-    path_order: np.ndarray
-    cluster_id: np.ndarray
-    cluster_order: np.ndarray
-    coacd_parts: Optional[list]
-    coacd_ids: Optional[np.ndarray]
     row_spacing_m: float
     col_spacing_m: float
-    original_path_length_mm: float
-    clustered_path_length_mm: float
-    num_clusters: int
-    cluster_meta: dict
+    nn_path_length_mm: float
     adjacency: Optional[dict]
-    method: str
-    label: str

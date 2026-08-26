@@ -7,7 +7,6 @@ from .adjacency import (
     cut_vertices,
     expand_edges_by_hops,
 )
-from .clustering import cluster_coacd, cluster_delaunay
 from .mesh import load_meshes
 from .models import (
     DEFAULT_DELAUNAY_DISTANCE_FACTOR,
@@ -18,8 +17,7 @@ from .models import (
     ViewpointGenParams,
     ViewpointResult,
 )
-from .pipeline import cluster_and_order, generate_viewpoints_core, prepare_grid
-from .sampling import compute_path_length
+from .pipeline import generate_viewpoints_core, prepare_viewpoints
 from .storage import (
     load_viewpoints_hdf5,
     save_viewpoints_hdf5,
@@ -35,18 +33,14 @@ __all__ = [
     "ViewpointGenParams",
     "ViewpointResult",
     "build_local_delaunay_adjacency",
-    "cluster_and_order",
-    "cluster_coacd",
-    "cluster_delaunay",
     "components_from_edges",
     "cut_vertices",
     "expand_edges_by_hops",
     "canonical_edge_set",
-    "compute_path_length",
     "generate_viewpoints_core",
     "load_meshes",
     "load_viewpoints_hdf5",
-    "prepare_grid",
+    "prepare_viewpoints",
     "save_viewpoints_hdf5",
     "write_adjacency_into_h5",
 ]

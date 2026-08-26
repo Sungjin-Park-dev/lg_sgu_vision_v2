@@ -92,9 +92,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reconfig-threshold-deg", type=float,
                         default=PT.RECONFIG_THRESHOLD_DEG,
                         help=f"L-inf reconfiguration threshold (default: {PT.RECONFIG_THRESHOLD_DEG})")
-    parser.add_argument("--delaunay-expand-hops", type=int, default=1,
+    # 기본 2 — 실사용 진입점(viewpoint_studio 미리보기 / trajectory_studio /
+    # isaac_pipeline)이 전부 2 를 넘긴다. 1 이 기본이면 CLI 를 맨몸으로 돌렸을 때만
+    # 아무도 안 쓰는 그래프로 풀리고, 스튜디오가 보여준 화면과도 어긋난다.
+    parser.add_argument("--delaunay-expand-hops", type=int, default=2,
                         help="그래프 완화: Delaunay 를 N-hop 까지 이웃으로 확장(1=순수 Delaunay, "
-                             "2=이웃의 이웃까지 허용 → GLNS 순서 자유도↑로 reconfig 회피 여지). default 1")
+                             "2=이웃의 이웃까지 허용 → GLNS 순서 자유도↑로 reconfig 회피 여지). default 2")
     parser.add_argument("--joint-weights", type=float, nargs=6, default=None,
                         metavar=("PAN", "LIFT", "ELBOW", "W1", "W2", "W3"),
                         help="per-joint L2 동점-깨기 가중치 "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for viewpoint generation and clustering."""
+"""CLI for surface viewpoint generation + Delaunay adjacency."""
 
 from __future__ import annotations
 
@@ -21,20 +21,14 @@ from core.viewpoint import (  # noqa: E402
     DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
     DEFAULT_DELAUNAY_NEIGHBORS,
     ViewpointGenParams,
-    build_local_delaunay_adjacency,
-    cluster_and_order,
-    cluster_coacd,
-    compute_path_length,
     generate_viewpoints_core,
     load_meshes,
-    prepare_grid,
     save_viewpoints_hdf5,
 )
-from core.viewpoint.visualization import visualize_clusters_html  # noqa: E402
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description='뷰포인트 생성 및 클러스터링 기반 경로 순서 최적화',
+        description='표면 뷰포인트 생성 + Delaunay 인접 그래프 (방문 순서는 GLNS 가 정한다)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -44,11 +38,8 @@ Examples:
   # 재질 필터
   uv run scripts/core/viewpoint/cli.py --object sample --material-rgb "0,255,0"
 
-  # DBSCAN 클러스터링
-  uv run scripts/core/viewpoint/cli.py --object sample --material-rgb "0,255,0" --cluster-method dbscan
-
-  # CoACD 클러스터링 (메시 convex decomposition)
-  uv run scripts/core/viewpoint/cli.py --object sample --cluster-method coacd --coacd-threshold 0.05
+  # Delaunay 그래프 노브
+  uv run scripts/core/viewpoint/cli.py --object sample --delaunay-max-normal-angle 90
         """,
     )
 
@@ -82,37 +73,10 @@ Examples:
                         help='Bottom filter angle in degrees (default: 80)')
 
     # --- Clustering ---
-    parser.add_argument('--cluster-method', type=str, default='dbscan',
-                        choices=['dbscan', 'coacd', 'coacd+dbscan',
-                                 'agglomerative', 'coacd+agglomerative',
-                                 'delaunay+dbscan', 'delaunay+agglomerative'],
-                        help='클러스터링 방법 (기본: dbscan). agglomerative=Ward 공간분할(균등·싱글톤 없음). '
-                             'delaunay+*=Delaunay 표면 연결성분을 1단계로 사용(볼록분해 없음, 결정적)')
-    parser.add_argument('--eps', type=float, default=None,
-                        help=f'[dbscan] 이웃 반경 mm (기본: {config.CAMERA_FOV_WIDTH_MM:.0f}mm)')
-    parser.add_argument('--min-samples', type=int, default=2,
-                        help='[dbscan] 코어 포인트 최소 이웃 수 (기본: 2)')
-    parser.add_argument('--target-size', type=int, default=12,
-                        help='[agglomerative ward] 클러스터당 목표 점 개수 (기본: 12)')
-    parser.add_argument('--max-span', type=float, default=None,
-                        help='[agglomerative] 클러스터 최대 지름 mm. 지정 시 complete-linkage로 '
-                             '지름 ≤ 값 보장(멀리 떨어진 점 묶임 방지)')
-    parser.add_argument('--normal-weight', type=float, default=0.0,
-                        help='[dbscan/agglomerative] 법선 가중치 (미터 단위, 0이면 위치만 사용, 기본: 0.0)')
-    parser.add_argument('--coacd-threshold', type=float, default=0.05,
-                        help='[coacd] concavity threshold (낮을수록 더 많은 파트, 기본: 0.05)')
-
     # --- Sampling / Ordering ---
-    parser.add_argument('--sampling-mode', type=str, default='grid',
-                        choices=['grid', 'surface'],
-                        help='뷰포인트 배치: grid(PCA 평면 투영) | surface(표면 FPS, 곡면 커버리지). 기본: grid')
+    # 샘플링은 표면 FPS 하나뿐이다 — grid(PCA 평면 투영) 모드는 제거했다.
     parser.add_argument('--surface-spacing', type=float, default=None,
-                        help='[surface] FPS 목표 표면 간격 mm (기본: FOV 작은 축)')
-    parser.add_argument('--ordering-mode', type=str, default='zigzag',
-                        choices=['zigzag', 'graph', 'lawnmower'],
-                        help='클러스터 내부 순서: zigzag(전역 PCA) | graph(NN+2opt) | '
-                             'lawnmower(탄젠트 row sweep). 기본: zigzag')
-
+                        help='FPS 목표 표면 간격 mm (기본: FOV 작은 축)')
     # --- Viewpoint adjacency (future GLNS constraint graph) ---
     parser.add_argument('--no-delaunay', action='store_true',
                         help='로컬 표면 Delaunay 인접 그래프 생성/저장을 비활성화')
@@ -126,10 +90,6 @@ Examples:
                         default=DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
                         help='인접 edge의 최대 법선 차이 deg '
                              f'(기본: {DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG:.0f})')
-
-    # --- Comparison ---
-    parser.add_argument('--compare', action='store_true',
-                        help='선택된 방법의 파라미터 변형 비교 HTML 생성')
 
     # --- Output ---
     # solve.py --output / verify.py --output-dir 와 짝을 맞춘다. 이게 없으면 세 단계 중
@@ -201,7 +161,6 @@ def main():
         print(f"Target RGB: {args.material_rgb}  ({rgb_source})")
     else:
         print(f"Target: entire mesh (no material filter)")
-    print(f"Clustering: {args.cluster_method}")
     print()
 
     # 1-2. Load mesh + extract target mesh (material filter)
@@ -227,175 +186,15 @@ def main():
         bottom_angle=args.bottom_angle,
         filter_interior=_fi is not None,
         interior_hull_align_min=(_fi or {}).get("hull_align_min", 0.3),
-        cluster_method=args.cluster_method,
-        eps_mm=args.eps,
-        min_samples=args.min_samples,
-        normal_weight=args.normal_weight,
-        coacd_threshold=args.coacd_threshold,
-        target_size=args.target_size,
-        max_span_mm=args.max_span,
-        sampling_mode=args.sampling_mode,
         surface_spacing_mm=args.surface_spacing,
-        ordering_mode=args.ordering_mode,
         build_delaunay=not args.no_delaunay,
         delaunay_neighbors=args.delaunay_neighbors,
         delaunay_distance_factor=args.delaunay_distance_factor,
         delaunay_max_normal_angle_deg=args.delaunay_max_normal_angle,
     )
 
-    method = args.cluster_method
-    eps_mm = args.eps if args.eps else params.fov_width_mm
-
     # ------------------------------------------------------------------
-    # Compare mode: 파라미터 스윕 → 드롭다운 HTML
-    # ------------------------------------------------------------------
-    if args.compare:
-        grid = prepare_grid(target_mesh, params)
-        adjacency = None
-        if params.build_delaunay:
-            adjacency = build_local_delaunay_adjacency(
-                grid['camera_positions'], grid['normals'],
-                k_neighbors=params.delaunay_neighbors,
-                distance_factor=params.delaunay_distance_factor,
-                max_normal_angle_deg=params.delaunay_max_normal_angle_deg,
-            )
-        common = dict(
-            positions=grid['positions'], normals=grid['normals'],
-            camera_positions=grid['camera_positions'], target_mesh=target_mesh,
-            row_spacing_m=grid['row_spacing_m'], col_spacing_m=grid['col_spacing_m'],
-            grid_row_index=grid['grid_row_index'],
-            cam_axis1=grid['cam_axis1'], cam_axis2=grid['cam_axis2'],
-            original_path_length_mm=grid['original_path_length_mm'],
-            ordering_mode=params.ordering_mode,
-            adjacency_edges=adjacency['edges'] if adjacency is not None else None,
-        )
-        fov_w = params.fov_width_mm
-        compare_results = {}
-
-        if method == 'dbscan':
-            print("Comparing DBSCAN (eps variations)...")
-            for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
-                e_mm = fov_w * factor
-                label = f"dbscan eps={e_mm:.0f}mm"
-                compare_results[label] = cluster_and_order(
-                    label, 'dbscan', **common, eps_m=e_mm / 1000.0,
-                    min_samples=args.min_samples, normal_weight=args.normal_weight,
-                )
-        elif method == 'coacd':
-            print("Comparing CoACD (threshold variations)...")
-            for t in [0.1, 0.2, 0.25, 0.3]:
-                label = f"coacd t={t}"
-                compare_results[label] = cluster_and_order(
-                    label, 'coacd', **common, threshold=t,
-                    normal_weight=args.normal_weight,
-                )
-        elif method == 'coacd+dbscan':
-            t = args.coacd_threshold
-            print(f"Comparing CoACD+DBSCAN (coacd_threshold={t} fixed, eps variations)...")
-            # CoACD 1회 실행 후 캐싱
-            t0 = time.perf_counter()
-            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
-            t_coacd = time.perf_counter() - t0
-            print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
-            for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
-                e_mm = fov_w * factor
-                label = f"coacd+dbscan t={t} eps={e_mm:.0f}mm"
-                compare_results[label] = cluster_and_order(
-                    label, 'coacd+dbscan', **common, threshold=t,
-                    eps_m=e_mm / 1000.0, min_samples=args.min_samples,
-                    normal_weight=args.normal_weight,
-                    precomputed_coacd=cached_coacd,
-                )
-        elif method == 'agglomerative':
-            if args.max_span:
-                print("Comparing Agglomerative (max_span variations)...")
-                for ms in [40, 60, 80, 120]:
-                    label = f"agglomerative span={ms}mm"
-                    compare_results[label] = cluster_and_order(
-                        label, 'agglomerative', **common,
-                        max_span_mm=ms, normal_weight=args.normal_weight,
-                    )
-            else:
-                print("Comparing Agglomerative (target_size variations)...")
-                for ts in [8, 12, 16, 24]:
-                    label = f"agglomerative ts={ts}"
-                    compare_results[label] = cluster_and_order(
-                        label, 'agglomerative', **common,
-                        target_size=ts, normal_weight=args.normal_weight,
-                    )
-        elif method == 'coacd+agglomerative':
-            t = args.coacd_threshold
-            t0 = time.perf_counter()
-            cached_coacd = cluster_coacd(target_mesh, grid['positions'], t)
-            t_coacd = time.perf_counter() - t0
-            print(f"  CoACD precomputed: {len(np.unique(cached_coacd[0]))} parts ({t_coacd:.3f}s)")
-            if args.max_span:
-                print(f"Comparing CoACD+Agglomerative (coacd_threshold={t} fixed, max_span variations)...")
-                for ms in [40, 60, 80, 120]:
-                    label = f"coacd+agglomerative t={t} span={ms}mm"
-                    compare_results[label] = cluster_and_order(
-                        label, 'coacd+agglomerative', **common, threshold=t,
-                        max_span_mm=ms, normal_weight=args.normal_weight,
-                        precomputed_coacd=cached_coacd,
-                    )
-            else:
-                print(f"Comparing CoACD+Agglomerative (coacd_threshold={t} fixed, target_size variations)...")
-                for ts in [8, 12, 16, 24]:
-                    label = f"coacd+agglomerative t={t} ts={ts}"
-                    compare_results[label] = cluster_and_order(
-                        label, 'coacd+agglomerative', **common, threshold=t,
-                        target_size=ts, normal_weight=args.normal_weight,
-                        precomputed_coacd=cached_coacd,
-                    )
-        elif method == 'delaunay+dbscan':
-            print("Comparing Delaunay+DBSCAN (eps variations)...")
-            for factor in [0.5, 0.75, 1.0, 1.5, 2.0]:
-                e_mm = fov_w * factor
-                label = f"delaunay+dbscan eps={e_mm:.0f}mm"
-                compare_results[label] = cluster_and_order(
-                    label, 'delaunay+dbscan', **common,
-                    eps_m=e_mm / 1000.0, min_samples=args.min_samples,
-                    normal_weight=args.normal_weight,
-                )
-        elif method == 'delaunay+agglomerative':
-            if args.max_span:
-                print("Comparing Delaunay+Agglomerative (max_span variations)...")
-                for ms in [40, 60, 80, 120]:
-                    label = f"delaunay+agglomerative span={ms}mm"
-                    compare_results[label] = cluster_and_order(
-                        label, 'delaunay+agglomerative', **common,
-                        max_span_mm=ms, normal_weight=args.normal_weight,
-                    )
-            else:
-                print("Comparing Delaunay+Agglomerative (target_size variations)...")
-                for ts in [8, 12, 16, 24]:
-                    label = f"delaunay+agglomerative ts={ts}"
-                    compare_results[label] = cluster_and_order(
-                        label, 'delaunay+agglomerative', **common,
-                        target_size=ts, normal_weight=args.normal_weight,
-                    )
-
-        print()
-
-        # 비교 HTML 저장
-        if not args.dry_run:
-            html_path = str(config.get_viewpoint_path(
-                args.object, len(grid['positions']), filename=f"compare_{method}.html",
-            ))
-            os.makedirs(os.path.dirname(html_path), exist_ok=True)
-            visualize_clusters_html(
-                mesh, grid['positions'], grid['camera_positions'],
-                compare_results, grid['original_path_length_mm'],
-                html_path,
-                adjacency_edges=adjacency['edges'] if adjacency is not None else None,
-            )
-
-        print("Compare complete!")
-        print("=" * 60)
-        return 0
-
-    # ------------------------------------------------------------------
-    # Single mode: 생성 코어 호출 → 저장 → 시각화
+    # 생성 코어 호출 → 저장
     # ------------------------------------------------------------------
     res = generate_viewpoints_core(target_mesh, params)
 
@@ -404,8 +203,10 @@ def main():
         print()
         print("[DRY RUN] HDF5 not modified.")
     else:
+        # 정규 이름으로 쓴다 — resolve_viewpoint_path 가 가장 먼저 찾는 이름이라
+        # 같은 폴더에 후보가 여럿일 때의 mtime 자동선택 함정이 생기지 않는다.
         output_path = str(args.output) if args.output else str(config.get_viewpoint_path(
-            args.object, len(res.positions), filename=f"viewpoints_{method}.h5",
+            args.object, len(res.positions), filename="viewpoints.h5",
         ))
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         print(f"Output: {output_path}")
@@ -417,9 +218,8 @@ def main():
         metadata = {
             'timestamp': datetime.now().isoformat(),
             'input_mesh': str(input_path),
-            'method': f"{params.sampling_mode}+{params.ordering_mode}",
-            'sampling_mode': params.sampling_mode,
-            'ordering_mode': params.ordering_mode,
+            'method': 'surface',
+            'sampling_mode': 'surface',
             'surface_spacing_mm': params.surface_spacing_mm if params.surface_spacing_mm
                 else min(res.row_spacing_m, res.col_spacing_m) * 1000.0,
             'row_spacing_mm': res.row_spacing_m * 1000.0,
@@ -427,14 +227,12 @@ def main():
             # overlap 은 카메라 스펙이 아니라 샘플링 파라미터라 camera_spec 이 아닌 여기 —
             # viewpoint_studio 의 저장 경로와 같은 키/단위(0~1)를 쓴다.
             'overlap_ratio': params.overlap_ratio,
-            'total_path_length_mm': compute_path_length(res.camera_positions, res.path_order) * 1000.0,
+            # 방문 순서가 없으므로 '경로 길이' 도 없다. greedy NN 베이스라인만 남긴다 —
+            # 실행 순서가 아니라 밀도 감각을 주는 수치다.
+            'nn_path_length_mm': res.nn_path_length_mm,
         }
         save_viewpoints_hdf5(
             res.positions, res.normals, output_path, metadata, camera_spec,
-            res.path_order,
-            cluster_id=res.cluster_id,
-            cluster_order=res.cluster_order,
-            cluster_metadata=res.cluster_meta,
             adjacency=res.adjacency,
         )
         print()
@@ -442,8 +240,7 @@ def main():
     print("Complete!")
     print("=" * 60)
 
-    # 시각화는 viewpoint_studio(viser)가 h5 를 직접 읽어 담당한다. 생성 시 HTML 은
-    # 만들지 않는다 — 파라미터 스윕 비교가 필요하면 --compare 를 쓴다.
+    # 시각화는 viewpoint_studio(viser)가 h5 를 직접 읽어 담당한다.
 
     return 0
 

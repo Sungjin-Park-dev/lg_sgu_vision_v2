@@ -408,6 +408,9 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
     canonical = directory / "viewpoints.h5"
     if canonical.exists():
         return canonical
+    # 아래는 옛 파일(viewpoints_{clustering_method}.h5)을 위한 폴백이다. 지금 생성기는
+    # 항상 정규 이름으로 쓰므로 후보가 하나뿐이고, mtime 이 다음 단계 입력을 정하는
+    # 일은 생기지 않는다.
     candidates = sorted(directory.glob("viewpoints*.h5"))
     if not candidates:
         raise FileNotFoundError(
@@ -415,8 +418,8 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
             f"generate them first (scripts/core/viewpoint/cli.py --object {object_name})."
         )
     chosen = max(candidates, key=lambda p: p.stat().st_mtime)
-    # 후보가 여럿이면 mtime 이 정한다 — 조용히 고르면 어느 클러스터링으로 계획했는지
-    # 모르는 채 진행하게 되므로 반드시 찍는다(같은 폴더에 coacd/delaunay 가 공존한다).
+    # 옛 파일이 여럿 남아 있으면 mtime 이 정한다 — 조용히 고르면 어느 파일로 계획했는지
+    # 모르는 채 진행하게 되므로 반드시 찍는다.
     if len(candidates) > 1:
         others = ", ".join(p.name for p in candidates if p != chosen)
         print(f"  viewpoints: {chosen.name} (newest) - other candidates in the same "
