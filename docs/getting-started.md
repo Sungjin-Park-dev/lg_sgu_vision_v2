@@ -55,7 +55,7 @@ uv run scripts/apps/isaac_pipeline.py
 
 ```text
 mesh/source.obj
-  → viewpoint/{N}/viewpoints_{method}.h5
+  → viewpoint/{N}/viewpoints.h5
   → trajectory/{N}/solution.h5          (GLNS solve)
   → trajectory/{N}/trajectory.csv|npz   (GLNS verify)
   → Isaac preview 또는 ROS2 실행
