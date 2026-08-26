@@ -325,7 +325,8 @@ def working_distance_error(wd_mm: float) -> str | None:
 # ============================================================================
 
 COLLISION_MARGIN = 0.0
-COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG = 0.05  # 1 step 당 최대 joint 변화량
+# COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG = 0.05  # 1 step 당 최대 joint 변화량
+COLLISION_ADAPTIVE_MAX_JOINT_STEP_DEG = 0.02  # 1 step 당 최대 joint 변화량
 COLLISION_INTERP_EXCLUDE_LAST_JOINT = True # End-Effector 회전 무시
 
 

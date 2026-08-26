@@ -183,14 +183,16 @@ def load_workcell(usd_path: Path) -> None:
                         mount_height / MOUNT_USD_INTRINSIC_Z]),
         usd_path=str(MOUNT_USD),
     )
-    table_position, table_scale, table_quat = _table_prim_transform(_config)
-    prims.create_prim(
-        TABLE_PATH, "Xform",
-        position=table_position,
-        orientation=table_quat,
-        scale=table_scale,
-        usd_path=str(TABLE_USD),
-    )
+    # table.usd는 별도로 설정할 경우에만 사용 (기본은 primitmive로)
+    if _config.TABLE.get("isaac_visual") == "usd_table":
+        table_position, table_scale, table_quat = _table_prim_transform(_config)
+        prims.create_prim(
+            TABLE_PATH, "Xform",
+            position=table_position,
+            orientation=table_quat,
+            scale=table_scale,
+            usd_path=str(TABLE_USD),
+        )
     prims.create_prim(
         STAGE_PATH, "Xform",
         position=np.zeros(3),          # world 원점 = base_link. 변환 없음.
