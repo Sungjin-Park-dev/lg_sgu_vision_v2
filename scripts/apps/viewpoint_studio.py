@@ -58,7 +58,6 @@ from core.viewpoint import (
     ViewpointGenParams,
     build_local_delaunay_adjacency,
     components_from_edges,
-    cut_vertices,
     expand_edges_by_hops,
     load_meshes,
     load_viewpoints_hdf5,
@@ -278,7 +277,6 @@ class Studio:
         # 방금 쓴 파일을 선택 상태로 만드는데, 그게 로드로 이어지면 self.last 가 지워져
         # (같은 결과를) 다시 저장할 수 없게 된다.
         self._suppress_existing = False
-        self.scene_source: str | None = None
 
         self._build_gui(initial_object)
         self._refresh_existing_options()
@@ -442,7 +440,6 @@ class Studio:
         self._clear_layers()
         self.data = None
         self.scene_full_mesh = None
-        self.scene_source = None
         self.last = None          # 화면에 없는 것을 Save 할 수는 없다
         self.info.content = IDLE_HINT
 
@@ -734,55 +731,45 @@ class Studio:
     def _set_scene(self, full_mesh, data: dict, source: str) -> None:
         self.data = data
         self.scene_full_mesh = full_mesh
-        self.scene_source = source
         self._build_scene(full_mesh, data)
         self._refresh_info()
         print(f"Scene: {source} ({data['n']} vp)")
 
     def _refresh_info(self) -> None:
+        """그래프 한 줄 + 조각났을 때의 경고. 그게 전부다.
+
+        예전에는 Source/Viewpoints/Camera 도 찍었는데 전부 다른 위젯과 중복이었다 —
+        출처는 Saved viewpoints 드롭다운이, 카메라는 Camera spec 입력칸이, 개수는
+        gen_status 가 이미 말한다.
+
+        절단점(bridge) 경고도 뺐다. 저장된 h5 18개를 재보니 2-hop 에서는 **전부 0개**이고
+        (2-hop 이 이웃의 이웃을 이어 절단점을 없앤다) 모든 진입점이 2-hop 이라, 실제로는
+        뜨지 않는 경고였다. cut_vertices 자체는 core 에 남아 있다 — hops=1 분석용.
+        """
         data = self.data
         if data is None:
             return
         adjacency = data.get("adjacency")
-        lines = [
-            f"**Source:** `{self.scene_source}`",
-            f"**Viewpoints:** `{data['n']}`",
-            f"**Camera:** `WD {data['wd_m'] * 1000:.0f} mm`"
-            + (f" · `FOV {data['fov_w_mm']:.0f}×{data['fov_h_mm']:.0f} mm`"
-               if data.get("fov_w_mm") else ""),
-        ]
         if adjacency is None:
-            lines.append("⚠ **No Delaunay graph** — GLNS 는 이 파일을 거부한다. 재생성 필요.")
-            self.info.content = "\n".join(lines)
+            self.info.content = (
+                "⚠ **No graph** — 이 파일에는 Delaunay 간선이 없어 GLNS 가 거부한다. 재생성 필요.")
             return
 
         edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
         n_components, _ = components_from_edges(edges, data["n"])
         expanded, hops = self._expanded_edges(adjacency, data["n"])
-        lines.append(
-            f"**Delaunay:** `{len(edges)} edges` · "
-            f"`{n_components} component{'s' if n_components != 1 else ''}` · "
-            f"`{int(adjacency.get('stats', {}).get('num_isolated', 0))} isolated`"
-            f"\n\n**GLNS solves on:** `{len(expanded)} edges` ({hops}-hop)"
-        )
-        # 그래프가 몇 조각인지보다 중요한 것: **한 점만 빠지면 조각나는가.**
-        # viewpoint 하나가 IK 에 실패해 빠지는 것만으로 갈라질 수 있고, 갈라지면 그
-        # 사이를 잇는 transit 이 생겨 base 가 크게 돈다. 스튜디오는 IK 를 못 돌리지만
-        # "어느 점이 그런 다리인가" 는 그래프만으로 알 수 있다 — 그걸 여기서 경고한다.
-        bridges = cut_vertices(expanded, data["n"])
-        if len(bridges):
-            shown = ", ".join(f"vp{int(b)}" for b in bridges[:8])
-            more = f" +{len(bridges) - 8}" if len(bridges) > 8 else ""
-            lines.append(
-                f"⚠ **Fragile:** `{len(bridges)}` bridge viewpoint(s) — "
-                f"IK 가 하나라도 실패하면 그래프가 갈라진다 (`{shown}{more}`)"
-            )
+        isolated = int(adjacency.get("stats", {}).get("num_isolated", 0))
+        lines = [
+            f"`{len(edges)} edges` · `{n_components} component"
+            f"{'s' if n_components != 1 else ''}` · `{isolated} isolated` · "
+            f"GLNS: `{len(expanded)}` ({hops}-hop)"
+        ]
         if n_components > 1:
             lines.append(
                 "⚠ **Split graph** — 조각 사이를 잇는 transit 이 생긴다. "
-                "`delaunay max normal angle` 을 올려보세요."
+                "`Max normal angle (°)` 을 올려보세요."
             )
-        self.info.content = "\n\n".join(lines) if False else "\n".join(lines)
+        self.info.content = "\n\n".join(lines)
 
     # ---------- external entry ----------
     def load_h5_path(self, path: Path) -> None:
