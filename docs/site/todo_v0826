@@ -1,0 +1,57 @@
+  - name: table
+    type: cuboid
+    position:   [-1.0, 0.0, -0.441]
+    rotation:   [1.0, 0.0, 0.0, 0.0]
+    dimensions: [1.6, 2.0, 0.720]
+    isaac_visual: primitive
+    
+    
+   1.0, 0.0 -0.08
+
+   0.10 0.0 0.2
+   0.0 0.0 1.5708
+   
+   
+  - name: table
+    type: cuboid
+    position:   [-1.0, 0.0, -0.441]
+    rotation:   [1.0, 0.0, 0.0, 0.0]
+    dimensions: [1.6, 2.0, 0.720]
+    isaac_visual: primitive
+    
+    
+- ArUcO? 마커 디폴트 설정
+
+- environment.usd delete table
+
+==========================================================================================
+
+camera spec
+w x h = 45 x 40
+wd = 273mm
+# of vp: 50
+
+
+To Do: v0826
+- IK 풀 때 joint를 미리 고정해서 할 수 있는지 특히 베이스 조인트
+  혹은 cuRobo 실행할때, Retract config 사용하기.
+  
+- 카메라 working distance 관련
+-- 부착부 기준이 아니라, 렌즈 끝 기준임 (코드 수정 필요)
+-- 설정 방법
+-- 직접 물체를 가져다 놓고, 초점이 맞는 상태를 찾아야 함. working distance를 바꿔가면서
+-- 초점이 맞는 상태에서 fov 길이 측정
+
+- environment.usd만 불러오고, table.usd는 없애기 (완)
+
+- 설명 문서 
+-- UR 설정 방법부터?	
+
+--settings.py 옮기기(?)
+
+Marker: (1.0, 0.0, -0.08)
+Cylinder: (0.0, 0.0, 0.2)
+FoV: 20 x 20, Overlap: 50, # of vp: 132
+
+
+
