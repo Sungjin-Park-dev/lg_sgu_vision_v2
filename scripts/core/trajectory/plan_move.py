@@ -41,7 +41,6 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
-from core.glns.candidates import _joint_limits_and_periods  # noqa: E402
 
 # 엣지가 하나뿐이라 큰 배치는 낭비다. warmup 버퍼가 배치 슬롯당 ~375MB 라 기본값(24)이면
 # ~9GB 를 잡는데, 이 CLI 는 Isaac Sim 이 이미 GPU 를 쓰고 있는 동안 호출된다.
@@ -113,22 +112,6 @@ def main() -> int:
 
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     world_config = PT.build_collision_world(args.object)
-
-    # 목표를 **시작 자세에 가장 가까운 2π 등가로 옮긴다.** UR20 은 6축 중 5축이 ±354° 라
-    # 같은 자세를 여러 관절값으로 쓸 수 있는데, 그걸 안 맞추면 같은 곳으로 가면서도 한 바퀴를
-    # 돈다(실측: pan 이 +2.82 rad 에서 -2.69 rad 로 315.9° 회전 — 등가인 +3.59 rad 로 가면
-    # 44.1°). 자세는 그대로이므로 도달 결과는 바뀌지 않고 이동량만 준다.
-    # elbow(±174°)는 등가가 한계 밖이라 그대로 남는다 — 물리적으로 짧게 갈 방법이 없다.
-    joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
-    q_to_aligned = PT.align_to_reference(
-        q_to, q_from, joint_periods, joint_lower, joint_upper)
-    if not np.allclose(q_to_aligned, q_to):
-        moved = np.rad2deg(np.abs(q_to - q_from)).max()
-        after = np.rad2deg(np.abs(q_to_aligned - q_from)).max()
-        print(f"  aligned target to the start pose: max joint travel "
-              f"{moved:.1f} -> {after:.1f} deg")
-        print(f"    to (aligned): {np.round(np.rad2deg(q_to_aligned), 1).tolist()} deg")
-        q_to = q_to_aligned
 
     # 엣지 1개짜리 batch — plan_seams_batched(core/glns/joining.py)의 1-pair 형태다.
     selected = np.stack([q_from, q_to])

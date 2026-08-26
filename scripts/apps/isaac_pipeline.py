@@ -1007,6 +1007,9 @@ class PipelineWindow:
         self._btn_check_ik = None
         self._btn_cancel_ik = None
         self._btn_publish = None
+        self._publish_ready_label = None
+        # (csv 경로, mtime_ns, 첫 행) — 매 프레임 CSV 를 다시 읽지 않기 위한 캐시.
+        self._scan_first_row_cache: tuple = ("", 0, None)
         self._btn_cancel_pub = None
         self._btn_tilt_generate = None
         self._btn_tilt_cancel = None
@@ -1400,10 +1403,20 @@ class PipelineWindow:
             # 이름에 run-mode 를 넣지 않는다 — 이 패널의 다른 버튼들과 같은 규칙이다
             # (아래 주석). 어디로 나가는지는 Run Mode 콤보와 "[execute] target=..." 로그가 말한다.
             self._btn_publish.text = "Execute Scan"
+            # 로봇이 CSV 첫 행에 서 있지 않으면 **누르지 못하게 한다.** 두 실행기 모두
+            # 현재 자세 → 첫 행 사이를 계획되지 않은 직선으로 메우므로(실행기 start()의
+            # start_diff 분기), 그대로 실행하면 미리 본 적 없는 길을 간다 — 2π 만큼
+            # 떨어져 있으면 한 바퀴를 돈다. Move 버튼의 _pending_move 검증과 같은 취지다.
+            ready, why = self._scan_start_ready()
             self._btn_publish.enabled = (
                 self._pipeline_mode == "inspection"
                 and not self._pub_runner.running and not self._sim_executor.running
+                and ready
             )
+            if self._publish_ready_label is not None:
+                self._publish_ready_label.text = why
+                self._publish_ready_label.style = {
+                    "color": 0xFF33CC33 if ready else 0xFFCC7722}
         # Unified labels across sim/real (sim naming is the standard). "Move to Start" 는
         # 스캔·틸트 공용이다 — 두 궤적이 같은 CSV 칸을 쓰므로 하는 일이 정확히 같다.
         # _pub_runner 항이 빠져 있어 real 이동 중에 버튼이 되살아났다(기존 버그).
@@ -1815,10 +1828,37 @@ class PipelineWindow:
                 self._plan_status_label = ui.Label("", height=20)
                 self._sync_plan_status()
                 with ui.HStack(height=28, spacing=6):
+                    self._publish_ready_label = ui.Label("", width=300)
                     self._btn_publish = self._lock(ui.Button(
                         "Execute Scan", clicked_fn=self._on_execute))
                     self._btn_cancel_pub = self._lock(ui.Button(
                         "Cancel", clicked_fn=self._on_cancel_execute))
+
+    def _scan_start_ready(self) -> tuple[bool, str]:
+        """(실행 가능한가, 이유) — 현재 자세가 Execute 대상 CSV 첫 행과 같은가.
+
+        같지 않으면 실행기가 그 사이를 **계획되지 않은 직선**으로 메운다. 2π 등가만큼
+        떨어져 있어도 값으로는 멀기 때문에 한 바퀴 도는 일이 실제로 생겼다. 매 프레임
+        불리므로 CSV 는 mtime 이 바뀔 때만 다시 읽는다.
+        """
+        csv = self._csv_path_model.get_value_as_string().strip()
+        if not csv or not Path(csv).exists():
+            return False, "no CSV selected"
+        try:
+            stamp = Path(csv).stat().st_mtime_ns
+            if self._scan_first_row_cache[:2] != (csv, stamp):
+                solutions, _times = load_trajectory_csv(csv)
+                self._scan_first_row_cache = (
+                    csv, stamp, np.asarray(solutions[0], dtype=np.float64))
+            first = self._scan_first_row_cache[2]
+            current = self._sim_executor.current_joints()
+        except Exception as exc:  # noqa: BLE001 — 로봇/CSV 미준비
+            return False, f"cannot check the start pose: {exc}"
+        gap = float(np.max(np.abs(current - first)))
+        if gap <= MOVE_PLAN_STALE_TOL_RAD:
+            return True, "at the scan start"
+        return False, (f"robot is {np.rad2deg(gap):.1f} deg from the scan start "
+                       f"- use Plan/Move to Start first")
 
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
@@ -4347,6 +4387,10 @@ class PipelineWindow:
     # ------------------------------------------------------------------
     # Per-frame pump
     # ------------------------------------------------------------------
+    # Execute 게이트 갱신 주기(초). 로봇이 움직이면 버튼이 따라 잠기거나 풀려야 하는데,
+    # current_joints() 가 호출마다 SingleArticulation 을 새로 바인딩해서 매 프레임은 비싸다.
+    EXECUTE_GATE_REFRESH_DT = 0.25
+
     def pump(self, dt: float):
         self._gen_runner.pump()
         self._ik_runner.pump()
@@ -4376,6 +4420,14 @@ class PipelineWindow:
             self._pipeline_combo.enabled = not busy
         if self._mode_combo is not None:
             self._mode_combo.enabled = not busy
+        # 로봇이 움직이면 Execute 게이트도 따라 바뀌어야 한다(스로틀).
+        self._gate_accum = getattr(self, "_gate_accum", 0.0) + dt
+        if self._gate_accum >= self.EXECUTE_GATE_REFRESH_DT:
+            self._gate_accum = 0.0
+            try:
+                self._sync_mode_ui()
+            except Exception:  # noqa: BLE001 — UI 갱신이 루프를 죽이면 안 된다
+                pass
         self.step_preview(dt)
 
 

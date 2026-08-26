@@ -9,6 +9,7 @@ import numpy as np
 
 from core import trajectory as PT
 from core.trajectory import collision_gate_and_save
+from core.trajectory.periodic import periodic_joint_delta
 
 class SeamFailure(RuntimeError):
     """An inter-component / HOME-bracket seam could not be bridged (incl. via-home)."""
@@ -18,39 +19,28 @@ def _linf(a, b) -> float:
     return float(np.max(np.abs(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64))))
 
 
-def choose_component_order(endpoints, home_q=None, *, strategy="optimized", start_q=None):
+def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
     """방문 순서 + 성분별 방향 결정. 반환 [(성분_index, reversed_bool), ...].
 
     ``optimized``: component 간 seam 거리(joint L∞)를 최소화한다. 작은 K(≤6)는 정확
     brute-force, 큰 K는 모든 시작 component/방향을 비교하는 greedy를 쓴다.
     ``fixed``: 입력 순서·원방향 그대로.
 
-    ``start_q`` 를 주면 **첫 성분의 진입 끝점이 그 자세에 가까운 쪽**이 되도록 고른다.
-    스캔의 시작점이 여기서 정해지기 때문이다 — GTSP 는 성분 내부의 순서만 풀고, 어느
-    성분에서 어느 방향으로 시작할지는 이 함수가 정한다. 로봇의 현재 자세를 주면 스캔
-    진입에 드는 이동이 줄어든다. 거리는 다른 항과 같은 joint L∞ 라 단위가 섞이지 않는다.
-    ``home_q`` 는 기존 호출자 호환을 위해 남겨두며 최적화에 쓰지 않는다.
+    ``home_q`` 는 기존 호출자 호환을 위해 남겨두며 최적화에 쓰지 않는다. 스캔의 진입
+    자세를 현재 로봇 자세에 맞추는 일은 방문 순서를 바꾸지 않고 ``align_path_to_start``
+    가 표현만 골라서 처리한다 — 검사 순서는 GLNS 가 정한 그대로 둔다.
     """
     K = len(endpoints)
-    if K == 0 or strategy == "fixed":
+    if K <= 1 or strategy == "fixed":
         return [(i, False) for i in range(K)]
     ends = [(np.asarray(e0, np.float64), np.asarray(e1, np.float64)) for (e0, e1) in endpoints]
-    ref = None if start_q is None else np.asarray(start_q, np.float64)
-    if K == 1:
-        # 성분이 하나여도 방향은 고를 수 있다 — 스캔을 뒤에서부터 돌면 진입이 짧아질 수 있다.
-        # (예전에는 K<=1 을 그냥 정방향으로 반환해 이 선택지를 버렸다.)
-        if ref is None:
-            return [(0, False)]
-        return [(0, _linf(ref, ends[0][1]) < _linf(ref, ends[0][0]))]
     if K <= 6:
         d_btw = [[[[_linf(ends[a][sa], ends[b][sb]) for sb in (0, 1)]
                    for b in range(K)] for sa in (0, 1)] for a in range(K)]
         best, best_cost = None, float("inf")
         for perm in itertools.permutations(range(K)):
             for bits in itertools.product((0, 1), repeat=K):
-                first = perm[0]
-                cost = 0.0 if ref is None else _linf(
-                    ref, ends[first][1 if bits[first] else 0])
+                cost = 0.0
                 for j in range(K - 1):
                     a, b = perm[j], perm[j + 1]
                     # exit(a)=side(0 if reversed else 1), entry(b)=side(1 if reversed else 0)
@@ -67,8 +57,7 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized", star
             order = [(first, first_rev)]
             remaining = set(range(K)) - {first}
             cur = ends[first][0 if first_rev else 1]
-            cost = 0.0 if ref is None else _linf(
-                ref, ends[first][1 if first_rev else 0])
+            cost = 0.0
             while remaining:
                 bk, brev, bd = None, False, float("inf")
                 for k in sorted(remaining):
@@ -83,6 +72,56 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized", star
             if cost < best_cost - 1e-12:
                 best_order, best_cost = order, cost
     return best_order
+
+
+def align_path_to_start(traj, start_q, robot_cfg):
+    """이어붙인 궤적 전체를 ``start_q`` 에서 출발하도록 2π 등가로 다시 표현한다.
+
+    첫 행은 start_q 에, 그 뒤 각 행은 **직전 행**에 가장 가까운 등가로 맞춘다. 첫 행만
+    옮기면 둘째 행에서 튀기 때문이다. 자세는 하나도 안 바뀌고(2π 정수배 이동) 표현만 고른다.
+
+    generate 의 **맨 마지막 후처리**다. 성분 순서·방향·seam 이 모두 확정되고 조각이 이어붙은
+    뒤라, 여기서 고른 표현이 곧 저장되는 값이다. solve.py 의 성분별 unwrap 은 join 이 뒤집을
+    수 있어 최종 표현을 정하지 못한다. 검사 순서(어느 viewpoint 를 언제 보는가)는 GLNS 가
+    정한 그대로 두고 **관절값 표현만** 바꾼다.
+
+    **안전장치**: 관절 한계 때문에 어떤 행이 못 따라오면 거기서 새 점프가 생긴다. 그래서
+    정렬 뒤 인접 행 최대 변화량을 원본과 비교해, 나빠졌으면 **통째로 원본을 쓴다** —
+    진입을 줄이려다 궤적 한가운데를 깨뜨리지 않는다.
+
+    Returns: (표현이 바뀐 궤적, 적용했는지 여부)
+    """
+    from core.glns.candidates import _joint_limits_and_periods
+
+    traj = np.asarray(traj, dtype=np.float64)
+    if start_q is None or len(traj) == 0:
+        return traj, False
+    lower, upper, periods = _joint_limits_and_periods(robot_cfg)
+    if not np.any(periods > 0.0):
+        return traj, False
+
+    out = np.empty_like(traj)
+    ref = np.asarray(start_q, dtype=np.float64)
+    for i in range(len(traj)):
+        out[i] = PT.align_to_reference(traj[i], ref, periods, lower, upper)
+        ref = out[i]
+
+    if np.array_equal(out, traj):
+        return traj, False
+    # 연속성이 나빠졌으면 채택하지 않는다.
+    def worst_step(a):
+        return float(np.max(np.abs(np.diff(a, axis=0)))) if len(a) > 1 else 0.0
+    before, after = worst_step(traj), worst_step(out)
+    if after > before + 1e-9:
+        print(f"  start alignment rejected: it would grow the worst joint step "
+              f"{np.rad2deg(before):.2f} -> {np.rad2deg(after):.2f} deg (limits block it)")
+        return traj, False
+    entry_before = float(np.max(np.abs(traj[0] - np.asarray(start_q, dtype=np.float64))))
+    entry_after = float(np.max(np.abs(out[0] - np.asarray(start_q, dtype=np.float64))))
+    print(f"  Aligned the joined path to the start pose: entry travel "
+          f"{np.rad2deg(entry_before):.1f} -> {np.rad2deg(entry_after):.1f} deg "
+          f"(worst step unchanged at {np.rad2deg(after):.2f} deg)")
+    return out, True
 
 
 def plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m,
@@ -134,6 +173,8 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
                      spacing, reconfig_rad, enable_via_ladder, home_bracket,
                      order_strategy, out_csv, motion_planner=None, meta=None,
                      start_q=None):
+    # start_q: 이어붙인 궤적의 관절값 표현만 이 자세 기준으로 다시 고른다
+    # (align_path_to_start). 방문 순서·방향은 건드리지 않는다.
     """충돌-free 성분들을 순서최적화 + seam transit + HOME 브래킷으로 한 궤적으로 stitch.
 
     seam(via-home 포함)이 하나라도 실패하면 ``SeamFailure`` — 성분을 조용히 드롭하지 않는다.
@@ -147,13 +188,7 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     """
     home = np.asarray(home_q, dtype=np.float64)
     order = choose_component_order([(c["entry"], c["exit"]) for c in included], home,
-                          strategy=order_strategy, start_q=start_q)
-    if start_q is not None:
-        first_idx, first_rev = order[0]
-        entry = included[first_idx]["exit" if first_rev else "entry"]
-        print(f"  Scan start anchored to the given pose: component {first_idx}"
-              f"{' reversed' if first_rev else ''}, "
-              f"entry is {np.rad2deg(_linf(np.asarray(start_q, np.float64), entry)):.1f} deg away")
+                          strategy=order_strategy)
 
     oriented = []
     for idx, rev in order:
@@ -202,6 +237,8 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
         pieces.append(seam_trajs[si][0]); masks.append(seam_trajs[si][1]); si += 1
 
     joined_traj, joined_is_transit = PT.stitch_trajectory_pieces(pieces, masks)
+    # 방향·seam 이 확정된 뒤에 표현을 고른다 — 여기가 마지막 기회다.
+    joined_traj, _aligned = align_path_to_start(joined_traj, start_q, robot_cfg)
     gate = collision_gate_and_save(
         joined_traj, joined_is_transit, robot_cfg=robot_cfg,
         world_config=world_config, out_csv=out_csv, meta=meta,
