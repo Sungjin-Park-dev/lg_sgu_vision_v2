@@ -94,19 +94,42 @@ def align_path_to_start(traj, start_q, robot_cfg):
     from core.glns.candidates import _joint_limits_and_periods
 
     traj = np.asarray(traj, dtype=np.float64)
-    if start_q is None or len(traj) == 0:
+    # 어떤 경로로 끝나든 **반드시 한 줄은 찍는다.** 조용히 빠지면 "정렬이 안 돌았다" 와
+    # "돌았는데 바꿀 게 없다" 를 구분할 수 없어서, 멀쩡한 동작을 버그로 의심하게 된다.
+    if start_q is None:
+        print("  Start alignment: skipped - no start pose given "
+              "(pass --start-joints to align the trajectory to where the robot is)")
         return traj, False
-    lower, upper, periods = _joint_limits_and_periods(robot_cfg)
+    if len(traj) == 0:
+        print("  Start alignment: skipped - the joined trajectory is empty")
+        return traj, False
+    try:
+        lower, upper, periods = _joint_limits_and_periods(robot_cfg)
+    except Exception as exc:  # noqa: BLE001 — 정렬 실패가 생성을 죽이면 안 된다
+        print(f"  Start alignment: skipped - could not read joint limits ({exc})")
+        return traj, False
     if not np.any(periods > 0.0):
+        print("  Start alignment: skipped - no joint has a full extra turn of range, "
+              "so there is no 2pi equivalent to choose")
         return traj, False
 
     out = np.empty_like(traj)
     ref = np.asarray(start_q, dtype=np.float64)
-    for i in range(len(traj)):
-        out[i] = PT.align_to_reference(traj[i], ref, periods, lower, upper)
-        ref = out[i]
+    try:
+        for i in range(len(traj)):
+            out[i] = PT.align_to_reference(traj[i], ref, periods, lower, upper)
+            ref = out[i]
+    except Exception as exc:  # noqa: BLE001 — 원본을 지키고 사실대로 알린다
+        print(f"  Start alignment: failed, keeping the trajectory as solved ({exc})")
+        return traj, False
 
+    entry0 = float(np.max(np.abs(traj[0] - np.asarray(start_q, dtype=np.float64))))
     if np.array_equal(out, traj):
+        # 침묵하면 "정렬이 안 돌았다"와 구분이 안 된다. 남은 거리는 2π 로 못 없애는
+        # **진짜** 차이다(비주기 축이거나, 등가가 한계 밖이거나, 팔 자세 자체가 다르다).
+        print(f"  Start alignment: nothing to change - the scan already starts at the "
+              f"closest 2pi representation ({np.rad2deg(entry0):.1f} deg from the given "
+              f"pose; that gap is real, use Plan/Move to Start)")
         return traj, False
     # 연속성이 나빠졌으면 채택하지 않는다.
     def worst_step(a):
@@ -118,9 +141,12 @@ def align_path_to_start(traj, start_q, robot_cfg):
         return traj, False
     entry_before = float(np.max(np.abs(traj[0] - np.asarray(start_q, dtype=np.float64))))
     entry_after = float(np.max(np.abs(out[0] - np.asarray(start_q, dtype=np.float64))))
+    per_joint = np.rad2deg(np.abs(out[0] - np.asarray(start_q, dtype=np.float64)))
     print(f"  Aligned the joined path to the start pose: entry travel "
           f"{np.rad2deg(entry_before):.1f} -> {np.rad2deg(entry_after):.1f} deg "
           f"(worst step unchanged at {np.rad2deg(after):.2f} deg)")
+    print(f"    remaining per-joint gap [deg]: "
+          f"{np.round(per_joint, 1).tolist()} - what is left cannot be removed by 2pi")
     return out, True
 
 

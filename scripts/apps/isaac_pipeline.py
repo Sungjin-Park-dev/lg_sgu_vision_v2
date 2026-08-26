@@ -1413,6 +1413,10 @@ class PipelineWindow:
                 and not self._pub_runner.running and not self._sim_executor.running
                 and ready
             )
+            # 이 Isaac 테마는 .enabled=False 만으로 회색이 되지 않는다(_set_inspection_ui_enabled
+            # 가 같은 이유로 스타일을 따로 준다). 눌리지 않는데 멀쩡해 보이면 착각한다.
+            self._btn_publish.style = ({} if self._btn_publish.enabled
+                                       else self._DIM_WIDGET_STYLE)
             if self._publish_ready_label is not None:
                 self._publish_ready_label.text = why
                 self._publish_ready_label.style = {
@@ -3436,9 +3440,9 @@ class PipelineWindow:
         # 같은 물체/viewpoint 수면 같은 해다(재solve 는 덮어쓰기).
         det_h5 = str(_config.get_solution_path(obj, n_vp))
         trajectory_dir = str(Path(det_h5).parent)
-        # 스캔 시작을 **지금 로봇이 있는 자리에 가까운 끝점**으로 고정한다. GTSP 해는 그대로고
-        # (성분 내부 순서는 안 바뀐다) 어느 성분에서 어느 방향으로 시작할지만 정해진다 —
-        # 그래야 Move to Start 로 진입할 때 덜 돈다.
+        # 현재 자세를 넘겨 **이어붙인 궤적의 관절값 표현만** 그 기준으로 다시 고르게 한다
+        # (verify 의 align_path_to_start). 방문 순서·방향·waypoint 수는 안 바뀐다 — 2π 만큼
+        # 헛도는 표현만 없앤다.
         # NB: --start-joints=<v> (등호). 첫 값이 음수면 argparse 가 옵션으로 오인한다.
         start_arg = ""
         try:
