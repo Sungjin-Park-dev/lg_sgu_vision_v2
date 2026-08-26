@@ -48,7 +48,6 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config, scene_config  # noqa: E402
 from core import trajectory as PT  # noqa: E402
-from core.glns.candidates import _joint_limits_and_periods  # noqa: E402
 from core.glns.joining import (  # noqa: E402
     SeamFailure,
     collision_gate_and_save,
@@ -337,9 +336,6 @@ def main() -> int:
     print()
 
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
-    # 성분 간 2π 정렬에 필요하다 — solve 가 성분마다 따로 unwrap 하므로 경계에서
-    # 같은 자세가 한 바퀴 떨어져 보일 수 있다(join_components 주석 참고).
-    joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
     world_config = PT.build_collision_world(object_name)
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 
@@ -521,8 +517,6 @@ def main() -> int:
                     home_bracket=args.home_bracket, order_strategy=args.order,
                     out_csv=joined_csv, motion_planner=motion_planner,
                     meta=joined_meta,
-                    joint_periods=joint_periods,
-                    joint_lower=joint_lower, joint_upper=joint_upper,
                 )
             except SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} - cannot bridge (via-home included). joined not written.")

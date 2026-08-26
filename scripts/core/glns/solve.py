@@ -450,7 +450,7 @@ def main() -> int:
                 ).astype(np.int16)
                 base.update(
                     status="solved", reason="trivial singleton", solver_cost=0,
-                    reconfig_unit_base=1, base_travel_unit=1, reconfig_unit_any=1,
+                    reconfig_unit=1, reconfig_unit_base=1, reconfig_unit_any=1,
                     forbidden_cost=1, joint_cost_scale=1000,
                     viewpoint_order=np.array([viewpoint], dtype=np.int32),
                     selected_candidate_index=np.array([candidate], dtype=np.int32),
@@ -463,7 +463,7 @@ def main() -> int:
                     is_reconfiguration_wrist=np.empty((0,), dtype=bool),
                     num_reconfigurations=0, num_reconfigurations_base=0,
                     num_reconfigurations_any=0, num_reconfigurations_wrist=0,
-                    objective_base_buckets=0, objective_any_cost=0,
+                    objective_base_cost=0, objective_any_cost=0,
                     objective_tilt_cost=int(round((candidate_metadata[viewpoint]["tilt_deg"][candidate] / 5.0) ** 2)),
                     objective_joint_cost=0,
                     selected_pose_variant=np.asarray([candidate_metadata[viewpoint]["variant"][candidate]]),
@@ -541,9 +541,8 @@ def main() -> int:
                 ], dtype=np.int64)
                 base.update(
                     status="solved", solver_cost=decoded["cost"],
+                    reconfig_unit=problem["reconfig_unit"],
                     reconfig_unit_base=problem["reconfig_unit_base"],
-                    base_travel_unit=problem["base_travel_unit"],
-                    base_bucket_rad=problem["base_bucket_rad"],
                     reconfig_unit_any=problem["reconfig_unit_any"],
                     tilt_unit=problem["tilt_unit"],
                     forbidden_cost=problem["forbidden_cost"],
@@ -560,9 +559,7 @@ def main() -> int:
                     num_reconfigurations_base=int(is_reconfig_base.sum()),
                     num_reconfigurations_any=int(is_reconfig_any.sum()),
                     num_reconfigurations_wrist=int(is_reconfig_any.sum()),
-                    objective_base_count=int(is_reconfig_base.sum()),
-                    objective_base_buckets=int(np.floor(
-                        linf_base / float(problem["base_bucket_rad"])).sum()),
+                    objective_base_cost=int(is_reconfig_base.sum()),
                     objective_any_cost=int(is_reconfig_any.sum()),
                     objective_tilt_cost=int(selected_tilt_cost.sum()),
                     objective_joint_cost=int(np.rint(weighted_l2 * problem["joint_cost_scale"]).sum()),

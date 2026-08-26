@@ -22,12 +22,6 @@ from core.viewpoint.adjacency import (  # noqa: F401
 
 RESULT_FORMAT_VERSION = 2
 JOINT_COST_SCALE = 1000
-# 1계층(base 이동량)의 눈금. 이진 임계가 아니라 등급이라 크기가 비용에 반영된다.
-# 거칠게 잡는 데는 이유가 둘 있다. (1) 곱게 잡으면 계층 단위가 성분 크기의 고차로 커져
-# Int64 를 넘는다(1 mrad 은 성분 400개에서 터진다). (2) 같은 칸 안에서는 하위 계층
-# (6축 reconfig → tilt → 가중 L2)이 계속 동점을 깨준다 — 눈금이 곱을수록 1계층이
-# 단독 목적함수가 되어 tilt·wrist 선호가 죽는다.
-BASE_TRAVEL_BUCKET_RAD = np.deg2rad(10.0)
 
 
 def effective_candidate_cap(
@@ -270,7 +264,6 @@ def build_gtsp_problem(
     reconfig_threshold_rad: float,
     joint_cost_scale: int = JOINT_COST_SCALE,
     joint_weights: np.ndarray | None = None,
-    base_bucket_rad: float = BASE_TRAVEL_BUCKET_RAD,
     candidate_tilt_costs: list[np.ndarray] | None = None,
     joint_periods: np.ndarray | None = None,
 ) -> dict:
@@ -282,14 +275,7 @@ def build_gtsp_problem(
 
     The integer objective is strict lexicographic, in this order: number of
     base-joint (q0:q3) reconfigurations, number of any-six-joint
-    reconfigurations, quantised base-joint travel, accumulated vertex tilt cost,
-    weighted joint L2 travel.
-
-    Tier 1 grades base travel in ``base_bucket_rad`` steps instead of counting
-    threshold crossings. Counting made a 170-deg base swing cost exactly as much
-    as a 30-deg one, and made any number of sub-threshold moves free — measured
-    on real solutions, 100% of base rotation sat under the threshold and was
-    therefore invisible to the objective.
+    reconfigurations, accumulated vertex tilt cost, weighted joint L2 travel.
     Tilt vertex costs are placed on both incident symmetric edges, including
     dummy endpoint edges, so every selected pose contributes exactly twice.
 
@@ -304,8 +290,6 @@ def build_gtsp_problem(
         raise ValueError("reconfig_threshold_rad must be > 0")
     if joint_cost_scale <= 0:
         raise ValueError("joint_cost_scale must be > 0")
-    if base_bucket_rad <= 0.0:
-        raise ValueError("base_bucket_rad must be > 0")
 
     weights = (np.ones(6, dtype=np.float64) if joint_weights is None
                else np.asarray(joint_weights, dtype=np.float64))
@@ -358,7 +342,6 @@ def build_gtsp_problem(
     # selecting the exact lexicographic penalties.
     blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     max_joint_cost = 0
-    max_base_bucket = 0
     for a, b in sorted(allowed_view_edges):
         qa = np.asarray(representatives[a], dtype=np.float64)
         qb = np.asarray(representatives[b], dtype=np.float64)
@@ -375,10 +358,7 @@ def build_gtsp_problem(
         # 1계층은 base 이동량을 눈금으로 끊어 '얼마나' 움직이는지를 센다(개수가 아니다).
         linf_base = np.max(absd[..., base_idx], axis=2)
         linf_any = np.max(absd[..., any_idx], axis=2)
-        base_buckets = np.floor(linf_base / base_bucket_rad).astype(np.int64)
-        if base_buckets.size:
-            max_base_bucket = max(max_base_bucket, int(base_buckets.max()))
-        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, base_buckets, linf_any))
+        blocks.append((ranges[a], ranges[b], joint_cost, linf_base, linf_any))
 
     # Exact tier bounds. Each unit is one larger than the maximum total cost of
     # all lower tiers, therefore no amount of lower-tier improvement can trade
@@ -388,41 +368,25 @@ def build_gtsp_problem(
     max_tilt_vertex = max(tilt_by_vertex, default=0)
     tilt_unit = max_l2_sum + 1
     max_tilt_sum = 2 * len(members) * max_tilt_vertex * tilt_unit
-    # 계층: base reconfig 개수 → 6축 reconfig 개수 → base 이동량 버킷 → tilt → L2.
-    #
-    # 버킷은 두 reconfig 개수를 **대체하지 않고 그 아래에 더한다.** 실측으로 확인:
-    #   버킷을 최상위로 교체 → scan base -22% 인데 reconfig 2->4, transit base +178%,
-    #                          실행 총량 +45% 악화
-    #   reconfig 개수만 위로   → base=0->1 로 팔 분기가 flip, transit base +226% 악화
-    # reconfig 간선은 verify 에서 **계획된 transit** 을 부르고, 그 transit 이 사다리 끝에서
-    # via-home 으로 빠지면 목적함수가 보지 못하는 큰 base 스윙이 된다. 특히 base reconfig
-    # 하나는 팔 분기 flip 이라 그 자체가 거대한 이동이다. 그래서 개수를 먼저 0 으로 누르고,
-    # **그 안에서** 임계 아래 누적을 버킷으로 줄인다.
-    base_travel_unit = max_tilt_sum + max_l2_sum + 1
-    max_base_sum = n_real_edges * max_base_bucket * base_travel_unit
-    reconfig_unit_any = max_base_sum + max_tilt_sum + max_l2_sum + 1
+    reconfig_unit_any = max_tilt_sum + max_l2_sum + 1
     max_any_sum = n_real_edges * reconfig_unit_any
-    reconfig_unit_base = max_any_sum + max_base_sum + max_tilt_sum + max_l2_sum + 1
+    reconfig_unit_base = max_any_sum + max_tilt_sum + max_l2_sum + 1
     max_allowed_tour = (
-        n_real_edges * reconfig_unit_base
-        + max_any_sum + max_base_sum + max_tilt_sum + max_l2_sum
+        n_real_edges * reconfig_unit_base + max_any_sum
+        + max_tilt_sum + max_l2_sum
     )
     forbidden_cost = max_allowed_tour + 1
     if forbidden_cost > np.iinfo(np.int64).max:
-        raise OverflowError(
-            "strict lexicographic GTSP costs exceed Int64 "
-            f"({len(members)} viewpoints, bucket={np.rad2deg(base_bucket_rad):.1f} deg). "
-            "Use a coarser base_bucket_rad or split the component.")
+        raise OverflowError("strict lexicographic GTSP costs exceed Int64")
     costs = np.full((n_vertices, n_vertices), forbidden_cost, dtype=np.int64)
     tilt_arr = np.asarray(tilt_by_vertex, dtype=np.int64)
 
-    for ids_a, ids_b, joint_cost, linf_base, base_buckets, linf_any in blocks:
+    for ids_a, ids_b, joint_cost, linf_base, linf_any in blocks:
         edge_tilt = tilt_arr[ids_a, None] + tilt_arr[ids_b][None, :]
         block = (
             joint_cost
             + (linf_base > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_base
             + (linf_any > reconfig_threshold_rad).astype(np.int64) * reconfig_unit_any
-            + base_buckets * base_travel_unit
             + edge_tilt * tilt_unit
         )
         costs[np.ix_(ids_a, ids_b)] = block
@@ -440,16 +404,13 @@ def build_gtsp_problem(
         "vertex_viewpoint": np.asarray(vertex_viewpoint, dtype=np.int32),
         "vertex_candidate": np.asarray(vertex_candidate, dtype=np.int32),
         "dummy_vertex": int(dummy_vertex),
+        "reconfig_unit": int(reconfig_unit_base),
         "reconfig_unit_base": int(reconfig_unit_base),
-        "base_travel_unit": int(base_travel_unit),
-        "base_bucket_rad": float(base_bucket_rad),
-        "max_base_bucket": int(max_base_bucket),
         "reconfig_unit_any": int(reconfig_unit_any),
         "tilt_unit": int(tilt_unit),
         "max_l2_sum": int(max_l2_sum),
         "max_tilt_sum": int(max_tilt_sum),
         "max_any_sum": int(max_any_sum),
-        "max_base_sum": int(max_base_sum),
         "max_allowed_tour": int(max_allowed_tour),
         "forbidden_cost": int(forbidden_cost),
         "joint_cost_scale": int(joint_cost_scale),
