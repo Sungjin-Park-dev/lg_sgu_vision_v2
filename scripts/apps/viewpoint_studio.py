@@ -17,10 +17,9 @@ plan_trajectory era and were removed on 2026-08-26.
 
 Rendered elements: translucent mesh, surface points, camera positions, and the
 graph edges — all coloured by connected component, each toggled independently
-under **Display**. The panel reports what actually drives the next stage: edge
-count, component count, isolated points, the edge count GLNS will really solve
-on (**Solver graph (hops)**), and **bridge viewpoints** whose IK failure would
-split the graph.
+under **Display**. One line at the bottom reports the graph the next stage
+actually consumes: edge count, component count, isolated points, and the edge
+count GLNS will really solve on (**Solver graph (hops)**).
 
 Scope: material filtering and bottom-filter tuning are not exposed. Found
 parameters can be persisted with **Save** for the GLNS solve step.
@@ -742,9 +741,18 @@ class Studio:
         출처는 Saved viewpoints 드롭다운이, 카메라는 Camera spec 입력칸이, 개수는
         gen_status 가 이미 말한다.
 
-        절단점(bridge) 경고도 뺐다. 저장된 h5 18개를 재보니 2-hop 에서는 **전부 0개**이고
-        (2-hop 이 이웃의 이웃을 이어 절단점을 없앤다) 모든 진입점이 2-hop 이라, 실제로는
-        뜨지 않는 경고였다. cut_vertices 자체는 core 에 남아 있다 — hops=1 분석용.
+        경고는 둘 다 뺐다.
+
+        **Fragile(절단점)**: 저장된 h5 18개를 재보니 2-hop 에서는 전부 0개이고
+        (2-hop 이 이웃의 이웃을 이어 절단점을 없앤다) 모든 진입점이 2-hop 이라 뜨지 않는
+        경고였다. cut_vertices 자체는 core 에 남아 있다 — hops=1 분석용.
+
+        **Split graph**: 처방이 틀렸다. "Max normal angle 을 올려라" 였는데 기본값 90° 는
+        임의의 값이 아니라 물리적 경계다(dot(n_i,n_j) >= cos 90° = 0, 같은 반구를 볼 때만
+        잇는다). 더 올리면 물체를 관통하는 간선을 만든다 — 필터가 막으려던 바로 그것이다.
+        게다가 조각난 것 자체가 대개 문제가 아니다: 18개 중 11개가 2성분 이상이고
+        cylinder_sample/132(2성분)는 커버리지 100%, transit 이 511초 중 9.7초였다.
+        성분 수는 위 한 줄에 이미 있으니 겁만 주는 줄이었다.
         """
         data = self.data
         if data is None:
@@ -759,17 +767,11 @@ class Studio:
         n_components, _ = components_from_edges(edges, data["n"])
         expanded, hops = self._expanded_edges(adjacency, data["n"])
         isolated = int(adjacency.get("stats", {}).get("num_isolated", 0))
-        lines = [
+        self.info.content = (
             f"`{len(edges)} edges` · `{n_components} component"
             f"{'s' if n_components != 1 else ''}` · `{isolated} isolated` · "
             f"GLNS: `{len(expanded)}` ({hops}-hop)"
-        ]
-        if n_components > 1:
-            lines.append(
-                "⚠ **Split graph** — 조각 사이를 잇는 transit 이 생긴다. "
-                "`Max normal angle (°)` 을 올려보세요."
-            )
-        self.info.content = "\n\n".join(lines)
+        )
 
     # ---------- external entry ----------
     def load_h5_path(self, path: Path) -> None:
