@@ -29,13 +29,12 @@ trajectory/{N}/      solution.h5                       GLNS 해 (verify 의 입�
 positions/normals/edges/working distance 넷뿐이다. 파일이 순서를 들고 있으면 "어느
 쪽이 진짜 순서인가"라는 두 번째 답이 생긴다.
 
-2026-08-26 이전 파일에는 `cluster_id`, `cluster_order`, `path_order`와
-`row_index`, `cluster_direction`, `pca_*`, `adjacency/component_id`가 남아 있을 수
-있다. 읽는 쪽이 전부 무시하므로 기존 파일은 그대로 열린다.
+일부 파일에는 `cluster_id`, `cluster_order`, `path_order`, `row_index`,
+`cluster_direction`, `pca_*`, `adjacency/component_id`가 더 들어 있다. 읽는 쪽이
+전부 무시하므로 그대로 열린다.
 
 파일명은 `viewpoints.h5`다. 읽는 쪽은 `config.resolve_viewpoint_path(object, N)`로
-고르면 된다 — 정규 이름이 있으면 그것을, 없으면(옛 파일뿐이면) 가장 최근
-`viewpoints*.h5`를 쓴다.
+고르면 된다 — 그 이름이 있으면 그것을, 없으면 가장 최근 `viewpoints*.h5`를 쓴다.
 
 ## GLNS 해 HDF5 (`solution.h5`)
 

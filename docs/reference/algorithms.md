@@ -4,9 +4,9 @@
 
 물체 표면을 sampling하고 working distance만큼 떨어진 카메라 pose를 만든 뒤, 그 카메라 위치 위에 local-tangent Delaunay 인접 그래프를 얹어 저장한다. 산출물은 **기하 + 그래프** 둘뿐이다.
 
-Sampling은 메시 표면 직접 FPS 하나뿐이다. PCA 평면에 격자를 깔고 투영하던 grid 모드는 곡면·측벽을 놓치고 속 빈 물체의 지붕을 잃어 2026-08-26 제거했다.
+Sampling은 메시 표면 직접 FPS다. 면적 기준으로 목표 개수(`area / spacing²`)를 잡고 후보를 넉넉히 뽑은 뒤 farthest-point sampling으로 솎아내, 곡면과 측벽도 표면적 기준으로 고르게 덮는다. 이어 아래를 보는 면과 — 속 빈 물체로 등록된 경우 — 안쪽 껍데기를 걸러낸다.
 
-방문 순서도 여기서 정하지 않는다. 예전에는 클러스터링(표면 성분 또는 볼록 파트 → sub-cluster)으로 검사 영역을 나누고 클러스터 안은 lawnmower, 클러스터끼리는 GTSP로 순서를 만들었다. 그 순서를 소비하던 plan_trajectory가 GLNS로 대체되면서 소비자가 사라져 2026-08-26 함께 제거했다 — GLNS는 positions/normals/edges/WD만 읽고 순서와 IK 자세를 함께 푼다.
+방문 순서는 여기서 정하지 않는다. GLNS가 positions/normals/edges/working distance만 읽어 순서와 IK 자세를 함께 푼다.
 
 ## GLNS 궤적
 
