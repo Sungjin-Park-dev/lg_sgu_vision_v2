@@ -386,7 +386,7 @@ class Studio:
                 "Graph edges", initial_value=True,
                 hint="GLNS 순서 제약 그래프. 색은 연결 성분")
 
-        # 이 노브가 바꾸는 것(성분 색·간선 수·Fragile 목록)이 전부 바로 아래 진단창에
+        # 이 노브가 바꾸는 것(성분 색·GLNS 가 푸는 간선 수)이 바로 아래 진단창과 화면에
         # 있어서 그 옆에 둔다. 슬라이더인 이유: 끌면 즉시 반영된다(Generate 불필요) —
         # Generate 폴더의 숫자칸들과 반대다.
         self.sl_hops = g.add_slider(
@@ -455,7 +455,7 @@ class Studio:
         """씬과 거기 딸린 상태를 비운다.
 
         Object 를 바꿔도 이전 물체의 viewpoint 가 화면에 남아 있었다. 드롭다운이 거짓말을
-        하는 것도 문제지만, 그 상태에서 Color by 나 hops 를 건드리면 ``_build_scene`` 이
+        하는 것도 문제지만, 그 상태에서 hops 를 건드리면 ``_build_scene`` 이
         **새 물체의 회전**(apply_object_placement)을 **이전 물체의 데이터**에 씌워 물체가
         엉뚱한 자세로 돌아갔다. 비우는 쪽이 정직하고 그 버그도 같이 사라진다.
         """
@@ -499,7 +499,8 @@ class Studio:
 
         isaac_pipeline 의 ``_sync_camera_spec_from_h5`` 와 같은 동작 — "기존 것 불러와
         살짝 바꿔 재생성" 이 config 기본값이 아니라 그 파일의 스펙에서 출발하게 한다.
-        ``.value`` 대입이 ``_on_camera_spec_change`` 를 트리거하지만 eps 기본값만 다시 계산한다.
+        FOV/WD 입력칸에는 on_update 가 없다 — 대입은 값만 바꾸고, 그 값은 다음 Generate
+        때 읽힌다(즉 로드만으로 화면이 다시 그려지지는 않는다).
 
         overlap 은 여기서 건드리지 않는다 — h5 camera_spec 에 없는 샘플링 파라미터다.
         """
