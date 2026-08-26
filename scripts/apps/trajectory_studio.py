@@ -529,13 +529,13 @@ class TrajectoryStudio:
             return
         self._vp_path = vps[label]
         viewpoint = load_viewpoints_hdf5(self._vp_path)
+        # h5 의 원본 인덱스 그대로 쓴다. 예전에는 저장된 path_order 로 재정렬했는데,
+        # 그러면 이 앱의 "vp 17" 과 GLNS·viewpoint_studio 의 "vp 17"(둘 다 raw index)이
+        # 서로 다른 점을 가리켰다. path_order 는 이제 만들지도 않는다 — 방문 순서는
+        # GLNS 가 IK 자세와 함께 푼다.
         positions = viewpoint.positions
         normals = viewpoint.normals
-        path_order = viewpoint.path_order
         wd_m = viewpoint.working_distance_m
-        if path_order is not None:                  # 방문 순서로 정렬 (파이프라인과 동일)
-            order = np.argsort(path_order)
-            positions, normals = positions[order], normals[order]
         self._vp_raw = (positions, normals, wd_m)
         self.world_poses = PT.build_camera_poses(positions, normals, wd_m)
         self._reach = None

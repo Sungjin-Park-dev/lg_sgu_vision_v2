@@ -8,14 +8,6 @@ import numpy as np
 import trimesh
 
 
-def compute_path_length(positions: np.ndarray, path_order: np.ndarray) -> float:
-    """경로 순서대로 연결했을 때 총 유클리드 거리 합"""
-    sorted_idx = np.argsort(path_order)
-    ordered = positions[sorted_idx]
-    diffs = np.diff(ordered, axis=0)
-    return float(np.sum(np.linalg.norm(diffs, axis=1)))
-
-
 # ============================================================================
 # Grid Viewpoint Generation
 # ============================================================================
