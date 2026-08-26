@@ -226,6 +226,29 @@ def load_as_trimesh(path: Path) -> trimesh.Trimesh:
     return loaded
 
 
+def path_tree(path: Path) -> str:
+    """절대경로를 트리로 편다 — 패널이 좁아서(24em) 한 줄로는 안 들어간다.
+
+    마크다운은 ``/`` 에서 줄을 못 끊는다(코드 스팬이든 아니든 경로엔 공백이 없다).
+    그래서 세그먼트마다 줄을 바꾼다: 줄 하나하나가 짧아져 가로 스크롤이 사라지고,
+    깊이가 눈에 들어온다. 펜스 코드블록이라 들여쓰기가 그대로 보존된다.
+    """
+    parts = list(path.parts)
+    if not parts:
+        return f"```\n{path}\n```"
+    lines = []
+    head = parts[0]                      # POSIX 는 '/', Windows 는 드라이브
+    if len(parts) > 1 and head in ("/", "\\"):
+        head = head + parts[1]           # '/' 만 있는 줄은 낭비다 → 첫 세그먼트와 합친다
+        parts = parts[2:]
+    else:
+        parts = parts[1:]
+    lines.append(head)
+    for depth, seg in enumerate(parts):
+        lines.append("  " * depth + "└ " + seg)
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 def resolve_mesh_path(data: dict, object_name: str) -> Path | None:
     # Prefer the local mesh: stored ``input_mesh`` is often an absolute path from
     # the container the h5 was generated in (e.g. /root/...), unreadable here.
@@ -637,17 +660,15 @@ class Studio:
                 surface["positions"], surface["normals"], out, metadata, camera_spec,
                 adjacency=L["adjacency"],
             )
-            # 패널에는 짧은 이름만 — 절대경로를 코드 스팬으로 찍으면 마크다운이 '/' 에서
-            # 줄바꿈을 못 해 패널이 가로로 넘친다(24em). 전체 경로는 콘솔에 남고, 어느
-            # 파일인지는 바로 위 Saved viewpoints 드롭다운이 같은 라벨로 가리킨다.
-            label = f"{out_path.parent.name}/{out_path.name}"
-            self.gen_status.content = f"**Saved** → `{label}`"
-            self._refresh_existing_options(select=label)
+            self.gen_status.content = "**Saved**\n\n" + path_tree(out_path)
+            self._refresh_existing_options(
+                select=f"{out_path.parent.name}/{out_path.name}")
             print(f"[save] wrote {out}")
         except OSError as exc:
             self.gen_status.content = (
                 f"**Save failed** ({exc.__class__.__name__})\n\n"
-                f"디렉토리 권한 확인 (root 소유일 수 있음). 경로는 콘솔 로그에.")
+                + path_tree(out_path)
+                + "\n\n디렉토리 권한 확인 (root 소유일 수 있음).")
             print(f"[save] {out}: {exc}")
 
     def _on_hops_change(self) -> None:
