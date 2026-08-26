@@ -15,11 +15,12 @@ order — GLNS solves the order jointly with the IK configuration, reading only
 positions/normals/edges/WD. Clustering and lawnmower ordering belonged to the
 plan_trajectory era and were removed on 2026-08-26.
 
-Rendered elements: translucent mesh, surface points, camera markers, and the
-Delaunay graph coloured by connected component. Layers toggle independently.
-The panel reports what actually drives the next stage: edge count, component
-count, isolated points, the edge count GLNS will really solve on (hop-expanded),
-and **bridge viewpoints** whose IK failure would split the graph.
+Rendered elements: translucent mesh, surface points, camera positions, and the
+graph edges — all coloured by connected component, each toggled independently
+under **Display**. The panel reports what actually drives the next stage: edge
+count, component count, isolated points, the edge count GLNS will really solve
+on (**Solver graph (hops)**), and **bridge viewpoints** whose IK failure would
+split the graph.
 
 Scope: material filtering and bottom-filter tuning are not exposed. Found
 parameters can be persisted with **Save** for the GLNS solve step.
@@ -65,7 +66,6 @@ from core.viewpoint import (
     save_viewpoints_hdf5,
 )
 
-DELAUNAY_RGB = (0, 180, 220)   # 성분 간(=끊긴) 간선
 MESH_RGB = (180, 180, 180)
 SURFACE_RGB = (255, 255, 255)
 
@@ -352,16 +352,28 @@ class Studio:
                 self.btn_save = g.add_button("Save h5")
                 self.gen_status = g.add_markdown("Idle.")
 
-        with g.add_folder("Layers"):
-            # 재생성 없이 "GLNS 가 볼 간선" 으로 관점만 바꾸는 노브다.
-            self.sl_hops = g.add_slider(
-                "GLNS expand hops", min=1, max=MAX_GLNS_HOPS, step=1,
-                initial_value=DEFAULT_GLNS_HOPS)
+        # 화면에 무엇을 그릴지 — 순수 토글만 둔다. hops 는 표시가 아니라 데이터를 다시
+        # 계산하는 렌즈라 여기가 아니라 진단창 옆에 있다.
+        with g.add_folder("Display"):
             self.cb_mesh = g.add_checkbox("Mesh", initial_value=True)
-            self.cb_surface = g.add_checkbox("Surface points", initial_value=True)
-            self.cb_markers = g.add_checkbox("Markers", initial_value=True)
-            self.cb_delaunay = g.add_checkbox("Delaunay adjacency", initial_value=True)
+            self.cb_surface = g.add_checkbox(
+                "Surface points", initial_value=True,
+                hint="메시 표면 위의 검사 지점")
+            self.cb_markers = g.add_checkbox(
+                "Camera positions", initial_value=True,
+                hint="표면점 + 법선 × WD — 로봇 EE 가 실제로 가는 곳")
+            self.cb_delaunay = g.add_checkbox(
+                "Graph edges", initial_value=True,
+                hint="GLNS 순서 제약 그래프. 색은 연결 성분")
 
+        # 이 노브가 바꾸는 것(성분 색·간선 수·Fragile 목록)이 전부 바로 아래 진단창에
+        # 있어서 그 옆에 둔다. 슬라이더인 이유: 끌면 즉시 반영된다(Generate 불필요) —
+        # Generate 폴더의 숫자칸들과 반대다.
+        self.sl_hops = g.add_slider(
+            "Solver graph (hops)", min=1, max=MAX_GLNS_HOPS, step=1,
+            initial_value=DEFAULT_GLNS_HOPS,
+            hint="GLNS 는 저장된 1-hop 간선을 N-hop 으로 확장해 푼다. "
+                 "solve.py --delaunay-expand-hops 와 같은 값으로 두세요 (기본 2)")
         self.info = g.add_markdown(IDLE_HINT)
 
         # callbacks
@@ -708,13 +720,14 @@ class Studio:
 
         if adjacency is not None:
             edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
+            # 간선 색은 항상 그 성분의 색이다. "성분을 가로지르는 간선" 은 존재할 수 없다 —
+            # 성분은 이 간선들(을 확장한 것)에서 파생하고, expand_edges_by_hops 가 원본의
+            # 상위집합이라 1-hop 간선의 두 끝점은 언제나 같은 확장 성분에 있다.
             # viser 0.2.11에는 batched line-segment primitive가 없어 edge별 2-point spline을 쓴다.
             for edge_idx, (a, b) in enumerate(edges):
-                edge_color = (group_colors[int(group_id[a])]
-                              if group_id[a] == group_id[b] else DELAUNAY_RGB)
                 self.layers["delaunay"].append(srv.scene.add_spline_catmull_rom(
                     f"/scene/delaunay/e{edge_idx}", positions=np.stack([cam[a], cam[b]]),
-                    color=edge_color, line_width=1.0))
+                    color=group_colors[int(group_id[a])], line_width=1.0))
 
         self._apply_visibility()
 
