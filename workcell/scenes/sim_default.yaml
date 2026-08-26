@@ -83,9 +83,9 @@ obstacles:
   # Stage 트리에서 켜면 플래너가 보는 것을 눈으로 확인할 수 있다).
   # 이름은 **셀 기준**이다(front = 테이블이 있는 쪽) — 로봇 기준 방위가 아니다.
   - {name: wall_front, type: cuboid, position: [-2.0, 0.0, 0.5], rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [2.2, 0.1, 3.0], isaac_visual: hidden}
-  - {name: wall_back,  type: cuboid, position: [1.0, 0.0, 0.5],  rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [2.2, 0.1, 3.0], isaac_visual: hidden}
-  - {name: wall_left,  type: cuboid, position: [0.0, -1.5, 0.5], rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [0.1, 3.0, 3.0], isaac_visual: hidden}
-  - {name: wall_right, type: cuboid, position: [0.0, 1.0, 0.5],  rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [0.1, 3.0, 3.0], isaac_visual: hidden}
+  - {name: wall_back,  type: cuboid, position: [0.5, 0.0, 0.5],  rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [2.2, 0.1, 3.0], isaac_visual: hidden}
+  - {name: wall_left,  type: cuboid, position: [-0.5, -1.5, 0.5], rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [0.1, 3.0, 3.0], isaac_visual: hidden}
+  - {name: wall_right, type: cuboid, position: [-0.5, 1.0, 0.5],  rotation: [0.7071067811, 0.0, 0.0, 0.7071067811], dimensions: [0.1, 3.0, 3.0], isaac_visual: hidden}
 
   # 물체 받침대. position 과 dimensions[2] 는 sync_support_to_target() 이 물체 배치에서
   # 런타임에 다시 계산한다(테이블 상면 ↔ 물체 바닥을 채운다). 아래 값은 물체 로드 전 시드다.
