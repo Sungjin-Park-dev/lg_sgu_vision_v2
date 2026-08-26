@@ -446,8 +446,11 @@ class Studio:
     def _on_object_change(self) -> None:
         self._clear_scene()
         self._refresh_existing_options()
-        self.gen_status.content = (
-            f"Object **{self.object_dd.value}** — Generate 하거나 저장본을 고르세요.")
+        # 낡은 Done/Saved 를 지우는 것이 목적이다 — 안 지우면 상태줄이 이전 물체의 결과를
+        # 계속 주장한다(sample 에서 "Done · 74 vp" 를 띄운 채 cylinder 로 갈아타는 식).
+        # 안내 문구는 넣지 않는다: info 의 IDLE_HINT 가 같은 말을 하고, 물체 이름은 바로
+        # 위 Object 드롭다운이 이미 보여준다.
+        self.gen_status.content = "Idle."
 
     def _on_existing_change(self) -> None:
         if self._suppress_existing:
