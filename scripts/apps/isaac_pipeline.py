@@ -1844,11 +1844,13 @@ class PipelineWindow:
                         "Generate Tilt Motion", clicked_fn=self._on_generate_tilt))
                     self._btn_tilt_cancel = self._lock(ui.Button(
                         "Cancel", clicked_fn=self._on_cancel_generate))
+                # 순수 시각화라 긴 작업 중에도 열어 둔다(_lock_view_only). 각도 입력칸은
+                # 생성 입력이므로 그대로 잠긴다 — 도는 중에 바꾸면 화면과 실제가 갈린다.
                 with ui.HStack(height=28, spacing=6):
-                    self._btn_tilt_fan = self._lock(ui.Button(
+                    self._btn_tilt_fan = self._lock_view_only(ui.Button(
                         "Show Tilt Fan", clicked_fn=self._on_toggle_tilt_fan))
-                    self._lock(ui.Button("Clear Tilt Fan",
-                                         clicked_fn=self._on_clear_tilt_fan))
+                    self._lock_view_only(ui.Button("Clear Tilt Fan",
+                                                   clicked_fn=self._on_clear_tilt_fan))
 
     def _build_panel_speed(self):
         """실행 속도 노브 — settings.py 의 타이밍 값을 그대로 CLI 로 넘긴다.
@@ -1911,8 +1913,10 @@ class PipelineWindow:
                     self._lock(ui.Button("Pause", clicked_fn=self._on_pause))
                     self._lock(ui.Button("Stop", clicked_fn=self._on_stop))
                 with ui.HStack(height=28, spacing=6):
-                    self._lock(ui.Button("Show Collision Spheres", clicked_fn=self._on_show_collision_spheres))
-                    self._lock(ui.Button("Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres))
+                    self._lock_view_only(ui.Button(
+                        "Show Collision Spheres", clicked_fn=self._on_show_collision_spheres))
+                    self._lock_view_only(ui.Button(
+                        "Clear Collision Spheres", clicked_fn=self._on_clear_collision_spheres))
                 # 고스트(InspectionCameraPreview) 시각화. 스펙 값 자체는 위
                 # "Load Object & Viewpoints" 에서 두 카메라가 공유한다.
                 self._build_camera_view_ui("preview")
@@ -4036,7 +4040,10 @@ class PipelineWindow:
         부채꼴은 물체 프림 아래(로컬 좌표)에 그리므로, CSV 의 robot-frame 포즈를 그 궤적이
         계획될 때의 물체 배치(npz meta)로 나눠 로컬로 옮긴다.
         """
-        from core.trajectory.tilt_motion import load_trajectory_meta, load_trajectory_row
+        # common 쪽(numpy 만)에서 가져온다. core.trajectory.tilt_motion 을 거치면 패키지
+        # __init__ 이 cuRobo/torch 를 끌어와, 이 버튼을 처음 누를 때 UI 가 몇 초 멈추고
+        # 생성 서브프로세스가 GPU 를 쓰는 동안 CUDA 컨텍스트가 새로 잡힌다. 같은 함수다.
+        from common.trajectory_csv import load_trajectory_meta, load_trajectory_row
 
         csv = self._tilt_base_csv()
         if not csv or not Path(csv).exists():
