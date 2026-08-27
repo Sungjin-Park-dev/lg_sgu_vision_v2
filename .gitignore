@@ -43,6 +43,16 @@ data/**/ik/
 # Check-and-Save-IK 산출물(물체 배치별로 다시 생성되는 IK 관절해)
 data/**/ik_solutions.h5
 
+# 파이프라인 산출물 — mesh/ 와 코드로 다시 만들 수 있다.
+#   viewpoint/  : viewpoint_studio 또는 core/viewpoint/cli.py
+#   trajectory/ : core/glns/solve.py -> verify.py
+# 전부 바이너리(h5/npz)라 diff 도 병합도 안 되고, 두 사람이 같은 물체를 재생성하면
+# 매번 충돌한다. 입력 자산인 mesh/ 는 재생성이 불가능하므로 계속 추적한다.
+# 특정 시점 산출물이 필요하면 히스토리에서 꺼낸다(인덱스를 건드리지 않도록 --worktree):
+#   git restore --source=7a2159a --worktree -- data/sample/trajectory/74/
+data/**/viewpoint/
+data/**/trajectory/
+
 # reorient_mesh.py backups
 *.obj.bak
 
