@@ -36,10 +36,11 @@ uv run scripts/apps/viewpoint_studio.py
 ## 카메라 스펙
 
 세 값은 h5에 함께 저장되고, **그 h5를 읽는 IK·궤적·GLNS·Isaac이 전부 이 값을 쓴다.**
-working distance는 뷰포인트를 표면에서 띄우는 거리라 바꾸면 로봇이 가는 위치가 달라진다
-([카메라 기하](../reference/camera-geometry.md)).
+working distance는 뷰포인트를 표면에서 띄우는 거리라 바꾸면 로봇이 가는 위치가 달라진다.
+**기준점은 카메라의 끝(렌즈 배럴 앞면)** 이다 — 벤더 공칭 WD는 카메라 몸체 앞면 기준이라
+77.770 mm 큰 숫자다([카메라 기하](../reference/camera-geometry.md)).
 
-- working distance에는 하한이 있다. 그보다 작으면 생성이 거부된다.
+- working distance에는 하한이 있다(검사면이 카메라 끝보다 앞이어야 한다). 그보다 작으면 생성이 거부된다.
 - overlap은 카메라 스펙이 아니라 샘플링 값이라 `Generate viewpoints`에 있다 —
   표면 간격 = min(FOV) × (1 − overlap).
 

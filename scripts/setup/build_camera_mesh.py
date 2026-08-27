@@ -62,7 +62,7 @@ OPTICAL_PRIM = f"{MOUNT_PRIM}/camera_optical_frame"
 
 # 카메라가 플랜지에 물린 clocking (deg). USD `camera_mount` 의 xformOp:rotateXYZ 와
 # URDF `camera_mount_joint` 의 rpy 가 이 값의 두 사본이고, verify 가 셋을 맞춰본다.
-# roll 만 쓴다: 툴 축(flange +X = 광축) 둘레라 광축 방향도 optical_frame 원점(0.141,0,0)도
+# roll 만 쓴다: 툴 축(flange +X = 광축) 둘레라 광축 방향도 optical_frame 원점(0.21877,0,0)도
 # 움직이지 않는다 -- 몸체가 어느 쪽으로 뻗는지와 이미지 회전만 바뀐다. 실기 대조로 확정.
 CAMERA_MOUNT_RPY_DEG = (-90.0, 0.0, 0.0)
 
@@ -79,14 +79,17 @@ EXPECT_LO = np.array([-0.001, -0.0949, -0.056])
 EXPECT_HI = np.array([0.21877, 0.05, 0.056])
 BBOX_TOL = 1e-4
 
-# camera_optical_frame sits on the camera body's front face -- the datum the vendor measures
-# their 250 mm working distance from. CAD (camera_asm_wo_light.stp, flange frame, mm):
+# camera_optical_frame sits on the lens-barrel front face -- the physical tip of the camera,
+# and the datum working distance is measured from. CAD (camera_asm_wo_light.stp, flange, mm):
 #   flange 0 | PCB_2 122.7..124.3 | body_face 141.0 | lens barrel 157.5..218.770
 #   | VIEW_1 (50x50 inspection plane) 391.0..392.0
-# 391.0 - 141.0 = 250.0 exactly, so CAMERA_WORKING_DISTANCE_MM is now the vendor WD itself.
-# Until 2026-07-27 this was 0.346 = the front face of LIGHT_1, an illumination box that was
-# removed from the assembly; that left the frame floating 127 mm past the lens.
-OPTICAL_FRAME_X = 0.141
+# VIEW_1 sits at 391.0 = body_face + 250, the vendor's nominal WD; from the tip that is
+# 172.230. CAMERA_WORKING_DISTANCE_MM defaults to the value actually in use, not that one.
+# The tip is the one datum you can check with a ruler on site; body_face needs the CAD.
+# History: 0.346 (front face of LIGHT_1, an illumination box later removed from the assembly)
+# -> 0.141 (body_face, the vendor's 250 mm WD datum, 2026-07-27) -> 0.21877 (2026-08-27).
+# Same x_max as EXPECT_HI[0] above -- the frame now sits exactly on the baked mesh's tip.
+OPTICAL_FRAME_X = 0.21877
 
 DEFAULT_FACES = 130_000
 CREASE_ANGLE_DEG = 30.0

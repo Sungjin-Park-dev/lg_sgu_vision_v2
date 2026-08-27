@@ -72,9 +72,9 @@ OVERLAP_MAX_PCT = 90
 FOV_MIN_MM = 5.0
 FOV_MAX_MM = 500.0
 WD_MAX_MM = 800.0
-# WD 하한은 물리 제약(검사면이 렌즈 배럴보다 앞에 있어야 한다)에서 온다. config 의 값은
-# 경계 자체(그 값이면 렌즈 앞면과 정확히 겹침)라 입력칸 하한은 1mm 안쪽으로 올린다 —
-# working_distance_error 가 경계를 실패로 보므로 하한이 곧 유효한 최솟값이 된다.
+# WD 하한은 물리 제약(검사면이 카메라 끝보다 앞에 있어야 한다)에서 온다. optical_frame 이
+# 렌즈 앞면에 있어 config 의 값은 0 이고, 그 경계(= 검사면이 렌즈 앞면과 정확히 겹침)를
+# working_distance_error 가 실패로 보므로 입력칸 하한은 1mm 안쪽으로 올린다.
 WD_MIN_MM = float(int(config.CAMERA_MIN_WORKING_DISTANCE_MM) + 1)
 # Saved-viewpoints 드롭다운의 두 특수 항목. GENERATED 는 "만들었지만 아직 디스크에 없다" 는
 # 상태를 드롭다운이 스스로 말하게 하려고 둔다 — 예전에는 Generate 든 Save 든 (none) 이라

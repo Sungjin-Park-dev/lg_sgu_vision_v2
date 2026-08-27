@@ -36,12 +36,12 @@ YAML 의 그 상자를 고치고, **`position[2]` 도 같이 내려 상면이 z=
 | 항목 | 값 | 코드 심볼 |
 |---|---|---|
 | FOV_footprint 가정 | 50 × 50 mm (트릭, 실광학 아님. CAD `VIEW_1` 과 일치) | `CAMERA_FOV_WIDTH/HEIGHT_MM` |
-| WD (optical_frame=body_face→object, 벤더공칭과 동일 기준) | 250 mm | `CAMERA_WORKING_DISTANCE_MM` |
-| WD 하한 (렌즈 간섭) | 77.8 mm | `CAMERA_MIN_WORKING_DISTANCE_MM` |
-| mount_offset (flange→optical_frame) | 0.141 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
+| WD (optical_frame=**카메라 끝**→object. 실사용 값 273 − 77.770 = 195.23 을 정수로) | 195 mm | `CAMERA_WORKING_DISTANCE_MM` |
+| WD 하한 (검사면이 카메라 끝보다 앞) | 0 mm | `CAMERA_MIN_WORKING_DISTANCE_MM` |
+| mount_offset (flange→optical_frame=렌즈 앞면) | 0.21877 m (하드웨어 상수, URDF가 소유) | `TOOL_TO_CAMERA_OPTICAL_OFFSET_M` |
 | lens_front (flange→렌즈 앞면) | 0.21877 m (CAD 실측) | `CAMERA_LENS_FRONT_OFFSET_M` |
 | overlap | 0.5 | `CAMERA_OVERLAP_RATIO` |
-| 렌더 near clip | 79.8 mm (= 렌즈 배럴 끝 + 2) | `CAMERA_NEAR_CLIP_M` |
+| 렌더 near clip | 10 mm (기하 파생 아님 — 카메라 원점 앞을 가리는 부품이 없다) | `CAMERA_NEAR_CLIP_M` |
 | 퍼블리시 해상도 | FOV 비율에서 유도 (50×50 → 880×880) | `CAMERA_PUBLISH_W/H` |
 | 렌즈 / 센서 | MFA121-U50 f=50mm / AR0820 8.08×4.55mm | — |
 

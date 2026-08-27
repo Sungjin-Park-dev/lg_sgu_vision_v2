@@ -27,12 +27,18 @@ DATA_ROOT = PROJECT_ROOT / "data"
 CAMERA_FOV_WIDTH_MM = 50.0
 CAMERA_FOV_HEIGHT_MM = 50.0
 
-# WD = frame_standoff (mm): optical_frame(=body_face) → object_plane 거리.
-#   optical_frame 이 카메라 몸체 앞면에 있으므로 이 값이 곧 **벤더 공칭 WD** 다 (2026-07-27 정렬).
-#   CAD(camera_asm_wo_light.stp) 실측: body_face=flange+141.0, VIEW_1(검사면)=flange+391.0
-#   → 391.0 - 141.0 = 250.0. poses.py 가 이 값으로 viewpoint 를 표면에서 띄운다.
+# WD = frame_standoff (mm): optical_frame(= 렌즈 배럴 앞면 = **카메라의 끝**) → object_plane 거리.
+#   poses.py 가 이 값으로 viewpoint 를 표면에서 띄운다. 검사면은 flange+(218.770 + WD).
+#   ⚠️ 2026-08-27 에 기준점이 body_face(flange+141.0) → lens_front(flange+218.770) 로
+#      77.770mm 앞으로 왔다. **구 기준 값 환산: 새 WD = 구 WD − 77.770**
+#      (벤더 공칭 250 → 172.23, 실사용 273 → 195.23).
+#   기본값 195 는 실사용 값(구 기준 273 = 195.23)을 정수로 끊은 것이다. 그 273 자체가
+#   스튜디오에서 손으로 고른 값이라 소수점 둘째 자리에 근거가 없다. 0.23mm 차이는
+#   도달성에 영향 없음을 확인했다(cylinder_sample/132 둘 다 118/132).
+#   CAD 의 VIEW_1 판(flange+391.0)은 벤더 공칭 250 에 대응하는 자리라 기본값과 다르다 —
+#   그쪽을 쓰려면 172.23 을 넣는다.
 #   바꾸면 물체면이 실제로 이동 → viewpoint h5 재생성 + 도달성/충돌 재검증 필요.
-CAMERA_WORKING_DISTANCE_MM = 250.0
+CAMERA_WORKING_DISTANCE_MM = 195.0
 
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
@@ -269,42 +275,52 @@ load_scene(DEFAULT_SCENE)
 DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
 
 # mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
-# optical_frame = 카메라 몸체 앞면(body_face). CAD 실측 flange+141.0mm.
+# optical_frame = 렌즈 배럴 앞면(lens_front) = 카메라의 물리적 끝. CAD 실측 flange+218.770mm.
 # ⚠️ 하드웨어 상수 — 튜닝 대상이 아니다. 기하를 실제로 만드는 것은 URDF(camera_optical_joint)와
 #    USD 지만, 이 상수는 **참고용 사본이 아니다**: 바로 아래 CAMERA_MIN_WORKING_DISTANCE_MM
-#    (WD 검증 하한)과 CAMERA_NEAR_CLIP_M(렌더 near clip)이 여기서 파생된다. 셋이 어긋나면
-#    검증과 렌더가 로봇과 다른 카메라를 가정하게 된다.
+#    (WD 검증 하한)이 여기서 파생된다. 둘이 어긋나면 검증이 로봇과 다른 카메라를 가정하게 된다.
 #    바꿀 때는 URDF·USD·이 상수를 함께 — 체크리스트는 docs/reference/robot-camera-assets.md.
-TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.141
+TOOL_TO_CAMERA_OPTICAL_OFFSET_M = 0.21877
 
 # flange → 렌즈 배럴 끝 (CAD 실측, docs/reference/camera-geometry.md §A).
 # 같은 값이 build_camera_mesh.EXPECT_HI[0] 와 inspect_camera_step.EXPECT 에도 있는데,
 # 그 둘은 CAD 를 검증하는 독립 assert 라 검증 대상을 import 하면 의미를 잃는다 — 의도된 중복.
+# 2026-08-27 부터 optical_frame 도 같은 자리라 위 상수와 값이 같다. 그래도 **합치지 않는다**:
+# 하나는 "카메라 기하의 사실", 다른 하나는 "툴 프레임을 어디 뒀나" 라 언제든 다시 갈릴 수 있고,
+# 아래 하한 수식이 둘의 차이로 표현돼 있어야 그 관계가 코드에 남는다.
 CAMERA_LENS_FRONT_OFFSET_M = 0.21877
 
 # WD 하한 (mm): 이보다 작으면 검사면(= mount_offset + WD)이 렌즈 앞면보다 뒤 —
-# 기하학적으로 불가능하다. 77.77mm = 배럴 길이. viewpoint 생성/로드에서 이 값으로 검증한다.
+# 기하학적으로 불가능하다. viewpoint 생성/로드에서 이 값으로 검증한다.
+# optical_frame 이 렌즈 앞면으로 오면서 이 값은 **0.0** 이 됐다(= 검사면이 카메라 끝보다
+# 앞이기만 하면 된다). 수식을 상수 0 으로 접지 않는 이유는 위 두 상수의 관계 그 자체가
+# 하한의 정의이기 때문이다 — 프레임을 다시 옮기면 하한도 따라 움직여야 한다.
 CAMERA_MIN_WORKING_DISTANCE_MM = (
     CAMERA_LENS_FRONT_OFFSET_M - TOOL_TO_CAMERA_OPTICAL_OFFSET_M
 ) * 1000.0
 
-# 렌더 카메라 near clip (m). optical_frame 이 body_face 로 내려오면서 카메라 원점이
-# **자기 렌즈 배럴 안**에 들어갔다 — 카메라 앞 77.8mm 까지가 배럴 내부다. near 를 그 너머로
-# 두지 않으면 렌더 화면이 배럴로 가득 찬다(실제 카메라도 자기 배럴은 보지 못한다).
-# 배럴 끝에 딱 맞추면 얇은 테두리가 남을 수 있어 2mm 여유를 준다.
-CAMERA_NEAR_CLIP_M = (CAMERA_MIN_WORKING_DISTANCE_MM + 2.0) / 1000.0
+# 렌더 카메라 near clip (m). **기하에서 파생되지 않는다** — optical_frame 이 배럴 끝으로
+# 올라오면서 카메라 원점 앞을 가리는 자기 부품이 사라졌다(구 기준에서는 앞 77.8mm 가 배럴
+# 내부라 near 를 그 너머로 밀어야 화면이 배럴로 가득 차지 않았다). 지금 남은 요구는
+# "0 이 아닐 것" 뿐이라, 깊이 버퍼 정밀도에 여유를 주는 작은 값을 그냥 고른다.
+CAMERA_NEAR_CLIP_M = 0.01
 CAMERA_FAR_CLIP_M = 5.0
 
 
 def working_distance_error(wd_mm: float) -> str | None:
     """WD(mm)가 기하학적으로 불가능하면 사유 문자열, 정상이면 None.
 
-    검사면은 flange 기준 ``mount_offset + WD`` 에 놓인다. 그게 렌즈 앞면보다 뒤라면 물체가
-    렌즈 배럴 안에 있다는 뜻이라 어떤 배치로도 성립하지 않는다.
+    검사면은 flange 기준 ``mount_offset + WD`` 에 놓인다. optical_frame 이 렌즈 배럴 앞면
+    (카메라의 끝)에 있으므로, WD 가 0 이하면 검사면이 카메라 안쪽이라는 뜻이라 어떤 배치로도
+    성립하지 않는다.
 
     "config 값과 다른가"를 보지 않는 이유: WD 는 카메라 스펙에 따라 조절하는 값이라
-    기본값과 다른 것 자체는 결함이 아니다. 대신 물리적으로 불가능한 값만 잡는다
-    (구 optical_frame 0.346 시절의 h5 는 WD 46mm 라 여기 걸린다).
+    기본값과 다른 것 자체는 결함이 아니다. 대신 물리적으로 불가능한 값만 잡는다.
+
+    ⚠️ **구 기준(body_face) 값은 여기서 못 잡는다.** 2026-08-27 이전에 만든 h5 의 WD 는
+    77.770mm 더 큰 숫자이고(예: 250, 273), 새 기준에서도 전부 유효한 값이라 조용히 통과한다 —
+    그대로 쓰면 검사면이 그만큼 멀리 잡힌다. 환산은 ``새 WD = 구 WD − 77.770``.
+    (구 기준을 식별하는 태그는 아직 h5 에 없다 — camera-geometry.md §미해결 참고.)
 
     반환 문자열은 채널을 정하지 않는다 — 읽는 쪽이 print / parser.error / GUI 로 각자 쓴다.
     """
@@ -313,9 +329,8 @@ def working_distance_error(wd_mm: float) -> str | None:
     object_plane_mm = (TOOL_TO_CAMERA_OPTICAL_OFFSET_M * 1000.0) + wd_mm
     return (
         f"working distance {wd_mm:.1f}mm 는 불가능하다 — 검사면이 flange+{object_plane_mm:.1f}mm 로 "
-        f"렌즈 앞면(flange+{CAMERA_LENS_FRONT_OFFSET_M * 1000.0:.1f}mm)보다 뒤에 있다. "
-        f"최소 {CAMERA_MIN_WORKING_DISTANCE_MM:.1f}mm. "
-        f"optical_frame 이전(2026-07-27) 전에 만든 파일이면 재생성할 것 "
+        f"카메라 끝(렌즈 앞면, flange+{CAMERA_LENS_FRONT_OFFSET_M * 1000.0:.1f}mm)보다 뒤에 있다. "
+        f"최소 {CAMERA_MIN_WORKING_DISTANCE_MM:.1f}mm 초과여야 한다 "
         f"(docs/reference/camera-geometry.md)."
     )
 

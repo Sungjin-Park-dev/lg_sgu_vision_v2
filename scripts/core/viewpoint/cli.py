@@ -64,9 +64,9 @@ Examples:
                         help='FOV overlap ratio 0~1 '
                              f'(default: {config.CAMERA_OVERLAP_RATIO}). --row/col-spacing 이 우선')
     parser.add_argument('--working-distance', type=float, default=None,
-                        help='Working distance in mm — 카메라 몸체 앞면에서 검사면까지 '
-                             f'(default: {config.CAMERA_WORKING_DISTANCE_MM:.0f}, '
-                             f'최소 {config.CAMERA_MIN_WORKING_DISTANCE_MM:.1f})')
+                        help='Working distance in mm — 카메라 끝(렌즈 배럴 앞면)에서 검사면까지 '
+                             f'(default: {config.CAMERA_WORKING_DISTANCE_MM:g}, '
+                             f'최소 {config.CAMERA_MIN_WORKING_DISTANCE_MM:.1f} 초과)')
     parser.add_argument('--no-filter-bottom', action='store_true', default=False,
                         help='Disable bottom-face filtering')
     parser.add_argument('--bottom-angle', type=float, default=80.0,

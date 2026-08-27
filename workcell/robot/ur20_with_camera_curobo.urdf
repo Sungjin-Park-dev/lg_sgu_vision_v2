@@ -541,9 +541,12 @@
     <child link="camera_link" />
   </joint>
   <joint name="camera_optical_joint" type="fixed">
-    <!-- 0.141 = 카메라 몸체 앞면(body_face), CAD 실측. 벤더 WD 250mm 의 기준점이다.
-         (구값 0.346 은 제거된 조명박스 LIGHT_1 앞면 — camera-geometry.md 참고) -->
-    <origin xyz="0.141 0 0" rpy="1.5707963268 -0.0000000000 1.5707963268" />
+    <!-- 0.21877 = 렌즈 배럴 앞면 = 카메라의 물리적 최전단, CAD 실측. **WD 는 여기서 잰다** —
+         현장에서 자로 확인할 수 있는 유일한 기준점이다(2026-08-27 이전).
+         구값 0.141 은 커버 앞면(body_face)으로 벤더 공칭 WD 250mm 의 기준점이었다. 기준점이
+         77.770mm 앞으로 왔으므로 같은 검사면을 유지하려면 WD 도 그만큼 줄인다(250 → 172.23).
+         (그 이전 0.346 은 제거된 조명박스 LIGHT_1 앞면 — camera-geometry.md 참고) -->
+    <origin xyz="0.21877 0 0" rpy="1.5707963268 -0.0000000000 1.5707963268" />
     <parent link="camera_link" />
     <child link="camera_optical_frame" />
   </joint>
