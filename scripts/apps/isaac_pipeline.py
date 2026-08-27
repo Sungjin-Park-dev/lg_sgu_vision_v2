@@ -1005,6 +1005,11 @@ class PipelineWindow:
         self._pub_runner = SubprocessRunner()
         self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
         self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
+        # Viewpoint Studio(브라우저 앱)는 이 앱과 독립적인 별개 프로그램이다 — 스테이지도
+        # 다른 러너도 건드리지 않고, 오래 살아 있는 서버라 작업 러너와 섞을 수 없다.
+        self._studio_runner = SubprocessRunner()
+        self._studio_status_label = None
+        self._studio_port = 8080
         # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
@@ -1115,6 +1120,9 @@ class PipelineWindow:
                 with ui.VStack(height=0, spacing=6):
                     self._build_panel_pipeline_mode()
                     self._build_panel_mode()
+                    # 물체를 올리기 **전에** 오는 것: 이 앱의 입력인 viewpoint h5 를 만드는
+                    # 도구다. 여기서 만들고 저장한 파일을 바로 아래 패널이 골라 쓴다.
+                    self._build_panel_viewpoint_studio()
                     self._build_panel_object()
                     # IK 는 궤적 생성과 다른 단계다 — 산출물(ik/{N}/*.h5)이 따로 남고
                     # 여러 번의 Generate 가 그걸 재사용한다. 그래서 패널도 따로 둔다.
@@ -1608,6 +1616,81 @@ class PipelineWindow:
             self._append_log(
                 f"[scene] {path} -> paste into obstacles: in workcell/scenes/{self._scene}.yaml\n"
                 f"{snippet}")
+
+    def _build_panel_viewpoint_studio(self):
+        """Viewpoint Studio(브라우저 앱)를 여기서 띄운다 — 이 앱의 입력을 만드는 도구다.
+
+        Inspection 잠금(_inspection_frames/_lock)에 넣지 않는다. 스테이지도 러너도 공유하지
+        않는 **별개 프로그램**이라, 생성이 도는 중이든 MoveIt 모드든 막을 이유가 없다
+        (Pipeline/Run Mode 콤보를 잠금 목록에 넣지 않는 것과 같은 이유다).
+
+        브라우저는 열어 주지 않는다 — 컨테이너에 브라우저가 없다. 서버만 띄우고 주소를
+        로그와 상태 줄에 찍는다. 컨테이너가 host 네트워크라 호스트에서 그대로 열린다.
+        """
+        ui = self._ui
+        with ui.CollapsableFrame("Viewpoint Studio", height=0, collapsed=False):
+            with ui.VStack(spacing=4):
+                ui.Label(
+                    "Creates the viewpoints .h5 this pipeline consumes. Opens a web app - "
+                    "start it here, then open the address below in your browser.",
+                    height=30, word_wrap=True)
+                with ui.HStack(height=28, spacing=6):
+                    ui.Label("port", width=40)
+                    port_field = ui.IntField(width=70)
+                    port_field.model.set_value(self._studio_port)
+                    self._fields["studio_port"] = port_field.model
+                    self._btn_studio = ui.Button(
+                        "Open Viewpoint Studio", clicked_fn=self._on_open_viewpoint_studio)
+                    ui.Button("Stop", width=70, clicked_fn=self._on_stop_viewpoint_studio)
+                self._studio_status_label = ui.Label("", height=20)
+                self._sync_studio_status()
+
+    def _studio_url(self) -> str:
+        return f"http://localhost:{max(1, int(self._get_field('studio_port', int)))}"
+
+    def _sync_studio_status(self):
+        """상태 줄 한 줄 — 지금 도는가, 돌면 어디로 접속하는가."""
+        if self._studio_status_label is None:
+            return
+        if self._studio_runner.running:
+            self._studio_status_label.text = f"running - open {self._studio_url()}"
+            self._studio_status_label.style = {"color": 0xFF33CC33}
+        else:
+            self._studio_status_label.text = "not running"
+            self._studio_status_label.style = self._DIM_WIDGET_STYLE
+
+    def _on_open_viewpoint_studio(self):
+        """Studio 를 띄운다. 이미 돌고 있으면 주소만 다시 알려준다(죽이지 않는다)."""
+        if self._studio_runner.running:
+            self._append_log(
+                f"[studio] already running - open {self._studio_url()} in your browser.")
+            self._sync_studio_status()
+            return
+        port = max(1, int(self._get_field("studio_port", int)))
+        shell = (f"{self._uv} run scripts/apps/viewpoint_studio.py --port {port}")
+
+        def on_exit(rc: int):
+            self._append_log(
+                "[studio] stopped." if self._studio_runner.cancelled
+                else f"[studio] exited with code {rc}."
+                     + ("  (port already in use? try another port.)" if rc != 0 else ""))
+            self._sync_studio_status()
+
+        self._append_log(f"[studio] $ {shell}")
+        self._studio_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
+                                  on_line=self._append_log, on_exit=on_exit)
+        self._append_log(
+            f"[studio] starting - it takes a few seconds, then open "
+            f"http://localhost:{port} in your browser.")
+        self._sync_studio_status()
+
+    def _on_stop_viewpoint_studio(self):
+        if not self._studio_runner.running:
+            self._append_log("[studio] not running.")
+            return
+        self._studio_runner.terminate()
+        self._append_log("[studio] stopping...")
+        self._sync_studio_status()
 
     def _build_panel_object(self):
         """검사 대상 정의 — 물체, 그 물체의 viewpoint h5, 그리고 카메라 스펙.
@@ -4631,6 +4714,7 @@ class PipelineWindow:
         self._pub_runner.pump()
         self._ctrl_runner.pump()
         self._relay_runner.pump()
+        self._studio_runner.pump()
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
         try:
@@ -4817,6 +4901,10 @@ def main():
             except Exception:  # noqa: BLE001 — not ready yet; retry next frame
                 pass
 
+    # Studio 는 자기 프로세스 그룹으로 떠 있어서 앱이 닫혀도 살아남는다 — 포트를 물고
+    # 남으면 다음 실행이 조용히 실패한다.
+    if window._studio_runner.running:
+        window._studio_runner.terminate()
     simulation_context.stop()
     simulation_app.close()
 

@@ -206,6 +206,11 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 </div>
 <p>브라우저에서 <code>http://localhost:8080</code>에 접속한다. 3D 뷰가 왼쪽 대부분을 차지하고, 오른쪽에 접이식 설정 패널이 붙는다.</p>
 
+<div class="note">
+  <span class="note__label">Isaac Pipeline 안에서 열어도 된다</span>
+  <p>Isaac Pipeline의 맨 위 <span class="ui">Viewpoint Studio</span> 패널에서 <span class="ui">Open Viewpoint Studio</span>를 누르면 같은 앱이 뜬다. 터미널을 하나 더 열 필요가 없다. 브라우저는 열어 주지 않으므로, 상태 줄에 뜨는 주소를 브라우저에 붙여 넣는다.</p>
+</div>
+
 <div class="plate" data-kind="사진" data-id="PLATE 03">
   <p>Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.</p>
 </div>
@@ -538,12 +543,13 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
   <tbody>
     <tr><td>1</td><td><span class="ui">Pipeline Mode</span></td><td>명령 주체 선택 (Inspection / MoveIt)</td></tr>
     <tr><td>2</td><td><span class="ui">Run Mode</span></td><td>대상 로봇 선택 (Simulation / Real)</td></tr>
-    <tr><td>3</td><td><span class="ui">Load Object &amp; Viewpoints</span></td><td>물체를 놓고 viewpoint 파일을 고른다</td></tr>
-    <tr><td>4</td><td><span class="ui">Solve IK</span></td><td>각 viewpoint에 팔이 닿는지 확인하고 해를 저장</td></tr>
-    <tr><td>5</td><td><span class="ui">Motion Speed</span></td><td>만들어질 경로의 실행 속도를 정한다</td></tr>
-    <tr><td>6</td><td><span class="ui">Generate Trajectory</span></td><td>검사 경로 또는 tilt 경로를 만든다</td></tr>
-    <tr><td>7</td><td><span class="ui">Preview in Simulation</span></td><td>고스트 로봇으로 재생해 확인</td></tr>
-    <tr><td>8</td><td><span class="ui">Execute Trajectory</span></td><td>실제로 움직인다</td></tr>
+    <tr><td>3</td><td><span class="ui">Viewpoint Studio</span></td><td>viewpoint를 만드는 웹 앱을 띄운다 — 이 파이프라인의 입력을 준비하는 자리</td></tr>
+    <tr><td>4</td><td><span class="ui">Load Object &amp; Viewpoints</span></td><td>물체를 놓고 viewpoint 파일을 고른다</td></tr>
+    <tr><td>5</td><td><span class="ui">Solve IK</span></td><td>각 viewpoint에 팔이 닿는지 확인하고 해를 저장</td></tr>
+    <tr><td>6</td><td><span class="ui">Motion Speed</span></td><td>만들어질 경로의 실행 속도를 정한다</td></tr>
+    <tr><td>7</td><td><span class="ui">Generate Trajectory</span></td><td>검사 경로 또는 tilt 경로를 만든다</td></tr>
+    <tr><td>8</td><td><span class="ui">Preview in Simulation</span></td><td>고스트 로봇으로 재생해 확인</td></tr>
+    <tr><td>9</td><td><span class="ui">Execute Trajectory</span></td><td>실제로 움직인다</td></tr>
     <tr><td>—</td><td><span class="ui">Scene (obstacles)</span></td><td>워크셀 실측 보조 도구 (평소엔 접어 둔다)</td></tr>
     <tr><td>—</td><td><span class="ui">Log</span></td><td>모든 작업의 출력이 흘러나오는 곳</td></tr>
   </tbody>
@@ -551,7 +557,24 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 </div>
 
 
-<h3>3 · Load Object &amp; Viewpoints</h3>
+<h3>3 · Viewpoint Studio</h3>
+<p>2단계의 웹 앱을 이 창에서 바로 띄운다. 터미널을 하나 더 열지 않아도 된다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">port</span></td><td>웹 앱이 쓸 포트 (기본 <code>8080</code>). 이미 쓰는 중이면 다른 값으로 바꾼다</td></tr>
+    <tr><td><span class="ui">Open Viewpoint Studio</span></td><td>앱을 띄운다. 몇 초 걸리고, 뜨면 아래 상태 줄에 주소가 나온다. <strong>브라우저는 열어 주지 않는다</strong> — 주소를 브라우저에 붙여 넣는다</td></tr>
+    <tr><td><span class="ui">Stop</span></td><td>앱을 내린다. Isaac Pipeline을 닫을 때도 같이 내려간다</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note">
+  <span class="note__label">이 패널만 잠기지 않는다</span>
+  <p>경로 생성이나 실행이 도는 중에도, MoveIt 모드에서도 쓸 수 있다. 이 파이프라인과 스테이지도 작업도 공유하지 않는 <strong>별개 프로그램</strong>이기 때문이다.</p>
+</div>
+
+<h3>4 · Load Object &amp; Viewpoints</h3>
 <p>검사 대상을 정의하는 자리다. 물체가 <strong>어디에 놓여 있는지</strong>가 이후 모든 계획의 전제가 된다.</p>
 
 <div class="tw">
@@ -593,7 +616,7 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 </div>
 
 
-<h3>4 · Solve IK</h3>
+<h3>5 · Solve IK</h3>
 <p>각 viewpoint에 대해 <strong>팔이 그 자세를 만들 수 있는지</strong>를 확인하고, 가능한 관절 조합(IK 해)을 파일로 저장한다. 물체·viewpoint당 한 번만 하면 되고, 이후 경로 생성이 이 결과를 재사용한다.</p>
 
 <div class="tw">
@@ -634,7 +657,7 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 </div>
 
 
-<h3>5 · Motion Speed</h3>
+<h3>6 · Motion Speed</h3>
 <p>앞으로 만들 경로가 <strong>얼마나 빠르게 실행될지</strong>를 정한다. 이 값들은 경로를 만드는 순간 파일에 함께 구워지므로, <strong>경로를 만들기 전에</strong> 정해야 한다. 이미 만든 경로는 예전 속도를 그대로 갖고 있다.</p>
 
 <div class="tw">
@@ -658,7 +681,7 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 </div>
 
 
-<h3>6 · Generate Trajectory</h3>
+<h3>7 · Generate Trajectory</h3>
 <p>실제 실행할 경로를 만든다. 두 종류를 만들 수 있다.</p>
 
 <h4>Scan options (GLNS) — 검사 경로</h4>
@@ -732,7 +755,7 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 </div>
 
 
-<h3>7 · Preview in Simulation</h3>
+<h3>8 · Preview in Simulation</h3>
 <p>만든 경로를 <strong>반투명 고스트 로봇</strong>으로 재생해 본다. 진짜 로봇은 전혀 움직이지 않으므로 안전하고, Simulation·Real 어느 모드에서도 쓸 수 있다.</p>
 
 <div class="tw">
@@ -768,7 +791,7 @@ CSV path: .../trajectory/74/trajectory.csv
 </div>
 
 
-<h3>8 · Execute Trajectory</h3>
+<h3>9 · Execute Trajectory</h3>
 <p>여기서부터는 로봇이 진짜로 움직인다. 구조는 단순하다 — <strong>먼저 계획해서 눈으로 보고, 그 다음에 움직인다.</strong></p>
 
 <div class="tw">

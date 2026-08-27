@@ -135,6 +135,10 @@ uv run scripts/apps/viewpoint_studio.py
 
 브라우저에서 `http://localhost:8080`에 접속한다. 3D 뷰가 왼쪽 대부분을 차지하고, 오른쪽에 접이식 설정 패널이 붙는다.
 
+> 💡 **Isaac Pipeline 안에서 열어도 된다**
+>
+> Isaac Pipeline의 맨 위 `Viewpoint Studio` 패널에서 `Open Viewpoint Studio`를 누르면 같은 앱이 뜬다. 터미널을 하나 더 열 필요가 없다. 브라우저는 열어 주지 않으므로, 상태 줄에 뜨는 주소를 브라우저에 붙여 넣는다.
+
 > 📷 **PLATE 03 · 사진**
 >
 > Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.
@@ -415,16 +419,31 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 | --- | --- | --- |
 | 1 | `Pipeline Mode` | 명령 주체 선택 (Inspection / MoveIt) |
 | 2 | `Run Mode` | 대상 로봇 선택 (Simulation / Real) |
-| 3 | `Load Object & Viewpoints` | 물체를 놓고 viewpoint 파일을 고른다 |
-| 4 | `Solve IK` | 각 viewpoint에 팔이 닿는지 확인하고 해를 저장 |
-| 5 | `Motion Speed` | 만들어질 경로의 실행 속도를 정한다 |
-| 6 | `Generate Trajectory` | 검사 경로 또는 tilt 경로를 만든다 |
-| 7 | `Preview in Simulation` | 고스트 로봇으로 재생해 확인 |
-| 8 | `Execute Trajectory` | 실제로 움직인다 |
+| 3 | `Viewpoint Studio` | viewpoint를 만드는 웹 앱을 띄운다 — 이 파이프라인의 입력을 준비하는 자리 |
+| 4 | `Load Object & Viewpoints` | 물체를 놓고 viewpoint 파일을 고른다 |
+| 5 | `Solve IK` | 각 viewpoint에 팔이 닿는지 확인하고 해를 저장 |
+| 6 | `Motion Speed` | 만들어질 경로의 실행 속도를 정한다 |
+| 7 | `Generate Trajectory` | 검사 경로 또는 tilt 경로를 만든다 |
+| 8 | `Preview in Simulation` | 고스트 로봇으로 재생해 확인 |
+| 9 | `Execute Trajectory` | 실제로 움직인다 |
 | — | `Scene (obstacles)` | 워크셀 실측 보조 도구 (평소엔 접어 둔다) |
 | — | `Log` | 모든 작업의 출력이 흘러나오는 곳 |
 
-### 3 · Load Object & Viewpoints
+### 3 · Viewpoint Studio
+
+2단계의 웹 앱을 이 창에서 바로 띄운다. 터미널을 하나 더 열지 않아도 된다.
+
+| 컨트롤 | 동작 |
+| --- | --- |
+| `port` | 웹 앱이 쓸 포트 (기본 `8080`). 이미 쓰는 중이면 다른 값으로 바꾼다 |
+| `Open Viewpoint Studio` | 앱을 띄운다. 몇 초 걸리고, 뜨면 아래 상태 줄에 주소가 나온다. **브라우저는 열어 주지 않는다** — 주소를 브라우저에 붙여 넣는다 |
+| `Stop` | 앱을 내린다. Isaac Pipeline을 닫을 때도 같이 내려간다 |
+
+> 💡 **이 패널만 잠기지 않는다**
+>
+> 경로 생성이나 실행이 도는 중에도, MoveIt 모드에서도 쓸 수 있다. 이 파이프라인과 스테이지도 작업도 공유하지 않는 **별개 프로그램**이기 때문이다.
+
+### 4 · Load Object & Viewpoints
 
 검사 대상을 정의하는 자리다. 물체가 **어디에 놓여 있는지**가 이후 모든 계획의 전제가 된다.
 
@@ -457,7 +476,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 >
 > `Show Viewpoints`를 누른 뒤의 뷰포트. 물체 표면 위에 검사 지점들이 점으로 찍혀 있는 모습.
 
-### 4 · Solve IK
+### 5 · Solve IK
 
 각 viewpoint에 대해 **팔이 그 자세를 만들 수 있는지**를 확인하고, 가능한 관절 조합(IK 해)을 파일로 저장한다. 물체·viewpoint당 한 번만 하면 되고, 이후 경로 생성이 이 결과를 재사용한다.
 
@@ -486,7 +505,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 >
 > 물체 위치를 조금 옮기거나 돌려 보면 크게 달라진다. 도달 가능한 지점 수는 배치에 매우 민감하다. `Load Object`로 다시 놓고 `Check and Save IK`를 다시 눌러 비교한다.
 
-### 5 · Motion Speed
+### 6 · Motion Speed
 
 앞으로 만들 경로가 **얼마나 빠르게 실행될지**를 정한다. 이 값들은 경로를 만드는 순간 파일에 함께 구워지므로, **경로를 만들기 전에** 정해야 한다. 이미 만든 경로는 예전 속도를 그대로 갖고 있다.
 
@@ -505,7 +524,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 >
 > `0`을 넣으면 그 제한 하나를 끄는 뜻이다. 음수는 받지 않는다.
 
-### 6 · Generate Trajectory
+### 7 · Generate Trajectory
 
 실제 실행할 경로를 만든다. 두 종류를 만들 수 있다.
 
@@ -560,7 +579,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 >
 > `Show Tilt Fan`을 눌러 물체 위에 부채꼴 궤적이 그려진 뷰포트. 상하 방향과 좌우 방향이 색으로 구분되어 보이는 각도.
 
-### 7 · Preview in Simulation
+### 8 · Preview in Simulation
 
 만든 경로를 **반투명 고스트 로봇**으로 재생해 본다. 진짜 로봇은 전혀 움직이지 않으므로 안전하고, Simulation·Real 어느 모드에서도 쓸 수 있다.
 
@@ -594,7 +613,7 @@ CSV path: .../trajectory/74/trajectory.csv
 >
 > `Load & Preview` → `Play`로 고스트가 검사 경로를 훑는 20 – 30초 클립. `Show FOV`를 켜 두어 카메라 화각이 물체 표면을 덮으며 지나가는 것이 보이면 좋다.
 
-### 8 · Execute Trajectory
+### 9 · Execute Trajectory
 
 여기서부터는 로봇이 진짜로 움직인다. 구조는 단순하다 — **먼저 계획해서 눈으로 보고, 그 다음에 움직인다.**
 
