@@ -1068,6 +1068,10 @@ class PipelineWindow:
         # Inspection widgets/frames locked (greyed) when pipeline mode = moveit.
         self._inspection_widgets: list = []
         self._inspection_frames: list = []
+        # _set_busy 가 건너뛸 위젯(id). 러너·로봇·생성 입력을 건드리지 않는 순수 시각화는
+        # 긴 작업 중에도 켜고 끌 수 있어야 한다 — 실행을 **보려고** 있는 물건이라
+        # 하필 실행 중에 잠기면 쓸 자리가 없다. MoveIt 모드 잠금에서는 빠지지 않는다.
+        self._busy_exempt_ids: set = set()
 
         self._window = ui.Window("Pipeline UI", width=520, height=820)
         self._default_object = default_object
@@ -1130,6 +1134,16 @@ class PipelineWindow:
         """Register an interactive widget so it greys out in MoveIt mode. Returns it."""
         self._inspection_widgets.append(widget)
         return widget
+
+    def _lock_view_only(self, widget):
+        """_lock 과 같되 **긴 작업 중에는 잠기지 않는다**(_set_busy 예외).
+
+        시각화 토글 전용이다: 스테이지에 선을 긋고 지울 뿐이라 러너·로봇·생성 입력 중
+        무엇도 건드리지 않는다. 잠글 이유가 없고, 오히려 실행 중에 가장 필요하다.
+        MoveIt 모드 잠금에는 그대로 포함된다 — 거기서는 패널 프레임 자체가 꺼진다.
+        """
+        self._busy_exempt_ids.add(id(widget))
+        return self._lock(widget)
 
     def _row(self, label: str, model, width: int = 180):
         ui = self._ui
@@ -1323,7 +1337,7 @@ class PipelineWindow:
         """
         self._busy_cancel = cancel_button
         for widget in self._inspection_widgets:
-            keep = widget is cancel_button
+            keep = widget is cancel_button or id(widget) in self._busy_exempt_ids
             try:
                 widget.enabled = keep
                 widget.style = {} if keep else self._DIM_WIDGET_STYLE
@@ -2743,22 +2757,28 @@ class PipelineWindow:
 
     def _build_camera_view_ui(self, key):
         """카메라별 스펙 입력 + 시각화 토글. 입력값은 이 카메라만의 모델(분리, 테스트용),
-        Reset 은 공유 default(로드된 뷰포인트 값)로 되돌린다."""
+        Reset 은 공유 default(로드된 뷰포인트 값)로 되돌린다.
+
+        이 줄 전체가 _lock_view_only 다 — 긴 작업 중에도 살아 있다. 스펙 칸까지 포함하는
+        이유: 토글만 살려두고 값을 못 고치면 반쪽이다(화각을 바꿔가며 보는 게 목적이다).
+        스펙 편집은 USD 카메라의 intrinsic 과 화면의 선만 바꾸고, 이미 만들어진 궤적이나
+        도는 중인 작업에는 닿지 않는다.
+        """
         ui = self._ui
         t = self._cam_targets[key]
         with ui.HStack(height=22, spacing=6):
             ui.Label("FOV W", width=44)
-            self._lock(ui.FloatField(model=t["fov_w"], width=60))
+            self._lock_view_only(ui.FloatField(model=t["fov_w"], width=60))
             ui.Label("FOV H", width=44)
-            self._lock(ui.FloatField(model=t["fov_h"], width=60))
+            self._lock_view_only(ui.FloatField(model=t["fov_h"], width=60))
             ui.Label("WD", width=24)
-            self._lock(ui.FloatField(model=t["wd"], width=60))
-            self._lock(ui.Button(
+            self._lock_view_only(ui.FloatField(model=t["wd"], width=60))
+            self._lock_view_only(ui.Button(
                 "Reset", width=64, clicked_fn=lambda k=key: self._on_reset_camera_spec(k)))
         with ui.HStack(height=28, spacing=6):
-            t["btn_fov"] = self._lock(ui.Button(
+            t["btn_fov"] = self._lock_view_only(ui.Button(
                 "Show FOV", clicked_fn=lambda k=key: self._on_toggle_fov(k)))
-            t["btn_range"] = self._lock(ui.Button(
+            t["btn_range"] = self._lock_view_only(ui.Button(
                 "Show Camera Range", clicked_fn=lambda k=key: self._on_toggle_range(k)))
 
     def _find_camera_prim(self, stage, key):
