@@ -76,30 +76,9 @@ INSPECTION_CAMERA_INFO_TOPIC = "/inspection_camera/camera_info"
 MOVEIT_JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"   # ROS→Isaac (MoveIt 위치 명령)
 MOVEIT_JOINT_STATES_TOPIC = "/isaac_joint_states"       # Isaac→ROS (로봇 상태 피드백)
 
-# 로봇 시작 자세 (radian). **한 값이 두 역할을 겸한다** — 나중에 나눌 여지가 있다:
-#   셀 종속  : HOME 자세 (verify/motion 의 transit 브래킷, Return to HOME 목표, 스튜디오 초기 렌더)
-#   알고리즘 : GLNS 의 reference_joints (IK 후보 선택 기준), [-1] = scan 구간 wrist_3 잠금값
-# 현장에서 HOME 을 바꾸면 IK 후보 선택 기준까지 같이 바뀐다는 뜻이다. 지금은 값이 하나라
-# 여기 두지만, 도달성이 예상과 다르게 움직이면 이 결합을 먼저 의심할 것.
-# ROBOT_START_STATE = np.array([-1.67422354221344, -1.216842532157898, 1.6096495389938354, -2.0281713008880615, -1.5707969665527344, -0.031])
-# ROBOT_START_STATE = np.array([-1.6007, -1.7271, -2.203, -0.808, 1.5951, -0.031])
+# 실제 로봇 현재 자세 기준 vSample115
+ROBOT_START_STATE = np.deg2rad([-198, -79, 101, 49, 84, 73])
 
-# ROBOT_START_STATE = np.array([-2.0, -1.6, -1.8, -0.7, 1.8, -0.031])
-# ROBOT_START_STATE = np.deg2rad([-270, -90, 60, -90, -90, 0])
-
-# 실제 로봇 현재 자세 기준 (rad)
-# ROBOT_START_STATE = np.array([1.5, -1.5, 2.0, -0.5, 1.5, 0.0])
-
-# 실제 로봇 현재 자세 기준 1 (deg)
-ROBOT_START_STATE = np.deg2rad([3.59, -111.84, -92.06, -66.09, 90.06, -99.61])
-
-# 실제 로봇 현재 자세 기준 2 (deg)
-# ROBOT_START_STATE = np.deg2rad([27.22, -114.96, -87.35, -67.68, 90.07, -75.98])
-
-
-# 1.4753616491900843,-1.4261000792132776,2.299572706222534,-0.4354444742202759,1.4843419233905237,0.0,-0.15000295639038086,0.8933659791946411,0.222349613904953,-0.017051808536052704,-0.8432048559188843,-0.5372121930122375,0.010853501968085766
-
-# ROBOT_START_STATE = np.deg2rad([-90, -120, -60, -90, 90, 0])
 
 
 # ============================================================================
