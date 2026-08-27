@@ -1859,7 +1859,7 @@ class PipelineWindow:
                 # 살아있는 기즈모 값이다.
                 with ui.CollapsableFrame("Scan options (GLNS)", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
-                        self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 2)
+                        self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 4)
                         self._fields["glns_max_candidates"] = self._row(
                             "--max-candidates-per-viewpoint", 32)
                 with ui.HStack(height=28, spacing=6):
