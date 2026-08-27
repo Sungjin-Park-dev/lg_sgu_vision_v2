@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LooksGood 핸드북</title>
+<!--
+  스타일은 최소한만 넣어 뒀다(읽을 수 있을 정도). 디자인은 이 <style> 블록을 통째로
+  갈아끼우면 된다. 아래 클래스 훅이 붙어 있다:
+
+    .doc            전체 래퍼
+    section[id]     각 장 (id 는 목차 링크와 짝)
+    .toc            목차
+    .term           터미널 명령 블록  (내부: .term__tag 실행 위치, pre)
+    .note           강조 박스        (변형: .note--warn 주의, .note--real 실로봇)
+    .note__label    강조 박스의 라벨
+    .plate          사진/영상 자리    (data-kind="사진" | "영상", data-id="PLATE 01")
+    .ui             화면에 그대로 보이는 컨트롤 이름
+    .steps          순서가 있는 절차
+    table.grid      일반 표 / table.matrix 모드 2x2
+-->
+<style>
+  :root { --fg:#111; --fg2:#555; --line:#ddd; --bg:#fff; --box:#f6f6f6; }
+  body { max-width: 62rem; margin: 0 auto; padding: 2rem 1.5rem 6rem;
+         font-family: system-ui, -apple-system, "Malgun Gothic", sans-serif;
+         line-height: 1.7; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 2rem; margin: 0 0 .5rem; }
+  h2 { font-size: 1.5rem; margin: 3rem 0 .25rem; padding-top: 1rem; border-top: 2px solid var(--fg); }
+  h3 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
+  h4 { font-size: .95rem; margin: 1.5rem 0 .4rem; color: var(--fg2); }
+  p, ul, ol { max-width: 68ch; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em;
+         background: var(--box); padding: .1em .3em; border-radius: 3px; }
+  .ui { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em;
+        font-weight: 600; background: var(--box); padding: .1em .3em; border-radius: 3px;
+        white-space: nowrap; }
+  .term { border: 1px solid var(--line); border-radius: 4px; margin: 0 0 1.25rem; overflow: hidden; }
+  .term__tag { font-size: .78rem; color: var(--fg2); background: var(--box);
+               padding: .35rem .75rem; border-bottom: 1px solid var(--line); }
+  .term pre { margin: 0; padding: .75rem; overflow-x: auto; font-size: .85rem; line-height: 1.7; }
+  .note { border-left: 4px solid var(--fg2); background: var(--box);
+          padding: .75rem 1rem; margin: 0 0 1.25rem; max-width: 68ch; }
+  .note__label { display: block; font-size: .8rem; font-weight: 700; margin-bottom: .25rem; }
+  .note p { margin: 0 0 .5rem; } .note p:last-child { margin-bottom: 0; }
+  .plate { border: 1px dashed #999; padding: .75rem 1rem; margin: 0 0 1.25rem; max-width: 68ch; }
+  .plate::before { content: attr(data-kind) " · " attr(data-id);
+                   display: block; font-size: .78rem; color: var(--fg2); margin-bottom: .25rem; }
+  .plate p { margin: 0; font-size: .92rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 1.25rem; font-size: .93rem; }
+  .tw { overflow-x: auto; }
+  th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border: 1px solid var(--line); }
+  th { background: var(--box); font-size: .85rem; }
+  .steps li { margin-bottom: .4rem; }
+  .toc ol { padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+<div class="doc">
+
+<h1>LooksGood 핸드북</h1>
+<p>물체 표면의 검사 지점을 찍는 것부터, 로봇이 그 지점들을 실제로 훑고 돌아오기까지 — 전 과정을 처음 쓰는 사람 기준으로 정리했다.</p>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#intro">LooksGood이란</a></li>
+    <li><a href="#setup">환경 셋팅</a></li>
+    <li><a href="#viewpoint">Viewpoint 생성</a></li>
+    <li><a href="#modes">모드 설명</a></li>
+    <li><a href="#control">제어 모드 — MoveIt!</a></li>
+    <li><a href="#inspect">검사 모드 — Inspection</a></li>
+    <li><a href="#appendix">부록</a></li>
+  </ol>
+</nav>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="intro">
+<h2>LooksGood이란</h2>
+
+<p>LooksGood은 <strong>검사할 물체를 놓고, 어디를 볼지 정하고, 로봇이 거기를 훑는 경로를 만들어, 시뮬레이션과 실제 로봇에서 실행</strong>하는 한 벌의 도구다. 세 개의 앱으로 나뉘어 있고, 앞 앱의 출력이 다음 앱의 입력이 된다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>단계</th><th>앱</th><th>하는 일</th><th>결과물</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>viewpoint_studio.py</code></td><td>물체 표면을 카메라 화각으로 덮는 검사 지점(viewpoint) 생성</td><td><code>.h5</code></td></tr>
+    <tr><td>2</td><td><code>isaac_pipeline.py</code></td><td>IK 풀이 · 충돌 회피 경로 생성 · 미리보기 · 실행</td><td><code>.csv</code></td></tr>
+    <tr><td>보조</td><td><code>trajectory_studio.py</code></td><td>Isaac 없이 브라우저에서 경로를 계획·확인 (선택)</td><td><code>.csv</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>데이터가 흘러가는 순서</h3>
+<div class="term">
+  <div class="term__tag">파일 흐름</div>
+<pre>data/{물체}/mesh/source.obj                              ← 준비물
+      ↓
+data/{물체}/viewpoint/{N}/viewpoints.h5           ← Viewpoint Studio
+      ↓
+data/{물체}/ik/{N}/ik_*.h5                               ← Solve IK
+      ↓
+data/{물체}/trajectory/{N}/solution.h5                   ← 방문 순서
+      ↓
+data/{물체}/trajectory/{N}/trajectory.csv (+ .npz)       ← 실행 경로
+      ↓
+Isaac 미리보기  또는  실제 로봇</pre>
+</div>
+
+<p><code>{N}</code>은 그 물체의 viewpoint 개수다. 같은 물체라도 viewpoint 수가 다르면 다른 폴더에 저장되므로, 여러 설정을 나란히 두고 비교할 수 있다.</p>
+
+<div class="plate" data-kind="사진" data-id="PLATE 01">
+  <p>세 앱의 화면을 나란히 놓은 한 장. 왼쪽부터 Viewpoint Studio(브라우저), Isaac Pipeline(Isaac Sim 창), RViz. 전체 그림을 먼저 보여주는 자리다.</p>
+</div>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="setup">
+<h2>환경 셋팅</h2>
+
+<p>모든 작업은 <code>ros-jazzy</code> 컨테이너 하나 안에서 돌아간다. 호스트에는 Docker와 NVIDIA 드라이버만 있으면 된다.</p>
+
+<h3>사전 준비물</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>항목</th><th>요구사항</th><th>확인 방법</th></tr></thead>
+  <tbody>
+    <tr><td>GPU</td><td>NVIDIA, VRAM 16&nbsp;GB 이상 권장</td><td><code>nvidia-smi</code></td></tr>
+    <tr><td>드라이버</td><td>580 이상 (cuMotion이 CUDA 13을 쓴다)</td><td><code>nvidia-smi</code> 우측 상단</td></tr>
+    <tr><td>Docker</td><td>NVIDIA Container Toolkit 설치됨</td><td><code>docker info | grep -i nvidia</code></td></tr>
+    <tr><td>디스플레이</td><td>Isaac Sim 창을 띄울 X 서버</td><td><code>echo $DISPLAY</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 드라이버 버전</span>
+  <p>드라이버가 <strong>580 미만</strong>이면 Isaac Pipeline은 뜨지만 경로 생성에서 <code>CUDA driver version is insufficient for CUDA runtime version</code>으로 죽는다. 컨테이너가 CUDA 13을 싣고 있는데 드라이버가 그보다 낮아서 생기는 문제다. 드라이버를 올리는 것 말고 우회 방법은 없다.</p>
+</div>
+
+<h3>설치 — 최초 1회</h3>
+<p>프로젝트 루트에서 아래 네 줄을 순서대로 실행한다.</p>
+
+<div class="term">
+  <div class="term__tag">호스트 · 프로젝트 루트</div>
+<pre># 1) 컨테이너가 호스트 화면을 쓸 수 있게 허용 (Isaac Sim 창)
+xhost +local:root
+
+# 2) 이미지 빌드 + 컨테이너 시작
+docker compose -f docker/compose.yaml up -d --build
+
+# 3) 파이썬 venv · ROS overlay · Julia depot 설치
+docker exec -it ros-jazzy bash /workspace/docker/install_env.sh
+
+# 4) 설치가 제대로 됐는지 점검
+docker exec -it ros-jazzy bash /workspace/docker/verify_env.sh</pre>
+</div>
+
+<p>2번은 처음 실행할 때 이미지를 내려받고 빌드하느라 오래 걸린다. 3번도 마찬가지다. 4번이 모두 통과하면 준비가 끝난 것이다.</p>
+
+<div class="plate" data-kind="사진" data-id="PLATE 02">
+  <p><code>verify_env.sh</code>가 전부 통과했을 때의 터미널 출력. 무엇이 통과로 떠야 정상인지 보여주는 기준 화면.</p>
+</div>
+
+<h3>매번 하는 일 — 컨테이너 들어가기</h3>
+<div class="term">
+  <div class="term__tag">호스트 · 앱을 켤 때마다</div>
+<pre>xhost +local:root            # 재부팅했다면 다시
+docker start ros-jazzy       # 꺼져 있다면
+docker exec -it ros-jazzy bash</pre>
+</div>
+
+<div class="note">
+  <span class="note__label">셸을 여러 개 쓴다</span>
+  <p>MoveIt으로 제어할 때는 터미널이 <strong>두 개</strong> 필요하다. 둘 다 위 <code>docker exec -it ros-jazzy bash</code>로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.</p>
+</div>
+
+<h3>앱 실행 명령</h3>
+<div class="term">
+  <div class="term__tag">컨테이너 · /workspace</div>
+<pre># 뷰포인트 생성  →  브라우저 http://localhost:8080
+uv run scripts/apps/viewpoint_studio.py
+
+# 경로 계획(선택) →  브라우저 http://localhost:8081
+uv run scripts/apps/trajectory_studio.py
+
+# Isaac Pipeline  →  Isaac Sim 창이 뜬다
+OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
+  scripts/apps/isaac_pipeline.py --object sample</pre>
+</div>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="viewpoint">
+<h2>Viewpoint 생성</h2>
+
+<p>Viewpoint는 <strong>카메라가 서야 할 자리와 바라볼 방향</strong>이다. 물체 표면 위 한 점에서 법선 방향으로 working distance만큼 띄운 위치에 카메라를 놓는다. 이 지점들을 빠짐없이 찍는 것이 검사다.</p>
+
+<p>이 앱이 만드는 것은 <strong>지점들과 그 지점들을 잇는 그래프</strong> 둘뿐이다. <strong>어느 순서로 돌지는 여기서 정하지 않는다</strong> — 방문 순서와 팔 자세는 다음 단계(Isaac Pipeline)가 함께 푼다.</p>
+
+<h3>실행 방법</h3>
+<div class="term">
+  <div class="term__tag">컨테이너 · Viewpoint Studio</div>
+<pre>uv run scripts/apps/viewpoint_studio.py</pre>
+</div>
+<p>브라우저에서 <code>http://localhost:8080</code>에 접속한다. 3D 뷰가 왼쪽 대부분을 차지하고, 오른쪽에 접이식 설정 패널이 붙는다.</p>
+
+<div class="plate" data-kind="사진" data-id="PLATE 03">
+  <p>Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.</p>
+</div>
+
+<h3>화면 구성</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>영역</th><th>역할</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Object</span></td><td>물체 선택. 패널 맨 위에 접히지 않고 항상 보인다. <strong>바꾸면 화면이 비워진다</strong></td></tr>
+    <tr><td><span class="ui">Viewpoints</span></td><td>이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 새로 만든다</td></tr>
+    <tr><td><span class="ui">Display</span></td><td>화면에 무엇을 그릴지 켜고 끄는 토글만 모여 있다</td></tr>
+    <tr><td><span class="ui">Solver graph (hops)</span></td><td>다음 단계가 실제로 풀 그래프로 관점을 바꾸는 슬라이더</td></tr>
+    <tr><td>진단 한 줄</td><td>패널 맨 아래. 지금 그래프의 상태를 숫자로 말한다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>물체 및 Viewpoint 불러오기</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Object</span></td><td><code>data/</code> 아래에 메시가 있는 물체 목록. 고르면 3D 뷰에 그 물체가 뜬다. 목록에 없다면 메시부터 준비해야 한다</td></tr>
+    <tr><td><span class="ui">Saved viewpoints</span></td><td>저장된 파일을 다시 연다. 열면 <strong>그 파일에 저장된 카메라 스펙이 입력칸에 그대로 채워진다</strong> — 어떤 설정으로 만든 것인지 되짚을 수 있다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><span class="ui">Saved viewpoints</span>는 <strong>지금 화면에 보이는 것의 출처</strong>를 가리킨다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>표시</th><th>뜻</th></tr></thead>
+  <tbody>
+    <tr><td><code>(none)</code></td><td>아직 아무것도 없다</td></tr>
+    <tr><td><code>(generated · unsaved)</code></td><td>방금 만들었지만 <strong>아직 저장하지 않았다</strong></td></tr>
+    <tr><td>파일 이름</td><td>그 파일을 불러온 상태</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>카메라 스펙</h3>
+<p>세 값이 viewpoint의 위치를 직접 결정한다. 그리고 이 값들은 <code>.h5</code>에 함께 저장되어 <strong>이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.</strong> 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>의미</th><th>영향</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">FOV width (mm)</span></td><td>working distance에서 카메라가 담는 가로 실폭</td><td>클수록 viewpoint 수가 준다</td></tr>
+    <tr><td><span class="ui">FOV height (mm)</span></td><td>같은 거리에서의 세로 실폭</td><td>〃</td></tr>
+    <tr><td><span class="ui">Working distance (mm)</span></td><td>표면에서 카메라까지 띄우는 거리</td><td><strong>로봇이 실제로 가는 위치가 바뀐다</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">Working distance에는 하한이 있다</span>
+  <p>렌즈 물리 제약이라, 그보다 작은 값을 넣으면 생성이 거부된다. 검사면이 렌즈 배럴 안쪽에 놓이는 값이기 때문이다.</p>
+</div>
+
+<h3>생성 파라미터</h3>
+<p><span class="ui">Generate viewpoints</span> 안에 네 개뿐이고, 넷 다 다음 단계를 실제로 바꾼다. 각 입력칸에 툴팁이 붙어 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>범위</th><th>무엇을 정하나</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">FOV overlap (%)</span></td><td>—</td><td>이웃한 촬영 영역이 겹치는 비율. <strong>점의 개수와 간격</strong>을 정한다. 표면 간격 = min(FOV) × (1 − overlap). 올리면 촘촘해지고 검사 시간이 늘어난다</td></tr>
+    <tr><td><span class="ui">Max edge length (×)</span></td><td>1.0 – 5.0</td><td>간선 길이 상한. <strong>주변 카메라 위치 간격의 배수</strong>다 (표면 간격이 아니다)</td></tr>
+    <tr><td><span class="ui">Max normal angle (°)</span></td><td>15 – 180</td><td>두 점의 법선이 이보다 벌어지면 잇지 않는다. <code>90°</code>면 반대편 면이 차단된다</td></tr>
+    <tr><td><span class="ui">Neighbor search (k)</span></td><td>3 – 30</td><td>삼각분할 후보로 볼 이웃 수. 거의 건드릴 일이 없다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">뒤의 셋이 그래프를 만든다</span>
+  <p><span class="ui">Max edge length</span> · <span class="ui">Max normal angle</span> · <span class="ui">Neighbor search</span> 셋이 <strong>Delaunay 인접 그래프</strong>를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다.</p>
+  <p>네 값 모두 <strong>슬라이더가 아니라 숫자 입력칸</strong>이다. 고쳐도 <span class="ui">Generate</span>를 누르기 전까지는 화면이 바뀌지 않는다.</p>
+</div>
+
+<h4>실행</h4>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Generate</span></td><td>위 설정으로 viewpoint를 만든다. 끝나면 바로 아래에 <code>Done · 132 vp · 329 edges · 2 component(s)</code> 처럼 결과가 뜬다</td></tr>
+    <tr><td><span class="ui">Save h5</span></td><td>만든 결과를 파일로 저장한다. <strong>누르지 않으면 남지 않는다</strong> — 저장 전에는 <span class="ui">Saved viewpoints</span>가 <code>(generated · unsaved)</code>로 표시된다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="plate" data-kind="사진" data-id="PLATE 04">
+  <p><span class="ui">Viewpoints</span> 폴더를 펼친 확대 컷. <span class="ui">Saved viewpoints</span> → <span class="ui">Camera spec</span> → <span class="ui">Generate viewpoints</span> 순서와 노브 네 개, 그 아래 <code>Done ·</code> 상태 줄이 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.</p>
+</div>
+
+<h3>결과 확인</h3>
+<p><span class="ui">Display</span> 폴더의 토글 네 개로 무엇을 그릴지 정한다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>토글</th><th>기본</th><th>보여주는 것</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Mesh</span></td><td>켬</td><td>물체 표면</td></tr>
+    <tr><td><span class="ui">Surface points</span></td><td>켬</td><td>메시 표면 위의 검사 지점</td></tr>
+    <tr><td><span class="ui">Camera positions</span></td><td>켬</td><td>표면점 + 법선 × WD — <strong>로봇 EE가 실제로 가는 곳</strong></td></tr>
+    <tr><td><span class="ui">Graph edges</span></td><td>켬</td><td>다음 단계의 순서 제약 그래프. <strong>색이 연결 성분</strong>을 나타낸다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><span class="ui">Solver graph (hops)</span>는 폴더 밖, 진단 한 줄 바로 위에 있다. 다시 만들지 않고 <strong>“다음 단계가 실제로 볼 간선”</strong>으로 관점만 바꾸는 슬라이더라, 끌면 즉시 반영된다.</p>
+
+<div class="note">
+  <span class="note__label">hops는 다음 단계와 맞춰 둔다</span>
+  <p>파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 <span class="ui">--delaunay-expand-hops</span>와 <strong>같은 값</strong>으로 두면 화면과 다음 단계가 같은 그래프를 본다. 양쪽 기본은 <code>2</code>다.</p>
+</div>
+
+<h4>진단 한 줄 읽기</h4>
+<div class="term">
+  <div class="term__tag">화면 · 패널 맨 아래</div>
+<pre>329 edges · 2 components · 0 isolated · GLNS: 852 (2-hop)</pre>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>항목</th><th>뜻</th></tr></thead>
+  <tbody>
+    <tr><td><code>edges</code></td><td>저장될 간선 수 (1-hop)</td></tr>
+    <tr><td><code>components</code></td><td>그래프가 몇 조각인지. <strong>2 이상이어도 대개 정상이다</strong> — 조각 사이를 잇는 이동 구간이 생길 뿐이고, 실제로 쓰는 파일 다수가 2성분 이상이다</td></tr>
+    <tr><td><code>isolated</code></td><td>간선이 하나도 없는 외톨이 점. 다음 단계가 제약 그래프에서 떨어뜨린다</td></tr>
+    <tr><td><code>GLNS: N (h-hop)</code></td><td>현재 hops 설정에서 다음 단계가 실제로 푸는 간선 수</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · No graph</span>
+  <p>진단 줄에 <code>⚠ No graph</code>가 뜨면 그 파일에 Delaunay 간선이 없다는 뜻이다. 경로 생성이 거부하므로 다시 만들어야 한다.</p>
+</div>
+
+<div class="plate" data-kind="사진" data-id="PLATE 05">
+  <p>같은 물체를 <span class="ui">Max normal angle</span>만 바꿔 두 번 생성한 비교 컷. 성분이 여러 조각으로 갈라진 경우와 하나로 이어진 경우를, 하단 진단 한 줄과 함께 나란히.</p>
+</div>
+
+<h3>Viewpoint 저장</h3>
+<p><span class="ui">Save h5</span>를 누르면 아래 경로에 저장된다.</p>
+<div class="term">
+  <div class="term__tag">저장 위치</div>
+<pre>data/{물체}/viewpoint/{개수}/viewpoints.h5
+
+# 예
+data/cylinder_sample/viewpoint/132/viewpoints.h5</pre>
+</div>
+<p>이 파일 경로를 다음 단계인 Isaac Pipeline에 그대로 넣는다. 파일 안에는 각 지점의 위치·법선·카메라 위치와 함께 <strong>카메라 스펙, 그래프 간선</strong>이 들어 있다. 방문 순서는 들어 있지 않다.</p>
+
+<h3>작업 순서 요약</h3>
+<ol class="steps">
+  <li><span class="ui">Object</span>에서 물체를 고른다.</li>
+  <li><span class="ui">Camera spec</span>에서 FOV와 working distance를 정한다.</li>
+  <li><span class="ui">Generate viewpoints</span>에서 overlap과 그래프 노브 3개를 조절한다.</li>
+  <li><span class="ui">Generate</span>로 만든다.</li>
+  <li><span class="ui">Display</span> 토글과 하단 진단 한 줄로 점 분포와 그래프를 확인한다.</li>
+  <li>마음에 들면 <span class="ui">Save h5</span>로 저장한다.</li>
+</ol>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="modes">
+<h2>모드 설명</h2>
+
+<p>Isaac Pipeline은 두 개의 축으로 동작을 정한다. <strong>어느 로봇을 움직일 것인가</strong>(Run 모드)와 <strong>누가 명령을 내리는가</strong>(Pipeline 모드)다. 두 축이 각각 두 값이라 조합은 네 가지다.</p>
+
+<div class="tw">
+<table class="matrix">
+  <thead><tr><th></th><th>Simulation</th><th>Real</th></tr></thead>
+  <tbody>
+    <tr>
+      <th>MoveIt!</th>
+      <td><strong>Sim 로봇을 MoveIt!으로 제어</strong><br>RViz에서 목표를 찍고 Plan &amp; Execute하면 Isaac 안의 UR20이 움직인다.</td>
+      <td><strong>Real 로봇을 MoveIt!으로 제어</strong><br>RViz 명령이 실제(또는 mock) 로봇으로 나간다. Isaac의 로봇은 실물을 따라 움직이는 거울이다.</td>
+    </tr>
+    <tr>
+      <th>Inspection</th>
+      <td><strong>Sim 환경에서 검사 수행</strong><br>앱이 만든 검사 경로를 Isaac 안의 UR20에서 실행한다. ROS 없이도 된다.</td>
+      <td><strong>Real 로봇으로 검사 경로 실행</strong><br>같은 경로를 실제 로봇 컨트롤러로 보낸다. Isaac의 로봇은 실물을 따라 움직이는 거울이다.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>모드 고르는 법</h3>
+<p>모드는 앱을 켤 때 옵션으로 주고, 켠 뒤에는 앱 맨 위 두 콤보박스에서 바꿀 수 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>축</th><th>실행 옵션</th><th>UI 위치</th><th>선택지</th></tr></thead>
+  <tbody>
+    <tr><td>명령 주체</td><td><code>--pipeline-mode</code></td><td><span class="ui">Pipeline Mode</span></td><td><code>inspection</code> · <code>moveit</code></td></tr>
+    <tr><td>대상 로봇</td><td><code>--mode</code></td><td><span class="ui">Run Mode</span></td><td><code>sim</code> · <code>real</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 실행 중에는 바꾸지 않는다</span>
+  <p>경로 생성이나 실행이 도는 동안에는 두 콤보박스가 <strong>자동으로 잠긴다.</strong> 도중에 모드를 바꾸면 이미 목표를 정한 작업의 발밑이 바뀌기 때문이다. 작업이 끝나면 다시 풀린다.</p>
+</div>
+
+<div class="note note--real">
+  <span class="note__label">실로봇 · ROS 스택과 짝이 맞아야 한다</span>
+  <p>Run 모드가 <code>real</code>이면 ROS 쪽도 real 스택을 띄워야 하고, <code>sim</code>이면 sim 스택을 띄워야 한다. <strong>두 스택을 동시에 띄우면 안 된다</strong> — 로봇 모델이 충돌해 ROS 노드가 죽는다.</p>
+</div>
+
+<div class="plate" data-kind="사진" data-id="PLATE 06">
+  <p>Isaac Pipeline 상단의 <span class="ui">Pipeline Mode</span>와 <span class="ui">Run Mode</span> 콤보박스 확대 컷. 네 조합 중 어디에 있는지가 화면에서 어떻게 보이는지.</p>
+</div>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="control">
+<h2>제어 모드 — MoveIt!</h2>
+
+<p>로봇을 <strong>임의의 자세로 움직이고 싶을 때</strong> 쓴다. 검사 경로와 무관하게 팔을 옮기거나, 자세를 잡거나, 충돌 없이 어딘가로 보내는 일이다. 명령은 RViz에서 내린다.</p>
+
+<h3>MoveIt × Simulation</h3>
+<p>Isaac 안의 로봇을 RViz로 움직인다. <strong>터미널 두 개</strong>가 필요하고, 순서가 중요하다.</p>
+
+<h4>셸 1 — Isaac 앱 (먼저)</h4>
+<div class="term">
+  <div class="term__tag">SIM · 셸 1</div>
+<pre>source /workspace/.venv/bin/activate
+OMNI_KIT_ACCEPT_EULA=YES python scripts/apps/isaac_pipeline.py \
+  --object sample --mode sim --pipeline-mode moveit</pre>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 창이 뜨면 ▶ Play를 누른다</span>
+  <p>Isaac Sim 뷰포트 왼쪽의 <strong>▶ Play</strong> 버튼을 눌러야 로봇 상태가 ROS로 흘러나간다. 이걸 안 누르고 셸 2를 실행하면 컨트롤러가 로봇을 못 찾고 <code>Switch controller timed out</code>으로 실패한다.</p>
+</div>
+
+<p><code>uv run</code> 대신 <code>source .venv/bin/activate</code> 후 <code>python</code>으로 실행하는 이유는, MoveIt이 쓰는 ROS 브리지가 그렇게 해야 제대로 잡히기 때문이다.</p>
+
+<h4>셸 2 — ROS 스택 (Play를 누른 뒤)</h4>
+<div class="term">
+  <div class="term__tag">SIM · 셸 2</div>
+<pre>source /opt/ros/jazzy/setup.bash
+source /workspace/ros2_overlay/install/setup.bash
+ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py</pre>
+</div>
+
+<p>컨트롤러가 붙고 계획기와 RViz가 뜨면 터미널에 <code>You can start planning now!</code>가 출력된다. 이때부터 RViz를 쓰면 된다.</p>
+
+<h3>MoveIt × Real</h3>
+<p>셸 1의 Isaac 앱을 <code>--mode real --pipeline-mode moveit</code>으로 켜고, 셸 2에서 real 스택을 띄운다. <strong>기본값은 실제 로봇이 아니라 mock hardware</strong>라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다.</p>
+
+<div class="term">
+  <div class="term__tag">REAL · 셸 2 · mock hardware (기본)</div>
+<pre>source /opt/ros/jazzy/setup.bash
+source /workspace/ros2_overlay/install/setup.bash
+ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
+</div>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>launch 인자</th><th>기본값</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><code>use_mock_hardware</code></td><td>true</td><td><code>true</code>면 로봇 없이 가짜 하드웨어로 돈다. 실제 로봇을 쓰려면 <code>false</code></td></tr>
+    <tr><td><code>robot_ip</code></td><td>0.0.0.0</td><td>실제 로봇의 IP. mock일 때는 무시된다</td></tr>
+    <tr><td><code>ur_type</code></td><td>ur20</td><td>로봇 기종</td></tr>
+    <tr><td><code>scene</code></td><td>sim_default</td><td>장애물 배치가 적힌 워크셀 정의 이름</td></tr>
+    <tr><td><code>use_cumotion</code></td><td>true</td><td><code>false</code>로 두면 GPU 계획기 없이 계획한다. 드라이버 문제로 cuMotion이 안 뜰 때 임시 우회</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--real">
+  <span class="note__label">실로봇 · 붙이기 전에</span>
+  <p>이 문서는 실제 로봇을 곧바로 움직이는 복사·실행용 명령을 싣지 않는다. 현장 네트워크와 안전 설정을 확인한 뒤, <code>use_mock_hardware:=false</code>와 로봇 IP를 직접 넣어 실행한다.</p>
+  <p>드라이버를 띄운 뒤 <strong>펜던트에서 외부 제어 프로그램을 실행</strong>해야 ROS 명령이 로봇에 전달된다. launch 하나가 드라이버와 MoveIt을 같이 띄우므로, 그 사이에 펜던트를 조작하면 된다.</p>
+</div>
+
+<h3>RViz 사용법</h3>
+<ol class="steps">
+  <li>RViz의 상호작용 마커(로봇 손끝의 화살표·링)를 끌어 목표 자세를 만든다.</li>
+  <li><strong>Plan</strong>을 눌러 경로를 계산한다. 계산된 경로가 반투명 로봇으로 재생된다.</li>
+  <li>경로가 마음에 들면 <strong>Execute</strong>를 누른다. 그때 비로소 로봇이 움직인다.</li>
+  <li>한 번에 하려면 <strong>Plan &amp; Execute</strong>를 누른다.</li>
+</ol>
+<p>평소에는 MoveIt이 로봇의 현재 자세를 그대로 반영하고 있다가, Execute를 누르는 순간에만 움직인다.</p>
+
+<div class="plate" data-kind="영상" data-id="PLATE 07">
+  <p>RViz에서 마커를 끌어 목표를 잡고 → Plan으로 경로를 미리 보고 → Execute로 Isaac 로봇이 움직이는 20초 클립. 왼쪽 RViz, 오른쪽 Isaac Sim을 한 화면에 담으면 좋다.</p>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 자주 걸리는 두 가지</span>
+  <p><strong>순서.</strong> 셸 1을 켜고 ▶ Play를 누른 <em>다음에</em> 셸 2를 실행한다. 반대로 하면 컨트롤러가 타임아웃된다.</p>
+  <p><strong>중복.</strong> 셸 2 스택은 한 번에 하나만 띄운다. sim과 real 스택을 같이 띄우면 로봇 모델이 충돌해 노드가 죽는다.</p>
+</div>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="inspect">
+<h2>검사 모드 — Inspection</h2>
+
+<p>LooksGood의 본체다. viewpoint 파일을 받아 <strong>IK를 풀고, 충돌 없는 검사 경로를 만들고, 미리 보고, 실행</strong>한다. 명령은 Isaac Pipeline 앱의 패널에서 내린다.</p>
+
+<h3>실행</h3>
+<div class="term">
+  <div class="term__tag">SIM · 가장 안전한 기본 조합 · 셸 하나로 충분</div>
+<pre>OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
+  scripts/apps/isaac_pipeline.py --object sample \
+  --mode sim --pipeline-mode inspection</pre>
+</div>
+<p>이 조합은 ROS 스택 없이 돌아간다. 경로 생성부터 미리보기, Isaac 로봇 실행까지 이 창 하나에서 끝난다. 실제 로봇으로 넘어가기 전에 여기서 충분히 확인하는 것이 표준 순서다.</p>
+
+<div class="plate" data-kind="사진" data-id="PLATE 08">
+  <p>Isaac Pipeline 전체 화면. 오른쪽 패널이 위에서부터 순서대로 보이고, 뷰포트에는 로봇·테이블·물체·viewpoint 점이 함께 있는 상태.</p>
+</div>
+
+<h3>패널 순서 = 작업 순서</h3>
+<p>패널은 위에서 아래로 일하는 순서대로 놓여 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>#</th><th>패널</th><th>하는 일</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><span class="ui">Pipeline Mode</span></td><td>명령 주체 선택 (Inspection / MoveIt)</td></tr>
+    <tr><td>2</td><td><span class="ui">Run Mode</span></td><td>대상 로봇 선택 (Simulation / Real)</td></tr>
+    <tr><td>3</td><td><span class="ui">Load Object &amp; Viewpoints</span></td><td>물체를 놓고 viewpoint 파일을 고른다</td></tr>
+    <tr><td>4</td><td><span class="ui">Solve IK</span></td><td>각 viewpoint에 팔이 닿는지 확인하고 해를 저장</td></tr>
+    <tr><td>5</td><td><span class="ui">Motion Speed</span></td><td>만들어질 경로의 실행 속도를 정한다</td></tr>
+    <tr><td>6</td><td><span class="ui">Generate Trajectory</span></td><td>검사 경로 또는 tilt 경로를 만든다</td></tr>
+    <tr><td>7</td><td><span class="ui">Preview in Simulation</span></td><td>고스트 로봇으로 재생해 확인</td></tr>
+    <tr><td>8</td><td><span class="ui">Execute Trajectory</span></td><td>실제로 움직인다</td></tr>
+    <tr><td>—</td><td><span class="ui">Scene (obstacles)</span></td><td>워크셀 실측 보조 도구 (평소엔 접어 둔다)</td></tr>
+    <tr><td>—</td><td><span class="ui">Log</span></td><td>모든 작업의 출력이 흘러나오는 곳</td></tr>
+  </tbody>
+</table>
+</div>
+
+
+<h3>3 · Load Object &amp; Viewpoints</h3>
+<p>검사 대상을 정의하는 자리다. 물체가 <strong>어디에 놓여 있는지</strong>가 이후 모든 계획의 전제가 된다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Object</span></td><td>불러올 물체 선택</td></tr>
+    <tr><td><span class="ui">Load Object</span></td><td>고른 물체를 화면에 올리고, 아래 입력한 위치·자세를 적용한다. <strong>배치 적용 버튼을 겸한다</strong></td></tr>
+    <tr><td><span class="ui">Read Pose</span></td><td>반대 방향. 화면에서 기즈모로 옮긴 물체의 현재 위치를 입력칸으로 읽어 온다</td></tr>
+    <tr><td><span class="ui">Frame</span></td><td>아래 숫자를 어느 기준으로 읽을지. <code>base_link</code>(로봇 URDF 기준) 또는 <code>base</code>(UR 펜던트·ArUco 기준)</td></tr>
+    <tr><td><span class="ui">Object pose (m)</span> / <span class="ui">Object rotvec</span></td><td>물체의 위치(m)와 회전(회전벡터)</td></tr>
+    <tr><td><span class="ui">Viewpoints (h5)</span></td><td>2단계에서 저장한 파일. <span class="ui">Browse...</span>로 고른다</td></tr>
+    <tr><td><span class="ui">Show Viewpoints</span> / <span class="ui">Clear Viewpoints</span></td><td>그 파일의 검사 지점을 물체 위에 점으로 그리거나 지운다. <strong>물체가 먼저 올라와 있어야 한다</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h4>ArUco 마커로 위치 잡기</h4>
+<p><span class="ui">Use ArUco marker</span>를 켜면 입력 방식이 바뀐다. 물체 위치를 직접 재는 대신 <strong>마커 위치를 재고, 마커에서 본 물체 위치</strong>를 넣으면 앱이 둘을 합쳐 물체를 놓는다. 현장에서 마커를 붙여 실측할 때 쓴다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Marker pose (m)</span> / <span class="ui">Marker rotvec</span></td><td>측정한 마커의 위치·자세. 위 <span class="ui">Frame</span> 기준으로 읽힌다</td></tr>
+    <tr><td><span class="ui">Object in marker (m)</span> / <span class="ui">Object rotvec</span></td><td>마커에서 본 물체의 위치·자세. 마커 기준이라 <span class="ui">Frame</span>과 무관하다</td></tr>
+    <tr><td><span class="ui">Marker size (m)</span></td><td>마커 한 변의 길이. 화면에 그릴 때만 쓴다</td></tr>
+    <tr><td><span class="ui">Show Marker</span> / <span class="ui">Hide Marker</span></td><td>마커를 화면에 표시하거나 감춘다. 측정이 맞는지 눈으로 확인하는 용도</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">기즈모로 옮겨도 된다</span>
+  <p>숫자를 넣는 대신 뷰포트에서 물체를 직접 끌어 옮겨도 된다. 경로 생성은 <strong>화면에 보이는 현재 위치</strong>를 그대로 쓴다. 옮긴 값을 기록해 두고 싶으면 <span class="ui">Read Pose</span>로 읽어 낸다.</p>
+</div>
+
+<div class="plate" data-kind="사진" data-id="PLATE 09">
+  <p><span class="ui">Show Viewpoints</span>를 누른 뒤의 뷰포트. 물체 표면 위에 검사 지점들이 점으로 찍혀 있는 모습.</p>
+</div>
+
+
+<h3>4 · Solve IK</h3>
+<p>각 viewpoint에 대해 <strong>팔이 그 자세를 만들 수 있는지</strong>를 확인하고, 가능한 관절 조합(IK 해)을 파일로 저장한다. 물체·viewpoint당 한 번만 하면 되고, 이후 경로 생성이 이 결과를 재사용한다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">roll augment</span></td><td>켬</td><td>카메라를 광축 둘레로 돌린 자세도 후보에 넣는다. 검사 결과는 같으므로 <strong>닿는 자세가 늘어난다</strong></td></tr>
+    <tr><td><span class="ui">roll-step-deg</span></td><td>30.0</td><td>몇 도 간격으로 돌려 볼지</td></tr>
+    <tr><td><span class="ui">tilt augment</span></td><td>켬</td><td>카메라를 살짝 기운 자세도 후보에 넣는다</td></tr>
+    <tr><td><span class="ui">tilt-angles-deg</span></td><td>5 10</td><td>기울일 각도들 (공백으로 구분)</td></tr>
+    <tr><td><span class="ui">tilt-azimuths</span></td><td>8</td><td>기울이는 방향을 몇 갈래로 나눌지</td></tr>
+    <tr><td><span class="ui">dedup</span></td><td>켬</td><td>거의 같은 해를 하나로 합친다</td></tr>
+    <tr><td><span class="ui">dedup-rad</span></td><td>0.08</td><td>이 값 안쪽이면 같은 해로 본다 (rad)</td></tr>
+    <tr><td><span class="ui">num-seeds</span></td><td>32</td><td>한 지점당 IK를 몇 번 다른 시작값으로 풀지. <strong>키우면 더 많이 찾지만 느려진다</strong></td></tr>
+    <tr><td><span class="ui">ik-batch-size</span></td><td>128</td><td>GPU에서 한 번에 푸는 개수. 결과에는 영향이 없고 속도·메모리만 바뀐다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Check and Save IK</span></td><td>위 설정으로 IK를 풀고 결과를 저장한다. 몇 개가 닿고 몇 개가 안 닿는지 <span class="ui">Log</span>에 뜬다</td></tr>
+    <tr><td><span class="ui">Cancel IK Check</span></td><td>도는 중에 멈춘다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">옵션을 바꾸면 다시 푼다</span>
+  <p><span class="ui">Generate Scan Motion</span>은 저장된 IK를 재사용하는데, <strong>이 패널의 옵션이 그대로일 때만</strong> 그렇다. 하나라도 바꾸면 경로 생성이 IK부터 다시 푼다 — 그만큼 오래 걸린다.</p>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 닿지 않는 지점이 있다면</span>
+  <p>물체 위치를 조금 옮기거나 돌려 보면 크게 달라진다. 도달 가능한 지점 수는 배치에 매우 민감하다. <span class="ui">Load Object</span>로 다시 놓고 <span class="ui">Check and Save IK</span>를 다시 눌러 비교한다.</p>
+</div>
+
+
+<h3>5 · Motion Speed</h3>
+<p>앞으로 만들 경로가 <strong>얼마나 빠르게 실행될지</strong>를 정한다. 이 값들은 경로를 만드는 순간 파일에 함께 구워지므로, <strong>경로를 만들기 전에</strong> 정해야 한다. 이미 만든 경로는 예전 속도를 그대로 갖고 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">scan EE speed [mm/s]</span></td><td>10</td><td>검사 구간에서 카메라가 움직이는 속도</td></tr>
+    <tr><td><span class="ui">scan EE angular [deg/s]</span></td><td>20</td><td>검사 구간에서 카메라 방향이 돌아가는 속도</td></tr>
+    <tr><td><span class="ui">max joint vel [rad/s]</span></td><td>0.3</td><td>관절 속도 상한. <strong>이동 구간의 속도는 이 값만으로 정해진다</strong></td></tr>
+    <tr><td><span class="ui">min segment dt [s]</span></td><td>0.05</td><td>구간 하나에 최소한 들이는 시간. 짧은 구간이 순간적으로 빨라지는 것을 막는다</td></tr>
+    <tr><td><span class="ui">corner threshold [deg]</span></td><td>30</td><td>이보다 급하게 꺾이는 곳부터 감속한다</td></tr>
+    <tr><td><span class="ui">corner max slowdown [x]</span></td><td>2.5</td><td>가장 급한 꺾임에서 몇 배 느려질지. <code>1</code>이면 감속하지 않는다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">셋 중 가장 느린 것이 이긴다</span>
+  <p>검사 구간은 <strong>카메라 속도 · 카메라 회전 속도 · 관절 속도</strong>를 모두 만족하는 시간으로 계산된다. 그래서 카메라 속도를 3배로 올려도 관절 속도에 걸리면 3배가 되지 않는다. 이동 구간은 검사가 아니므로 관절 속도만 본다.</p>
+  <p><code>0</code>을 넣으면 그 제한 하나를 끄는 뜻이다. 음수는 받지 않는다.</p>
+</div>
+
+
+<h3>6 · Generate Trajectory</h3>
+<p>실제 실행할 경로를 만든다. 두 종류를 만들 수 있다.</p>
+
+<h4>Scan options (GLNS) — 검사 경로</h4>
+<p>모든 viewpoint를 한 번씩 도는 경로다. 방문 순서와 각 지점에서의 팔 자세를 함께 최적화하고, 지점 사이를 충돌 없이 잇는다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">--delaunay-expand-hops</span></td><td>2</td><td>어느 정도 떨어진 지점끼리 이어도 되는지. 키우면 더 좋은 순서를 찾을 수 있지만 느려진다</td></tr>
+    <tr><td><span class="ui">--max-candidates-per-viewpoint</span></td><td>32</td><td>한 지점당 고려할 팔 자세 후보 수</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Generate Scan Motion</span></td><td>검사 경로를 만든다. 끝나면 결과 파일 경로가 아래 <span class="ui">CSV path</span> 칸에 자동으로 들어가고 미리보기에 올라간다</td></tr>
+    <tr><td><span class="ui">Cancel</span></td><td>도는 중에 멈춘다</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note">
+  <span class="note__label">몇 분 걸린다</span>
+  <p>viewpoint 수와 옵션에 따라 다르지만 보통 수십 초에서 몇 분이다. 도는 동안 다른 버튼은 잠기고 <span class="ui">Cancel</span>만 살아 있다. 진행 상황은 <span class="ui">Log</span>에 계속 흘러나온다.</p>
+</div>
+
+<h4>Tilt options — 한 지점 정밀 관찰</h4>
+<p>검사 경로와 달리, <strong>한 지점을 중심으로 카메라를 상하좌우로 기울여 가며 훑는</strong> 경로다. 특정 부위를 여러 각도에서 자세히 볼 때 쓴다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">base trajectory</span></td><td>—</td><td>중심으로 삼을 지점을 <strong>어느 경로에서 셀지</strong>. <span class="ui">Browse...</span>로 고른다. 아래 Preview·Execute의 <span class="ui">CSV path</span>와는 별개 칸이다</td></tr>
+    <tr><td><span class="ui">center row idx</span></td><td>0</td><td>그 경로의 몇 번째 지점을 중심으로 쓸지</td></tr>
+    <tr><td><span class="ui">Highlight</span></td><td>—</td><td>고른 지점을 화면에 노란 점으로 표시한다</td></tr>
+    <tr><td><span class="ui">pitch down/up deg</span> + <span class="ui">n</span></td><td>−20 / 20 / 40</td><td>위아래로 기울일 각도 범위와 샘플 수</td></tr>
+    <tr><td><span class="ui">roll left/right deg</span> + <span class="ui">n</span></td><td>−20 / 20 / 40</td><td>좌우로 기울일 각도 범위와 샘플 수</td></tr>
+    <tr><td><span class="ui">num-seeds</span> / <span class="ui">ik-batch-size</span></td><td>32 / 128</td><td>Solve IK의 같은 이름 옵션과 같은 뜻</td></tr>
+    <tr><td><span class="ui">clamp unreachable angles</span></td><td>켬</td><td>요청한 각도까지 팔이 안 닿으면 <strong>닿는 데까지만</strong> 하고 넘어간다. 끄면 실패로 처리한다</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Generate Tilt Motion</span></td><td>tilt 경로를 만든다</td></tr>
+    <tr><td><span class="ui">Show Tilt Fan</span> / <span class="ui">Clear Tilt Fan</span></td><td>만들기 전에 <strong>어떤 부채꼴을 그릴지 화면에 미리 그려 본다.</strong> 각도를 바꾸면 그림이 바로 따라 바뀐다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">중심 지점의 종류가 표시된다</span>
+  <p><span class="ui">center row idx</span> 아래 줄에 <code>row 60 / 271&nbsp;&nbsp;planned</code> 처럼 뜬다. 뒤의 단어가 그 지점의 성격이다.</p>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>표시</th><th>뜻</th></tr></thead>
+  <tbody>
+    <tr><td><code>viewpoint</code></td><td>검사 지점 그 자체 — 실제로 사진을 찍는 자리</td></tr>
+    <tr><td><code>interpolated</code></td><td>두 검사 지점 사이를 부드럽게 잇느라 생긴 중간 점</td></tr>
+    <tr><td><code>planned</code></td><td>장애물을 피해 옮겨 가느라 경로 계획기가 만든 점</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="plate" data-kind="사진" data-id="PLATE 10">
+  <p><span class="ui">Show Tilt Fan</span>을 눌러 물체 위에 부채꼴 궤적이 그려진 뷰포트. 상하 방향과 좌우 방향이 색으로 구분되어 보이는 각도.</p>
+</div>
+
+
+<h3>7 · Preview in Simulation</h3>
+<p>만든 경로를 <strong>반투명 고스트 로봇</strong>으로 재생해 본다. 진짜 로봇은 전혀 움직이지 않으므로 안전하고, Simulation·Real 어느 모드에서도 쓸 수 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">CSV path</span></td><td>재생·실행할 경로 파일. 경로를 만들면 자동으로 채워진다. <span class="ui">Browse...</span>로 다른 파일을 고를 수도 있다</td></tr>
+    <tr><td><span class="ui">Load &amp; Preview</span></td><td>그 파일을 고스트에 올린다</td></tr>
+    <tr><td><span class="ui">Play</span> / <span class="ui">Pause</span> / <span class="ui">Stop</span></td><td>재생 · 일시정지 · 처음으로</td></tr>
+    <tr><td><span class="ui">t</span> 슬라이더</td><td>원하는 시점으로 직접 끌어 본다</td></tr>
+    <tr><td><span class="ui">Show Collision Spheres</span> / <span class="ui">Clear</span></td><td>충돌 검사에 쓰이는 로봇의 구를 그린다. <strong>계획기가 로봇을 어떤 덩어리로 보는지</strong> 확인하는 용도</td></tr>
+    <tr><td><span class="ui">FOV W</span> / <span class="ui">FOV H</span> / <span class="ui">WD</span></td><td>고스트에 붙은 카메라의 화각·거리 값</td></tr>
+    <tr><td><span class="ui">Reset</span></td><td>불러온 viewpoint 파일의 값으로 되돌린다</td></tr>
+    <tr><td><span class="ui">Show FOV</span></td><td>카메라가 담는 사각형을 화면에 그린다</td></tr>
+    <tr><td><span class="ui">Show Camera Range</span></td><td>카메라에서 뻗는 거리 선을 그린다. 물체까지 실제 거리를 눈으로 확인할 수 있다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>패널 맨 아래 상태 줄이 <strong>지금 무엇이 재생 중인지</strong>를 항상 적는다.</p>
+<div class="term">
+  <div class="term__tag">화면 · 상태 줄 읽는 법</div>
+<pre>t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv
+                                        └ 지금 고스트가 트는 파일
+
+CSV path: .../trajectory/74/trajectory.csv
+          └ Execute Scan 이 실행할 파일</pre>
+</div>
+<p>이동 경로를 계획하면 고스트는 그 이동을 재생하지만, <span class="ui">CSV path</span> 칸은 검사 경로를 가리킨 채로 남는다. <strong>둘이 다른 것이 정상</strong>이고, 상태 줄이 그 차이를 말해 준다.</p>
+
+<div class="plate" data-kind="영상" data-id="PLATE 11">
+  <p><span class="ui">Load &amp; Preview</span> → <span class="ui">Play</span>로 고스트가 검사 경로를 훑는 20 – 30초 클립. <span class="ui">Show FOV</span>를 켜 두어 카메라 화각이 물체 표면을 덮으며 지나가는 것이 보이면 좋다.</p>
+</div>
+
+
+<h3>8 · Execute Trajectory</h3>
+<p>여기서부터는 로봇이 진짜로 움직인다. 구조는 단순하다 — <strong>먼저 계획해서 눈으로 보고, 그 다음에 움직인다.</strong></p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Plan to Start</span></td><td>지금 자세에서 검사 경로 시작점까지 <strong>충돌 없는 이동을 계획</strong>하고, 고스트로 한 번 재생한다. 로봇은 움직이지 않는다</td></tr>
+    <tr><td><span class="ui">Move to Start</span></td><td>그 계획을 실행한다. <strong>계획이 없으면 눌리지 않는다</strong></td></tr>
+    <tr><td><span class="ui">Plan to HOME</span></td><td>지금 자세에서 대기 자세까지의 이동을 계획한다</td></tr>
+    <tr><td><span class="ui">Move to HOME</span></td><td>그 계획을 실행한다</td></tr>
+    <tr><td><span class="ui">Log Joints</span></td><td>지금 로봇의 관절 각도를 <span class="ui">Log</span>에 찍는다. 어디로 갈지 정하기 전에 <strong>어디에 있는지</strong> 읽는 자리</td></tr>
+    <tr><td><span class="ui">Execute Scan</span></td><td><span class="ui">CSV path</span>의 경로를 실행한다</td></tr>
+    <tr><td><span class="ui">Cancel</span></td><td>계획 중이든 실행 중이든 멈춘다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="note__label">Execute Scan은 아무 때나 눌리지 않는다</span>
+  <p>지금 로봇 자세가 검사 경로의 첫 지점과 <strong>같을 때만</strong> 활성화된다. 다르면 버튼이 흐려지고 옆에 이유가 적힌다 — <code>robot is 42.3 deg from the scan start</code>. <span class="ui">Plan to Start</span> → <span class="ui">Move to Start</span>를 먼저 하라는 뜻이다.</p>
+  <p>이 잠금이 없으면, 실행기가 현재 자세와 첫 지점 사이를 <strong>미리 본 적 없는 직선</strong>으로 메우며 움직인다. 자세에 따라 팔이 한 바퀴 도는 일도 생긴다.</p>
+</div>
+
+<div class="note">
+  <span class="note__label">계획이 낡으면 거부한다</span>
+  <p><span class="ui">Move</span>는 누르는 순간 계획 당시의 조건을 다시 확인한다 — 로봇이 아직 그 출발점에 있는지, 목표와 물체 위치가 그대로인지. 하나라도 어긋나면 <strong>움직이지 않고</strong> 이유를 <span class="ui">Log</span>에 적은 뒤 계획을 버린다. 다시 계획하면 된다.</p>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 경로를 못 찾을 때</span>
+  <p><code>plan exit code = 2</code>가 뜨면 충돌 없는 길을 못 찾은 것이다. 물체 위치를 조금 옮기거나 로봇 자세를 바꿔 다시 시도한다. 그래도 안 되면 <span class="ui">Pipeline Mode</span>를 MoveIt으로 바꿔 RViz에서 손으로 옮기는 방법이 있다.</p>
+</div>
+
+<h4>표준 작업 순서</h4>
+<ol class="steps">
+  <li>Simulation 또는 mock hardware로 먼저 전 과정을 확인한다.</li>
+  <li><span class="ui">Load &amp; Preview</span> → <span class="ui">Play</span>로 경로를 끝까지 본다.</li>
+  <li><span class="ui">Plan to Start</span> — 고스트가 접근 경로를 재생한다. 주변과 부딪히지 않는지 본다.</li>
+  <li><span class="ui">Move to Start</span> — 로봇이 시작점으로 간다.</li>
+  <li><span class="ui">Execute Scan</span> — 검사 구간을 실행한다.</li>
+  <li>끝나면 <span class="ui">Plan to HOME</span> → 확인 → <span class="ui">Move to HOME</span>.</li>
+</ol>
+
+<div class="plate" data-kind="영상" data-id="PLATE 12">
+  <p>표준 순서 전체를 담은 1분 클립. Plan to Start(고스트) → Move to Start(실물) → Execute Scan → Move to HOME. 화면에 패널과 뷰포트가 같이 보이게.</p>
+</div>
+
+<div class="note note--real">
+  <span class="note__label">실로봇 · 실행 전 확인</span>
+  <p>로봇 주변과 케이블이 지나갈 범위가 비어 있는지 확인한다. 비상 정지 수단을 손이 닿는 곳에 둔다. <span class="ui">Motion Speed</span>를 낮춰 처음 한 번은 천천히 돌린다. <span class="ui">Cancel</span>이 눌리는 상태인지 미리 확인한다.</p>
+</div>
+
+
+<h3>보조 패널</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>패널 / 컨트롤</th><th>용도</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Scene (obstacles)</span></td><td>지금 쓰는 워크셀 정의 파일 이름을 보여준다. 평소엔 접어 둔다</td></tr>
+    <tr><td><span class="ui">Log Selected Prim as YAML</span></td><td>화면에서 고른 물체의 위치·크기를 워크셀 정의에 붙여 넣을 형식으로 <span class="ui">Log</span>에 찍는다. <strong>파일을 고치지는 않는다</strong> — 실제 셀 치수를 재서 반영할 때만 쓴다</td></tr>
+    <tr><td><span class="ui">Log</span></td><td>모든 작업의 출력이 여기로 흘러나온다. 무언가 실패하면 <strong>가장 먼저 볼 곳</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · 화면에서 옮긴 것은 계획에만 반영된다</span>
+  <p>뷰포트에서 <strong>장애물</strong>을 기즈모로 옮겨도 워크셀 정의 파일은 바뀌지 않는다. 다음에 앱을 켜면 원래 자리로 돌아온다. 영구히 반영하려면 <span class="ui">Log Selected Prim as YAML</span>로 숫자를 뽑아 파일에 적어야 한다. (<strong>검사 대상 물체</strong>는 예외 — 옮긴 위치가 그대로 경로 생성에 쓰인다.)</p>
+</div>
+</section>
+
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section id="appendix">
+<h2>부록</h2>
+
+<h3>파일이 저장되는 곳</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>단계</th><th>경로</th></tr></thead>
+  <tbody>
+    <tr><td>물체 메시</td><td><code>data/{물체}/mesh/source.obj</code></td></tr>
+    <tr><td>Viewpoint</td><td><code>data/{물체}/viewpoint/{N}/viewpoints.h5</code></td></tr>
+    <tr><td>IK 해</td><td><code>data/{물체}/ik/{N}/ik_*.h5</code></td></tr>
+    <tr><td>방문 순서</td><td><code>data/{물체}/trajectory/{N}/solution.h5</code></td></tr>
+    <tr><td>검사 경로</td><td><code>data/{물체}/trajectory/{N}/trajectory.csv</code></td></tr>
+    <tr><td>Tilt 경로</td><td><code>data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}.csv</code></td></tr>
+    <tr><td>이동 경로</td><td><code>data/{물체}/trajectory/{N}/home_move_*.csv</code></td></tr>
+    <tr><td>워크셀 정의</td><td><code>workcell/scenes/{이름}.yaml</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>경로 파일 안에 무엇이 들어 있나</h3>
+<p><code>.csv</code>는 로봇이 그대로 따라가는 표다. 한 줄이 한 시점이고, 열은 이렇게 구성된다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>열</th><th>내용</th></tr></thead>
+  <tbody>
+    <tr><td><code>time</code></td><td>시작부터 이 지점까지 걸리는 시간(초). <strong>이 열이 곧 실행 속도다</strong></td></tr>
+    <tr><td><code>ur20-*_joint</code></td><td>여섯 관절의 각도(rad)</td></tr>
+    <tr><td><code>target-POS_*</code> / <code>target-ROT_*</code></td><td>그때 카메라의 위치와 방향</td></tr>
+    <tr><td><code>waypoint_kind</code></td><td>그 지점의 성격 — <code>viewpoint</code> / <code>interpolated</code> / <code>planned</code></td></tr>
+  </tbody>
+</table>
+</div>
+<p>같은 이름의 <code>.npz</code>가 옆에 함께 저장된다. 어떤 설정으로 만든 경로인지(물체 위치, 작업 거리, 속도 값)가 거기 남는다.</p>
+
+<div class="note">
+  <span class="note__label">산출물은 버전 관리에 들어가지 않는다</span>
+  <p><code>data/**/viewpoint/</code> · <code>data/**/trajectory/</code> · <code>data/**/ik/</code> 는 <code>.gitignore</code>에 있다. 저장소를 새로 받으면 이 폴더들이 비어 있는 것이 정상이고, 각자 만들어 쓴다. 버전 관리되는 것은 <strong>메시와 워크셀 정의</strong>뿐이다.</p>
+</div>
+
+<h3>자주 겪는 문제</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>증상</th><th>원인과 조치</th></tr></thead>
+  <tbody>
+    <tr><td>Isaac 창이 안 뜬다</td><td>호스트에서 <code>xhost +local:root</code>를 다시 실행한다. 재부팅하면 풀린다</td></tr>
+    <tr><td><code>CUDA driver version is insufficient</code></td><td>NVIDIA 드라이버가 580 미만이다. 드라이버를 올린다</td></tr>
+    <tr><td><code>Switch controller timed out</code></td><td>Isaac에서 <strong>▶ Play</strong>를 안 눌렀다. 누르고 ROS 스택을 다시 실행한다</td></tr>
+    <tr><td>ROS 노드가 갑자기 죽는다</td><td>sim 스택과 real 스택을 동시에 띄웠다. 하나만 남긴다</td></tr>
+    <tr><td><span class="ui">Execute Scan</span>이 흐리다</td><td>로봇이 시작점에 없다. <span class="ui">Plan to Start</span> → <span class="ui">Move to Start</span></td></tr>
+    <tr><td><span class="ui">Move</span>가 안 눌린다</td><td>계획이 없거나 낡았다. <span class="ui">Plan</span>을 먼저 누른다</td></tr>
+    <tr><td><code>plan exit code = 2</code></td><td>충돌 없는 길이 없다. 물체나 로봇 자세를 바꿔 다시 시도한다</td></tr>
+    <tr><td>viewpoint가 많이 안 닿는다</td><td>물체 배치를 바꿔 본다. 도달성은 배치에 매우 민감하다</td></tr>
+    <tr><td>속도를 바꿨는데 그대로다</td><td>속도는 경로를 <strong>만들 때</strong> 구워진다. 경로를 다시 생성한다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>용어</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>용어</th><th>뜻</th></tr></thead>
+  <tbody>
+    <tr><td>Viewpoint</td><td>검사할 때 카메라가 서야 할 위치와 바라볼 방향</td></tr>
+    <tr><td>Working distance</td><td>표면에서 카메라까지의 거리. 초점이 맞는 거리</td></tr>
+    <tr><td>FOV</td><td>그 거리에서 카메라가 담는 실제 크기 (가로 × 세로, mm)</td></tr>
+    <tr><td>IK</td><td>원하는 카메라 자세를 만들기 위한 여섯 관절 각도를 푸는 것</td></tr>
+    <tr><td>Waypoint</td><td>경로를 이루는 한 지점. 경로는 waypoint의 나열이다</td></tr>
+    <tr><td>Transit / 이동 구간</td><td>검사가 아니라 다음 검사 지점으로 옮겨 가는 구간</td></tr>
+    <tr><td>Ghost / 고스트</td><td>미리보기용 반투명 로봇. 진짜 로봇을 건드리지 않는다</td></tr>
+    <tr><td>HOME</td><td>정해진 대기 자세. 작업 시작과 끝의 기준점</td></tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+</div>
+</body>
+</html>
