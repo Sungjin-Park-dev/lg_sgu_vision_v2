@@ -20,6 +20,16 @@ Two ways to put viewpoints on screen, both object-centric:
       4. **Solver graph** — build the local-tangent Delaunay graph on whatever
          survived. This stage cannot change the points, only the edges.
 
+    Stages 1-3 run together behind **Generate viewpoints**; stage 4 has its own
+    **Build graph** button inside its folder. They are separate because they answer
+    to different inputs: the points follow from the camera spec (FOV, WD, incidence,
+    depth of field), while the edges follow from what the solver is allowed to treat
+    as a legal move. Retuning the graph therefore never re-samples the surface — and
+    conversely, new points discard the old graph outright rather than leaving edges
+    that were built over positions no longer on screen. **Save h5** still writes one
+    artifact: if no graph exists it builds one first, because GLNS rejects a
+    viewpoint file without edges.
+
     Stages 2 and 3 ask the same question ("does this camera inspect this bit of
     surface?") and get it from the same place, ``viewpoint/visibility.py``, so the
     selected set and the reported coverage cannot disagree.
@@ -586,9 +596,15 @@ class Studio:
                     "Neighbor search (k)", initial_value=DEFAULT_DELAUNAY_NEIGHBORS,
                     min=3, max=30, step=1,
                     hint="삼각분할 후보로 볼 이웃 수")
+                # 그래프는 **점을 다시 뽑지 않는다** — 이 버튼이 폴더 안에 있는 이유다.
+                # 카메라 스펙이 점을 정하고, 이 셋이 그 위의 이동 제약을 정한다. 노브를
+                # 바꿔 그래프만 다시 만들 때 샘플링·필터·커버리지를 다시 돌 이유가 없다.
+                self.btn_graph = g.add_button("Build graph")
+                self.graph_status = g.add_markdown("Idle.")
 
-            # 실행과 상태는 네 폴더 **밖** 에 둔다 — 어느 한 단계가 아니라 넷 전부를 돌린다.
-            self.btn_generate = g.add_button("Generate")
+            # 이 둘은 폴더 **밖** 에 둔다 — 위 세 폴더(후보·선택·검증)를 한 번에 돌리고,
+            # 저장은 그 결과 전체를 쓴다.
+            self.btn_generate = g.add_button("Generate viewpoints")
             self.btn_save = g.add_button("Save h5")
             self.gen_status = g.add_markdown("Idle.")
 
@@ -637,6 +653,7 @@ class Studio:
         # 이건 표시/숨김이 아니라 노드 종류(add_glb vs add_mesh_simple)를 바꾼다 → 다시 그린다.
         self.cb_material_view.on_update(lambda _: self._on_material_view_change())
         self.btn_generate.on_click(lambda _: self._on_generate())
+        self.btn_graph.on_click(lambda _: self._on_build_graph())
         self.btn_save.on_click(lambda _: self._on_save())
 
     def _expanded_edges(self, adjacency, n) -> tuple[np.ndarray, int]:
@@ -823,10 +840,7 @@ class Studio:
             self.gen_status.content = f"**Error:** {problem}"
             return
         self.generating = True
-        try:
-            self.btn_generate.disabled = True
-        except Exception:  # noqa: BLE001
-            pass
+        self._set_buttons(False)
         self.gen_status.content = "⏳ Generating…"
         row_spacing_mm, col_spacing_mm, surface_spacing_mm = self._current_spacing()
         fov_w_mm, fov_h_mm = self._current_fov_mm()
@@ -908,20 +922,6 @@ class Studio:
                         occluder_mesh=full_mesh)
             surface = self.surface_cache[gkey]
 
-            # adjacency 는 클러스터링보다 먼저 — stage1=delaunay 의 입력이기도 하고,
-            # 어느 방법이든 파일에 항상 같은 형태로 들어가는 그래프이기 때문이다.
-            # 키가 gkey 를 포함해야 한다 — 그래프는 camera_positions(=WD 의존) 위에서 만든다.
-            akey = gkey + (p["k_neighbors"],
-                           round(p["distance_factor"], 4), round(p["max_normal_angle_deg"], 4))
-            if akey not in self.adjacency_cache:
-                self.adjacency_cache[akey] = build_local_delaunay_adjacency(
-                    surface["camera_positions"], surface["normals"],
-                    k_neighbors=p["k_neighbors"],
-                    distance_factor=p["distance_factor"],
-                    max_normal_angle_deg=p["max_normal_angle_deg"],
-                )
-            adjacency = self.adjacency_cache[akey]
-
             if p["obj"] != self.object_dd.value:
                 # 생성 중 Object 가 바뀌었다 — 이걸 그리면 _clear_scene 이 막으려던
                 # "이전 물체가 새 물체 자리에 그려지는" 상황이 그대로 재현된다.
@@ -930,10 +930,14 @@ class Studio:
                     f"`{self.object_dd.value}` 로 바뀌었습니다. 다시 Generate 하세요.")
                 return
 
+            # 그래프는 여기서 만들지 않는다 — Build graph 가 따로 만든다. 점이 바뀌면
+            # 옛 그래프는 그 점 위에 있지 않으므로 **버린다**(None). 화면에서 간선이
+            # 사라지고 아래 진단줄이 그래프가 없다고 말한다 — 조용히 남겨두면 새 점과
+            # 옛 간선이 섞인 것을 저장하게 된다.
             data = _scene_dict(
                 surface["positions"], surface["normals"], surface["camera_positions"],
                 str(input_path), p["working_distance_mm"] / 1000.0,
-                adjacency=adjacency,
+                adjacency=None,
                 fov_w_mm=p["fov_width_mm"], fov_h_mm=p["fov_height_mm"],
             )
             cov_cells = surface.get("coverage") or {}
@@ -943,11 +947,11 @@ class Studio:
                 data["coverage_cells"] = (cov_cells["cell_points"], cov_cells["cell_state"])
             self.last = {"obj": obj, "surface": surface, "params": p,
                          "n": data["n"], "input_path": input_path,
-                         "adjacency": adjacency}
+                         "adjacency": None, "surface_key": gkey}
             # 화면에는 결과만 — 어떤 파라미터로 만들었는지는 바로 위 입력칸들이 이미 보여준다.
-            self._set_scene(full_mesh, data, source="gen · surface + delaunay")
+            self._set_scene(full_mesh, data, source="gen · viewpoints")
             self._refresh_existing_options(select=GENERATED_LABEL, keep_generated=True)
-            ds = adjacency["stats"]
+            self.graph_status.content = "Idle — 점이 새로 생겼습니다. **Build graph**."
             tag = " · CAD faces" if p["sampler"] == SAMPLER_BREP else ""
             candidates = surface.get("candidate_count")
             if candidates and candidates != data["n"]:
@@ -969,18 +973,91 @@ class Studio:
                     tag += " · 구멍: " + ", ".join(
                         f"면{i}({r['ratio']*100:.0f}%, {r['target_cm2']:.0f}cm²)"
                         for i, r in worst)
-            self.gen_status.content = (
-                f"**Done** · {data['n']} vp · {ds['num_edges']} edges · "
-                f"{ds['num_components']} component(s){tag}")
+            self.gen_status.content = f"**Done** · {data['n']} vp{tag}"
         except Exception as exc:  # noqa: BLE001
             self.gen_status.content = f"**Error:** {exc}"
             print(f"[generate] error: {exc}")
         finally:
             self.generating = False
+            self._set_buttons(True)
+
+    # ---------- graph (viewpoint 와 분리된 두 번째 단계) ----------
+    def _set_buttons(self, enabled: bool) -> None:
+        for button in (self.btn_generate, self.btn_graph, self.btn_save):
             try:
-                self.btn_generate.disabled = False
+                button.disabled = not enabled
             except Exception:  # noqa: BLE001
                 pass
+
+    def _graph_knobs(self) -> dict:
+        return {"k_neighbors": int(self.nb_knn.value),
+                "distance_factor": float(self.nb_distfactor.value),
+                "max_normal_angle_deg": float(self.nb_maxangle.value)}
+
+    def _adjacency_for(self, knobs: dict) -> dict:
+        """지금 화면의 점 위에 Delaunay 그래프를 만든다(캐시).
+
+        캐시 키에 ``surface_key`` 를 포함해야 한다 — 그래프는 점이 아니라
+        ``camera_positions = 점 + 법선 × WD`` 위에서 만들어지므로, 점이나 WD 가 바뀌면
+        같은 노브라도 다른 그래프다.
+        """
+        surface = self.last["surface"]
+        akey = self.last["surface_key"] + (
+            knobs["k_neighbors"], round(knobs["distance_factor"], 4),
+            round(knobs["max_normal_angle_deg"], 4))
+        if akey not in self.adjacency_cache:
+            self.adjacency_cache[akey] = build_local_delaunay_adjacency(
+                surface["camera_positions"], surface["normals"],
+                k_neighbors=knobs["k_neighbors"],
+                distance_factor=knobs["distance_factor"],
+                max_normal_angle_deg=knobs["max_normal_angle_deg"])
+        return self.adjacency_cache[akey]
+
+    def _apply_graph(self, knobs: dict) -> dict:
+        """그래프를 만들어 화면과 저장 대상에 반영한다. Build graph 와 Save 가 같이 쓴다.
+
+        ``params`` 도 같이 갱신한다 — 안 하면 h5 metadata 가 Generate 당시의 노브 값을
+        기록해, 파일이 실제로 담은 그래프와 다른 파라미터를 주장한다.
+        """
+        adjacency = self._adjacency_for(knobs)
+        self.last["params"].update(knobs)
+        self.last["adjacency"] = adjacency
+        self.data["adjacency"] = adjacency
+        self._build_scene(self.scene_full_mesh, self.data)
+        self._refresh_info()
+        return adjacency
+
+    def _on_build_graph(self) -> None:
+        if self.generating:
+            return
+        if self.last is None or self.data is None:
+            self.graph_status.content = "먼저 **Generate viewpoints** 를 누르세요."
+            return
+        if self.last["obj"] != self.object_dd.value:
+            self.graph_status.content = (
+                f"**Stale** — 화면의 점은 `{self.last['obj']}` 것입니다. "
+                f"Generate viewpoints 부터 다시 하세요.")
+            return
+        self.generating = True
+        self._set_buttons(False)
+        self.graph_status.content = "⏳ Building…"
+        threading.Thread(target=self._graph_worker, args=(self._graph_knobs(),),
+                         daemon=True).start()
+
+    def _graph_worker(self, knobs: dict) -> None:
+        try:
+            ds = self._apply_graph(knobs)["stats"]
+            note = f" · ⚠ 고립점 {ds['num_isolated']}개" if ds["num_isolated"] else ""
+            self.graph_status.content = (
+                f"**Done** · {ds['num_edges']} edges · {ds['num_components']} component(s) · "
+                f"간선 median/max {ds['median_edge_length_mm']:.0f}/"
+                f"{ds['max_edge_length_mm']:.0f} mm{note}")
+        except Exception as exc:  # noqa: BLE001
+            self.graph_status.content = f"**Error:** {exc}"
+            print(f"[graph] error: {exc}")
+        finally:
+            self.generating = False
+            self._set_buttons(True)
 
     def _sample_cad_faces(self, obj: str, p: dict, params: ViewpointGenParams,
                           full_mesh) -> dict:
@@ -1069,6 +1146,16 @@ class Studio:
             self.gen_status.content = "Generate first, then Save."
             return
         L = self.last
+        # 간선 없는 h5 는 GLNS 가 거부한다 — 단계를 나눴다고 그런 파일을 남기지는 않는다.
+        # 노브는 따로지만 **산출물은 하나**다.
+        auto_graph = ""
+        if L.get("adjacency") is None:
+            try:
+                self._apply_graph(self._graph_knobs())
+                auto_graph = " (그래프가 없어 먼저 만들었습니다)"
+            except Exception as exc:  # noqa: BLE001
+                self.gen_status.content = f"**Error:** 그래프 생성 실패 — {exc}"
+                return
         obj, surface, p = L["obj"], L["surface"], L["params"]
         # 정규 이름으로 쓴다 — resolve_viewpoint_path 가 가장 먼저 찾는 이름이라, 같은
         # 폴더에 후보가 여럿일 때 mtime 이 다음 단계 입력을 정하는 함정이 생기지 않는다.
@@ -1125,7 +1212,7 @@ class Studio:
                 surface["positions"], surface["normals"], out, metadata, camera_spec,
                 adjacency=L["adjacency"],
             )
-            self.gen_status.content = "**Saved**\n\n" + path_tree(out_path)
+            self.gen_status.content = f"**Saved**{auto_graph}\n\n" + path_tree(out_path)
             self._refresh_existing_options(
                 select=f"{out_path.parent.name}/{out_path.name}")
             print(f"[save] wrote {out}")
@@ -1297,7 +1384,8 @@ class Studio:
         adjacency = data.get("adjacency")
         if adjacency is None:
             self.info.content = (
-                "⚠ **No graph** — 이 파일에는 Delaunay 간선이 없어 GLNS 가 거부한다. 재생성 필요.")
+                "⚠ **No graph** — 간선이 없어 GLNS 가 거부한다. "
+                "**Build graph** 를 누르세요(저장본이라면 재생성 필요).")
             return
 
         edges = np.asarray(adjacency.get("edges", []), dtype=np.int32).reshape(-1, 2)
