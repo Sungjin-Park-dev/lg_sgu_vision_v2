@@ -568,14 +568,19 @@ class Studio:
                     hint="면마다 매개변수 공간을 잘게 나눠 '덮임/덮을 수 없음/구멍' 을 센다 "
                          "(CAD faces 전용, 0.5초 내외)")
 
+            # 위 세 폴더를 한 번에 돌린다. 버튼이 폴더 **밖** 에 있는 이유 —
+            # 어느 한 단계가 아니라 후보·선택·검증 전부를 실행한다.
+            self.btn_generate = g.add_button("Generate viewpoints")
+            self.gen_status = g.add_markdown("Idle.")
+
             # 점이 다 정해진 뒤, 그 위에 GLNS 의 순서 제약 그래프를 만든다. 점의 개수·위치는
             # 이 셋으로 바뀌지 않는다 — 바뀌는 것은 간선(= GLNS 가 고를 수 있는 이동)뿐.
             #
             # 노브 이름은 알고리즘이 아니라 **무엇의 상한인지**를 말하게 한다. 'delaunay'
             # 접두사는 붙이지 않는다 — 그건 폴더/hint 가 이미 말한다. 앞의 둘이 그래프 '모양'
             # 을 정하고, k 는 '탐색 폭' 이라 성격이 달라 맨 아래에 둔다. 셋 다 슬라이더가
-            # 아니라 number 다: 끌어도 Generate 전까지 화면이 바뀌지 않아, 드래그 어포던스가
-            # 지키지 못할 약속을 하기 때문이다.
+            # 아니라 number 다: 끌어도 Build graph 전까지 화면이 바뀌지 않아, 드래그
+            # 어포던스가 지키지 못할 약속을 하기 때문이다.
             #
             # 간선 길이 상한을 mm 로 미리 보여주고 싶어지는데, 하지 않는다: factor 는
             # 표면 간격이 아니라 **카메라 위치** 간격에 곱해지고, 카메라는 WD 만큼
@@ -597,16 +602,15 @@ class Studio:
                     min=3, max=30, step=1,
                     hint="삼각분할 후보로 볼 이웃 수")
                 # 그래프는 **점을 다시 뽑지 않는다** — 이 버튼이 폴더 안에 있는 이유다.
-                # 카메라 스펙이 점을 정하고, 이 셋이 그 위의 이동 제약을 정한다. 노브를
-                # 바꿔 그래프만 다시 만들 때 샘플링·필터·커버리지를 다시 돌 이유가 없다.
+                # 카메라 스펙이 점을 정하고, 이 셋이 그 위의 이동 제약을 정한다.
                 self.btn_graph = g.add_button("Build graph")
                 self.graph_status = g.add_markdown("Idle.")
 
-            # 이 둘은 폴더 **밖** 에 둔다 — 위 세 폴더(후보·선택·검증)를 한 번에 돌리고,
-            # 저장은 그 결과 전체를 쓴다.
-            self.btn_generate = g.add_button("Generate viewpoints")
+            # 저장은 앞의 결과 전체를 쓴다 — 그래서 폴더 밖, 맨 아래다.
+            # ⚠ h5 에는 그래프가 **있어야** 한다: glns/solve.py 가 adjacency 없는 파일을
+            #   ValueError 로 거부한다. 그래서 없으면 Save 가 먼저 만든다.
             self.btn_save = g.add_button("Save h5")
-            self.gen_status = g.add_markdown("Idle.")
+            self.save_status = g.add_markdown("Idle.")
 
         # 화면에 무엇을 그릴지 — 순수 토글만 둔다. hops 는 표시가 아니라 데이터를 다시
         # 계산하는 렌즈라 여기가 아니라 진단창 옆에 있다.
@@ -1143,7 +1147,7 @@ class Studio:
 
     def _on_save(self) -> None:
         if self.last is None:
-            self.gen_status.content = "Generate first, then Save."
+            self.save_status.content = "먼저 **Generate viewpoints**."
             return
         L = self.last
         # 간선 없는 h5 는 GLNS 가 거부한다 — 단계를 나눴다고 그런 파일을 남기지는 않는다.
@@ -1154,7 +1158,7 @@ class Studio:
                 self._apply_graph(self._graph_knobs())
                 auto_graph = " (그래프가 없어 먼저 만들었습니다)"
             except Exception as exc:  # noqa: BLE001
-                self.gen_status.content = f"**Error:** 그래프 생성 실패 — {exc}"
+                self.save_status.content = f"**Error:** 그래프 생성 실패 — {exc}"
                 return
         obj, surface, p = L["obj"], L["surface"], L["params"]
         # 정규 이름으로 쓴다 — resolve_viewpoint_path 가 가장 먼저 찾는 이름이라, 같은
@@ -1212,12 +1216,12 @@ class Studio:
                 surface["positions"], surface["normals"], out, metadata, camera_spec,
                 adjacency=L["adjacency"],
             )
-            self.gen_status.content = f"**Saved**{auto_graph}\n\n" + path_tree(out_path)
+            self.save_status.content = f"**Saved**{auto_graph}\n\n" + path_tree(out_path)
             self._refresh_existing_options(
                 select=f"{out_path.parent.name}/{out_path.name}")
             print(f"[save] wrote {out}")
         except OSError as exc:
-            self.gen_status.content = (
+            self.save_status.content = (
                 f"**Save failed** ({exc.__class__.__name__})\n\n"
                 + path_tree(out_path)
                 + "\n\n디렉토리 권한 확인 (root 소유일 수 있음).")
