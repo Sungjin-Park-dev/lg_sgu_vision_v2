@@ -12,7 +12,7 @@ Two ways to put viewpoints on screen, both object-centric:
     fixed ``DEFAULT_STEP_TOL_LINEAR``, which the CAD sampler never reads — it
     evaluates the B-rep directly), which part or material of it is the inspection
     target, and which of the sampled points stay eligible (bottom /
-    hollow-interior / occlusion filters). ``Part`` and ``Material RGB`` are the same
+    occlusion filters). ``Part`` and ``Material RGB`` are the same
     knob for two file kinds — B-rep faces carry no triangle colour, so a STEP source
     selects by part and an OBJ source by material; the studio blanks whichever does
     not apply.
@@ -21,7 +21,7 @@ Two ways to put viewpoints on screen, both object-centric:
          triangles; **CAD faces** walks each B-rep face of a STEP source, lays out
          camera frames along arc length in (u,v), keeps what falls inside the
          trimming boundary, and takes positions/normals analytically (no
-         tessellation error). Both then pass the same bottom/interior/occlusion
+         tessellation error). Both then pass the same bottom / occlusion
          filters (``finalize_viewpoints``).
       2. **Selection** — keep them all, or let greedy set cover pick a minimal
          subset that still meets the coverage target.
@@ -57,8 +57,8 @@ actually consumes: edge count, component count, isolated points, and the edge
 count GLNS will really solve on (**Solver graph (hops)**).
 
 Which faces get sampled is tuned under **Target**. The defaults come from the
-per-object tables in ``config`` (``OBJECT_TARGET_PART`` / ``OBJECT_TARGET_MATERIAL``
-/ ``OBJECT_FILTER_INTERIOR``) — the fields just make them visible and overridable
+per-object tables in ``config`` (``OBJECT_TARGET_PART`` /
+``OBJECT_TARGET_MATERIAL``) — the fields just make them visible and overridable
 per run. Found parameters can be persisted with **Save** for the GLNS solve step.
 
 Usage:
@@ -203,7 +203,6 @@ def surface_key(obj: str, p: dict) -> tuple:
         round(float(p["dof_mm"]), 4),
         bool(p["filter_bottom"]),
         round(float(p["bottom_angle"]), 4),
-        bool(p["filter_interior"]),
         bool(p["filter_occluded"]),
     )
 
@@ -520,16 +519,6 @@ class Studio:
                 self.nb_bottom_angle = g.add_number(
                     "Bottom angle (°)", initial_value=80.0, min=1.0, max=179.0, step=1.0,
                     hint="월드 −z 에서 이 각 안쪽을 보는 면을 버린다 (기본 80)")
-                # 아래 가림 필터와 겹치지 않는다 — 위로 열린 공동의 안쪽 바닥은 카메라가
-                # 제 점을 볼 수 있어 광선 판정을 통과한다(측정: square_structure 는 가림
-                # 필터를 통과한 82점 중 11점이 hull 법선과 정확히 −1.0 로 반대였다).
-                # ⚠ 대신 hull 과 **수직**인 면(측벽)도 문턱 0.3 에 걸린다 — curved_structure
-                #   는 정렬도 ≈0.0 인 멀쩡한 측벽 9점을 잃는다. 그래서 물체별 opt-in 이다.
-                self.cb_filter_interior = g.add_checkbox(
-                    "Filter interior (hollow)",
-                    initial_value=config.OBJECT_FILTER_INTERIOR.get(initial_object) is not None,
-                    hint="속 빈 물체의 안쪽 껍데기 제거 — 오목한 바깥 형상·측벽이 있으면 "
-                         "정상 면도 지운다. config.OBJECT_FILTER_INTERIOR 물체만 기본 ON")
                 # 법선 필터로는 못 잡는 것: 파인 곳·지그 뒤. 카메라 자리에서 광선을 쏴
                 # 실제로 보이는지 묻는다. 가림체는 어셈블리 전체(지그 포함)다.
                 self.cb_filter_occluded = g.add_checkbox(
@@ -815,12 +804,11 @@ class Studio:
         # 안내 문구는 넣지 않는다: info 의 IDLE_HINT 가 같은 말을 하고, 물체 이름은 바로
         # 위 Object 드롭다운이 이미 보여준다.
         self.gen_status.content = "Idle."
-        # 면 필터 기본값은 물체별이다 — 이전 물체의 재질/interior 설정을 들고 가면 조용히
+        # 면 필터 기본값은 물체별이다 — 이전 물체의 재질 설정을 들고 가면 조용히
         # 틀린 개수가 나온다(sample 의 '0,255,0' 을 들고 cylinder 로 가면 매칭 실패).
         obj = self.object_dd.value
         self._refresh_mesh_options()
         self.tb_material.value = config.OBJECT_TARGET_MATERIAL.get(obj) or ""
-        self.cb_filter_interior.value = config.OBJECT_FILTER_INTERIOR.get(obj) is not None
 
     def _on_existing_change(self) -> None:
         if self._suppress_existing:
@@ -890,7 +878,6 @@ class Studio:
             "dof_mm": float(self.nb_dof.value),
             "filter_bottom": bool(self.cb_filter_bottom.value),
             "bottom_angle": float(self.nb_bottom_angle.value),
-            "filter_interior": bool(self.cb_filter_interior.value),
             "filter_occluded": bool(self.cb_filter_occluded.value),
             "surface_overlap_pct": self._current_overlap_pct(),
             "surface_spacing_mm": surface_spacing_mm,
@@ -924,7 +911,6 @@ class Studio:
 
             gkey = surface_key(obj, p)
             if gkey not in self.surface_cache:
-                fi = config.OBJECT_FILTER_INTERIOR.get(obj)  # hull_align_min 기본값의 출처
                 params = ViewpointGenParams(
                     surface_spacing_mm=p["surface_spacing_mm"],
                     row_spacing_mm=p["row_spacing_mm"],
@@ -934,8 +920,6 @@ class Studio:
                     fov_height_mm=p["fov_height_mm"],
                     filter_bottom=p["filter_bottom"],
                     bottom_angle=p["bottom_angle"],
-                    filter_interior=p["filter_interior"],
-                    interior_hull_align_min=(fi or {}).get("hull_align_min", 0.3),
                     filter_occluded=p["filter_occluded"],
                     max_incidence_deg=p["max_incidence_deg"],
                     depth_of_field_mm=p["dof_mm"],
@@ -943,11 +927,10 @@ class Studio:
                 if p["sampler"] == SAMPLER_BREP:
                     self.surface_cache[gkey] = self._sample_cad_faces(obj, p, params, full_mesh)
                 else:
-                    # hull 은 자르기 전 전체 메시에서 — 재질 필터로 잘린 조각의 hull 은
-                    # 물체의 hull 이 아니다.
+                    # 가림체는 자르기 전 **어셈블리 전체**다 — 재질 필터로 잘린
+                    # 조각만 넘기면 지그에 가려지는 점을 놓친다.
                     self.surface_cache[gkey] = prepare_viewpoints(
-                        target_mesh, params, hull_mesh=full_mesh,
-                        occluder_mesh=full_mesh)
+                        target_mesh, params, occluder_mesh=full_mesh)
             surface = self.surface_cache[gkey]
 
             if p["obj"] != self.object_dd.value:
@@ -1114,7 +1097,7 @@ class Studio:
             raise ValueError("CAD 면에서 점이 하나도 나오지 않았다 — "
                              "Fillet skip radius 를 낮춰보세요")
         surface = finalize_viewpoints(
-            positions, normals, params, hull_mesh=full_mesh, occluder_mesh=full_mesh,
+            positions, normals, params, occluder_mesh=full_mesh,
             # face_id 는 필터를 함께 통과해야 한다 — 커버리지 계산과 h5 추적성이 쓴다.
             # 프레임 축까지 실어 보낸다 — 판정이 촬영 사각형을 사각형으로 보려면 필요하고,
             # 필터가 점을 지울 때 함께 지워져야 어긋나지 않는다.
@@ -1137,12 +1120,16 @@ class Studio:
 
         spec = visibility.SensorSpec.from_params(params)
         frames = visibility.ViewFrames.from_extras(surface["extras"])
-        target_mask = None
+        target_mask, unreachable_cm2 = None, 0.0
         if cells is not None:
-            # 커버리지와 **같은 기준**이라야 greedy 가 아무도 못 보는 셀을 쫓지 않는다.
-            target_mask = brep.inspectable(
-                cells, p["bottom_angle"] if p["filter_bottom"] else 0.0,
-                config.TARGET_OBJECT["rotation"], occluder=full_mesh, spec=spec)
+            # 분모는 **후보 전체** 기준으로 여기서 한 번 정하고, 선택과 커버리지가 같이
+            # 쓴다. 선택 뒤에 다시 계산하면 greedy 가 버린 셀이 분모에서도 빠져 더 작은
+            # 과녁을 맞히고 100% 를 주장한다(square_structure 에서 520 vs 632cm²).
+            target_mask, unreachable_cm2 = brep.inspection_mask(
+                cells, surface["positions"], surface["normals"],
+                surface["extras"]["effective_fov_mm"], full_mesh, spec,
+                bottom_angle_deg=p["bottom_angle"] if p["filter_bottom"] else 0.0,
+                rotation=config.TARGET_OBJECT["rotation"], frames=frames)
 
         # 선택은 **adjacency 앞**이다 — 그래프는 최종 집합 위에서 만들어야 한다.
         if cells is not None and p["selection_mode"] != select.SELECTION_ALL:
@@ -1166,7 +1153,8 @@ class Studio:
                 bottom_angle_deg=p["bottom_angle"] if p["filter_bottom"] else 0.0,
                 rotation=config.TARGET_OBJECT["rotation"],
                 part_name=p["part_name"], tol_linear=p["tol_linear"],
-                align=p["align"], reference_mesh=reference, cells=cells, frames=frames)
+                align=p["align"], reference_mesh=reference, cells=cells, frames=frames,
+                mask=target_mask, unreachable_cm2=unreachable_cm2)
         return surface
 
     def _on_save(self) -> None:

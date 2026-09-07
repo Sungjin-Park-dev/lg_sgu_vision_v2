@@ -124,8 +124,6 @@ class ViewpointGenParams:
     depth_of_field_mm: Optional[float] = None
     filter_bottom: bool = True
     bottom_angle: float = 80.0
-    filter_interior: bool = False
-    interior_hull_align_min: float = 0.3
     # 가시성(가림) 필터. 법선 필터로는 못 잡는 '파인 곳·지그 뒤' 를 걸러낸다.
     filter_occluded: bool = True
     occlusion_tolerance_mm: float = 1.0

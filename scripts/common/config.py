@@ -176,17 +176,6 @@ OBJECT_COLLISION_SHAPE = {
     "cylinder_sample": "box",  # Ø46×81mm — mesh 충돌 오판 회피용 bbox proxy
 }
 
-# 속이 빈(hollow) 물체 viewpoint 필터 override.
-# 표면 샘플링은 안쪽 면까지 뽑아 viewpoint 가 공동 안에 생긴다(예: square_structure = 속 빈 상자).
-# 여기 등록된 물체는 생성 후 convex-hull 법선 정렬 필터로 안쪽 껍데기 viewpoint 를 제거하고
-# **바깥 껍데기만** 남긴다(위에서 안쪽 바닥을 내려다보는 것까지 제거). viewpoint_studio 와 CLI 가
-# 참조해 ViewpointGenParams.filter_interior 를 켠다.
-#   hull_align_min: 표면 법선 vs 최근접 convex-hull 바깥법선 정렬(cos) 임계. 미만이면 안쪽 면=제거.
-# 주의: 오목한 '바깥' 형상(홈/계단)이 있는 물체엔 부적합 — box 류에만 opt-in.
-OBJECT_FILTER_INTERIOR = {
-    "square_structure": {"hull_align_min": 0.3},
-}
-
 # 물체별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
 # 컨벤션: 초록(0,255,0) = 검사대상. 회색(170,163,158)은 비대상이라 제외.
 # (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일)

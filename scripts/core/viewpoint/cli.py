@@ -205,7 +205,6 @@ def main():
         print(f"Error: {e}")
         return 1
 
-    _fi = config.OBJECT_FILTER_INTERIOR.get(args.object)  # hollow 물체만 opt-in (studio 와 동일)
     params = ViewpointGenParams(
         material_rgb=args.material_rgb,
         color_tolerance=args.color_tolerance,
@@ -217,8 +216,6 @@ def main():
         overlap_ratio=args.overlap,
         filter_bottom=not args.no_filter_bottom,
         bottom_angle=args.bottom_angle,
-        filter_interior=_fi is not None,
-        interior_hull_align_min=(_fi or {}).get("hull_align_min", 0.3),
         filter_occluded=not args.no_filter_occluded,
         surface_spacing_mm=args.surface_spacing,
         build_delaunay=not args.no_delaunay,
@@ -232,7 +229,7 @@ def main():
     # ------------------------------------------------------------------
     # hull·가림체는 자르기 전 **전체** 메시다 — 선택한 조각의 hull 은 물체의 hull 이 아니고,
     # 부품만 가림체로 쓰면 지그가 가리는 시야를 놓친다.
-    res = generate_viewpoints_core(target_mesh, params, hull_mesh=mesh, occluder_mesh=mesh)
+    res = generate_viewpoints_core(target_mesh, params, occluder_mesh=mesh)
 
     # 9. Save to HDF5
     if args.dry_run:

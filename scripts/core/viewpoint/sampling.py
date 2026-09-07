@@ -34,47 +34,6 @@ def _nn_path_length(points: np.ndarray) -> float:
     return total
 
 
-def filter_interior_viewpoints(
-    mesh: trimesh.Trimesh,
-    positions: np.ndarray,
-    normals: np.ndarray,
-    hull_align_min: float = 0.3,
-    verbose: bool = True,
-) -> np.ndarray:
-    """속이 빈 물체의 '안쪽 껍데기' viewpoint 를 제거해 **바깥 껍데기만** 남긴다.
-
-    각 표면점의 법선이, 그 점에서 가장 가까운 convex-hull 표면의 **바깥 법선**과 이루는 정렬
-    (dot)이 hull_align_min 미만이면 안쪽 면(공동을 향함)으로 보고 제거한다. 바깥 껍데기 점은
-    법선이 hull 바깥 법선과 정렬(≈+1)되고, 안쪽 껍데기 점은 반대(≈−1)라 깔끔히 갈린다.
-
-    가시성/가림이 아니라 **껍데기 구조**로 판정하므로, 얕고 넓은 물체에서 '위에서 열린 틈으로
-    내려다보이는 안쪽 바닥'까지 제거된다(순수 가림 필터로는 안 잡히는 것). 벽 두께와도 무관.
-    볼록한 물체는 모든 점이 hull 과 정렬돼 아무것도 안 지운다.
-    ※ 주의: 오목한 '바깥' 형상(예: 홈·계단)이 있는 물체는 그 면도 지울 수 있어 부적합 →
-      config.OBJECT_FILTER_INTERIOR 로 **물체별 opt-in** 할 때만 쓴다.
-
-    Args:
-        mesh: 대상(전체) 메시 — convex hull 계산용.
-        positions: (N,3) 표면점 좌표(mesh 로컬, hull 과 동일 프레임).
-        normals: (N,3) 표면 법선.
-    Returns:
-        keep: (N,) bool — 남길(=바깥 껍데기) viewpoint.
-    """
-    n = len(positions)
-    if n == 0:
-        return np.ones(0, dtype=bool)
-    hull = mesh.convex_hull
-    _, _, tri = hull.nearest.on_surface(np.asarray(positions, dtype=np.float64))
-    hull_normals = hull.face_normals[tri]                      # 가장 가까운 hull 면의 바깥 법선
-    unit_n = normals / np.clip(np.linalg.norm(normals, axis=1, keepdims=True), 1e-9, None)
-    align = np.einsum("ij,ij->i", unit_n, hull_normals)
-    keep = align >= hull_align_min
-    if verbose:
-        print(f"  Interior filter (outer-shell): removed {int((~keep).sum())}/{n} inner-skin "
-              f"viewpoints (hull-normal align < {hull_align_min}); {int(keep.sum())} remain")
-    return keep
-
-
 def farthest_point_sample_indices(points: np.ndarray, count: int) -> np.ndarray:
     """Greedy farthest-point sampling over candidate points.
 

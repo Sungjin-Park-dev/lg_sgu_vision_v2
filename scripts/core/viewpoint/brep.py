@@ -671,6 +671,37 @@ def inspectable(cells: SurfaceCells, bottom_angle_deg: float = 0.0,
     return keep
 
 
+def inspection_mask(cells: SurfaceCells, positions, normals, point_fov_mm,
+                    occluder, spec: "visibility.SensorSpec", *,
+                    bottom_angle_deg: float = 0.0, rotation=None,
+                    frames: Optional["visibility.ViewFrames"] = None):
+    """커버리지의 **분모**가 될 셀 = True. ``(mask, unreachable_cm2)``.
+
+    선택(set cover)과 커버리지 보고가 **같은 분모**를 봐야 한다. 아니면 greedy 가 더 작은
+    과녁을 맞히고도 100% 를 주장한다 — 실제로 square_structure 에서 greedy 가 안쪽 벽을
+    아예 목표에서 빼고 520cm² 에 100% 라고 보고했다(전부 사용은 632cm² 에 100%).
+    그래서 이 마스크는 **후보 전체**로 한 번 계산해 둘이 나눠 쓴다.
+
+    셀이 분모에 남는 조건은 둘 중 하나다:
+      * 그 셀의 이상적 카메라(법선 위 WD)로 보인다 — 원리적으로 검사 가능
+      * 실제로 어떤 후보가 그 셀을 검사한다 — 증거가 있으니 이상적 판정보다 강하다
+    (뒤 조건이 없으면 비스듬히 들여다보이는 셀에서 분모가 분자보다 작아져 100% 를 넘는다.)
+    """
+    target = inspectable(cells, bottom_angle_deg, rotation)
+    covered = visibility.covered_by_any(
+        cells.points, cells.normals,
+        np.asarray(positions, dtype=np.float64).reshape(-1, 3),
+        np.asarray(normals, dtype=np.float64).reshape(-1, 3),
+        point_fov_mm, occluder, spec, mask=target, frames=frames)
+    unreachable_cm2 = 0.0
+    if occluder is not None and len(cells):
+        reachable = visibility.self_visible(cells.points, cells.normals, occluder, spec)
+        drop = target & ~reachable & ~covered
+        unreachable_cm2 = float(cells.areas_cm2[drop].sum())
+        target = target & ~drop
+    return target, unreachable_cm2
+
+
 def coverage_report(step_path, positions, normals, point_fov_mm, *,
                     working_distance_mm: float, occluder_mesh=None,
                     max_incidence_deg: float = 0.0, dof_mm: float = 0.0,
@@ -680,6 +711,7 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
                     cell_mm: float = DEFAULT_COVERAGE_CELL_MM,
                     cells: Optional[SurfaceCells] = None,
                     frames: Optional["visibility.ViewFrames"] = None,
+                    mask=None, unreachable_cm2: float = 0.0,
                     verbose: bool = True) -> dict:
     """생성된 viewpoint 가 각 CAD 면을 얼마나 덮는지 면적 가중으로 센다.
 
@@ -704,22 +736,20 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         working_distance_mm=working_distance_mm,
         max_incidence_deg=max_incidence_deg,
         depth_of_field_mm=dof_mm)
-    target = inspectable(cells, bottom_angle_deg, rotation)
+    # 분모는 **후보 전체**로 미리 정해 두고 넘겨받는다(mask). 선택 결과로 다시 계산하면
+    # greedy 가 버린 셀이 분모에서도 사라져, 더 작은 과녁을 맞히고 100% 를 주장하게 된다.
+    unreachable_cm2 = float(unreachable_cm2 or 0.0)
+    if mask is None:
+        target, unreachable_cm2 = inspection_mask(
+            cells, positions, normals, point_fov_mm, occluder_mesh, spec,
+            bottom_angle_deg=bottom_angle_deg, rotation=rotation, frames=frames)
+    else:
+        target = np.asarray(mask, dtype=bool)
     covered = visibility.covered_by_any(
         cells.points, cells.normals,
         np.asarray(positions, dtype=np.float64).reshape(-1, 3),
         np.asarray(normals, dtype=np.float64).reshape(-1, 3),
         point_fov_mm, occluder_mesh, spec, mask=target, frames=frames)
-
-    # 접근 불가 셀을 분모에서 뺀다. 단 **덮인 셀은 절대 빼지 않는다** — 어떤 viewpoint 가
-    # 실제로 그 셀을 검사한다는 것은 접근 가능하다는 증거이고, 이상적 카메라 판정보다 강하다.
-    # (이 단서가 없으면 비스듬히 들여다보이는 셀에서 분모가 분자보다 작아져 100% 를 넘는다.)
-    unreachable_cm2 = 0.0
-    if occluder_mesh is not None and len(cells):
-        reachable = visibility.self_visible(cells.points, cells.normals, occluder_mesh, spec)
-        drop = target & ~reachable & ~covered
-        unreachable_cm2 = float(cells.areas_cm2[drop].sum())
-        target = target & ~drop
 
     # 화면에 그릴 셀 상태: 0 = 구멍, 1 = 덮임, 2 = 검사 불가(아래 향함 또는 접근 불가).
     # 숫자만 주면 "어디가" 빠졌는지 알 수 없어 매번 진단 스크립트를 따로 짜야 했다.

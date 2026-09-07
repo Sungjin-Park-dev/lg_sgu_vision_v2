@@ -217,7 +217,7 @@ def self_visible(positions, normals, occluder, spec: SensorSpec) -> np.ndarray:
     """viewpoint 가 **자기 표면점**을 볼 수 있는가 — ``sees`` 의 특수 케이스.
 
     자기 점이므로 입사각 0°, 거리는 정확히 WD 라 ①②③ 은 자동으로 통과하고 **가림만** 남는다.
-    법선 기반 필터(bottom/interior)로는 못 잡는 '파인 곳·지그 뒤' 가 여기서 걸러진다.
+    법선 기반 필터(bottom)로는 못 잡는 '파인 곳·지그 뒤' 가 여기서 걸러진다.
     """
     return sees(positions, normals, positions, normals, occluder, spec, fov_mm=None)
 

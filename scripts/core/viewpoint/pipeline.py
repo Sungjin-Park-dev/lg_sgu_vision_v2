@@ -14,11 +14,7 @@ from common import config
 from . import visibility
 from .adjacency import build_local_delaunay_adjacency
 from .models import ViewpointGenParams, ViewpointResult
-from .sampling import (
-    _nn_path_length,
-    filter_interior_viewpoints,
-    generate_surface_viewpoints,
-)
+from .sampling import _nn_path_length, generate_surface_viewpoints
 
 
 def spacings_m(params: ViewpointGenParams) -> tuple[float, float]:
@@ -31,9 +27,9 @@ def spacings_m(params: ViewpointGenParams) -> tuple[float, float]:
 
 
 def finalize_viewpoints(positions, normals, params: ViewpointGenParams,
-                        hull_mesh=None, occluder_mesh=None, extras=None,
+                        occluder_mesh=None, extras=None,
                         row_spacing_m=None, col_spacing_m=None) -> dict:
-    """샘플러가 낸 점에 **공통 후처리**를 적용한다: 카메라 위치 + bottom/interior 필터.
+    """샘플러가 낸 점에 **공통 후처리**를 적용한다: 카메라 위치 + bottom/가림 필터.
 
     표면 FPS 든 CAD 면 격자든 여기를 지나야 한다 — 필터가 두 곳에 있으면 샘플러를 바꿨을 때
     조용히 다른 규칙이 적용된다.
@@ -42,10 +38,6 @@ def finalize_viewpoints(positions, normals, params: ViewpointGenParams,
     따로 관리하면 필터 하나 추가할 때마다 어긋난다.
 
     ``occluder_mesh``: 가시성 필터의 가림체 — **어셈블리 전체**를 넘긴다(지그 포함).
-
-    ``hull_mesh``: interior 필터의 convex hull 을 계산할 메시. 재질 필터나 CAD 면 선택으로
-    잘린 조각의 hull 은 물체의 hull 이 아니므로(윗면만 남기면 얇은 판이 되어 절반이 '안쪽
-    면' 으로 지워진다) 자르기 전 전체 메시를 넘긴다.
     """
     if row_spacing_m is None or col_spacing_m is None:
         row_spacing_m, col_spacing_m = spacings_m(params)
@@ -70,15 +62,6 @@ def finalize_viewpoints(positions, normals, params: ViewpointGenParams,
             print(f"  Remaining: {len(positions)} viewpoints")
         else:
             print("  No bottom-facing viewpoints to filter")
-
-    if params.filter_interior and hull_mesh is not None:
-        keep = filter_interior_viewpoints(
-            hull_mesh, positions, normals,
-            hull_align_min=params.interior_hull_align_min)
-        if (~keep).any():
-            positions, normals = positions[keep], normals[keep]
-            camera_positions = camera_positions[keep]
-            extras = {k: v[keep] for k, v in extras.items()}
 
     if params.filter_occluded and occluder_mesh is not None and len(positions):
         # 자기 표면점을 볼 수 있는가 = 후보 적격성. 판정은 visibility 한 곳에서만 한다.
@@ -121,9 +104,8 @@ def subset_viewpoints(surface: dict, indices) -> dict:
     return out
 
 
-def prepare_viewpoints(target_mesh, params: ViewpointGenParams, hull_mesh=None,
-                       occluder_mesh=None):
-    """표면 FPS 샘플링 + 공통 후처리(bottom/interior 필터).
+def prepare_viewpoints(target_mesh, params: ViewpointGenParams, occluder_mesh=None):
+    """표면 FPS 샘플링 + 공통 후처리(bottom/가림 필터).
 
     샘플링은 메시 표면 직접 FPS 하나뿐이다. 예전에는 PCA 평면에 격자를 깔고
     ``closest_point`` 로 표면에 투영하는 grid 모드가 있었지만, 평면 투영이라 곡면·측벽을
@@ -147,15 +129,14 @@ def prepare_viewpoints(target_mesh, params: ViewpointGenParams, hull_mesh=None,
     spacing_m = (params.surface_spacing_mm / 1000.0) if params.surface_spacing_mm \
         else min(row_spacing_m, col_spacing_m)
     positions, normals = generate_surface_viewpoints(target_mesh, spacing_m)
-    return finalize_viewpoints(positions, normals, params,
-                               hull_mesh=hull_mesh if hull_mesh is not None else target_mesh,
-                               occluder_mesh=occluder_mesh if occluder_mesh is not None
-                               else (hull_mesh if hull_mesh is not None else target_mesh),
-                               row_spacing_m=row_spacing_m, col_spacing_m=col_spacing_m)
+    return finalize_viewpoints(
+        positions, normals, params,
+        occluder_mesh=occluder_mesh if occluder_mesh is not None else target_mesh,
+        row_spacing_m=row_spacing_m, col_spacing_m=col_spacing_m)
 
 
 def generate_viewpoints_core(target_mesh, params: ViewpointGenParams,
-                             hull_mesh=None, occluder_mesh=None) -> ViewpointResult:
+                             occluder_mesh=None) -> ViewpointResult:
     """표면 샘플링 → Delaunay 인접 그래프. 파일 IO 없음.
 
     방문 순서는 만들지 않는다. 예전에는 여기서 클러스터링(stage1+sub) → 클러스터 내부
@@ -164,8 +145,7 @@ def generate_viewpoints_core(target_mesh, params: ViewpointGenParams,
     읽고 순서와 IK 자세를 함께 푼다 — 그래서 여기서 순서를 정하는 것은 무의미할 뿐 아니라,
     저장해두면 어느 쪽이 진짜 순서인지 두 답이 생긴다.
     """
-    surface = prepare_viewpoints(target_mesh, params, hull_mesh=hull_mesh,
-                                 occluder_mesh=occluder_mesh)
+    surface = prepare_viewpoints(target_mesh, params, occluder_mesh=occluder_mesh)
     adjacency = None
     if params.build_delaunay:
         print("Building local tangent Delaunay adjacency...")
