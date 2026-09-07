@@ -300,6 +300,9 @@ def signed_radius_mm(face, o, probes: int = 3) -> float:
 
 # 축 하나의 호길이를 적분할 때 쓰는 표본 수. 곡률이 급해도 65개면 0.1% 이내로 수렴한다.
 ARC_SAMPLES = 65
+# 프레임이 덮는 띠에서 계량을 몇 점 읽을지. **덮기 문제라 평균이 아니라 최댓값**을 쓴다 —
+# 프레임 안 한 점이라도 간격이 FOV 를 넘으면 그게 구멍이다.
+BAND_SAMPLES = 5
 
 
 def _axis_positions(speed_at, t0: float, t1: float, fov_mm: float, overlap: float,
@@ -358,13 +361,23 @@ def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
     info["radius_mm"] = (radius_u, radius_v)
     info["effective_fov_mm"] = (fov_u, fov_v)
 
-    def speed_v(t):
-        return o["GeomLProp_SLProps"](surface, (u0 + u1) / 2.0, float(t), 1, 1e-7) \
-            .D1V().Magnitude()
+    # 계량(제1기본형식)은 **2차원 장**이다. 한 줄에서만 읽으면 프레임이 두께를 갖는 순간
+    # 어긋난다 — 구면의 첫 행은 띠 아래끝 0, 위끝 49.9mm/rad 로 속도가 두 배가 되어
+    # 열 간격도 두 배로 벌어졌다(측정: FOV 50mm 자리에 78mm). 그래서 프레임이 덮는
+    # 구간에서 여러 점을 읽고 **최댓값**을 쓴다.
+    #
+    # 해석적 곡면(평면·원통·원뿔·구·토러스)은 |∂S/∂u| 가 v 에만 의존하고 |∂S/∂v| 가
+    # 상수라, 이 최댓값이 근사가 아니라 **정확한 최악값**이다. B-spline 면만 두 축 모두
+    # 의존할 수 있어 BAND_SAMPLES 점 샘플링이 근사가 된다(보수적인 쪽으로).
+    u_span = np.linspace(u0, u1, BAND_SAMPLES)
 
-    # v 축을 먼저 놓고, **행마다** u 축을 다시 잰다 — |∂S/∂u| 가 v 에 따라 달라지는 면
-    # (구면의 경도 방향)에서 행마다 열 수가 달라져야 간격이 맞는다.
-    vs, len_v = _axis_positions(speed_v, v0, v1, fov_v, overlap, adaptor.IsVClosed())
+    def speeds_v(t):
+        return [o["GeomLProp_SLProps"](surface, float(u), float(t), 1, 1e-7)
+                .D1V().Magnitude() for u in u_span]
+
+    # 행 배치는 최댓값으로 — 빨리 움직이는 곳 기준이라야 어디서도 FOV 를 안 넘는다.
+    vs, len_v = _axis_positions(lambda t: max(speeds_v(t)), v0, v1, fov_v, overlap,
+                                adaptor.IsVClosed())
 
     classifier = o["BRepTopAdaptor_FClass2d"](face, 1e-6)
     sign = -1.0 if face.Orientation() == o["TopAbs_REVERSED"] else 1.0
@@ -372,9 +385,15 @@ def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
     points, normals, frames_u, frames_v = [], [], [], []
     n_u, len_u, grid_cells = 0, 0.0, 0
     for v in vs:
+        # 이 행의 프레임이 v 로 덮는 매개변수 구간. 폭은 **가장 느린** 곳 기준이라야
+        # 띠를 좁게 잡지 않는다(속도가 작을수록 같은 mm 가 더 넓은 Δv 다).
+        half_v = (fov_v / 2.0) / max(min(speeds_v(v)), 1e-9)
+        v_band = np.linspace(max(v0, v - half_v), min(v1, v + half_v), BAND_SAMPLES)
         us, len_u = _axis_positions(
-            lambda t, _v=v: o["GeomLProp_SLProps"](surface, float(t), float(_v), 1, 1e-7)
-            .D1U().Magnitude(), u0, u1, fov_u, overlap, adaptor.IsUClosed())
+            lambda t, _b=v_band: max(
+                o["GeomLProp_SLProps"](surface, float(t), float(bv), 1, 1e-7)
+                .D1U().Magnitude() for bv in _b),
+            u0, u1, fov_u, overlap, adaptor.IsUClosed())
         n_u = max(n_u, len(us))
         grid_cells += len(us)
         for u in us:
