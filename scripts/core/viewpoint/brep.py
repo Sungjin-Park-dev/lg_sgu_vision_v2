@@ -647,13 +647,28 @@ def surface_cells(step_path, *, part_name: Optional[str] = None,
 
 
 def inspectable(cells: SurfaceCells, bottom_angle_deg: float = 0.0,
-                rotation=None) -> np.ndarray:
-    """검사 **대상**인 셀 = True. 아래를 향해 로봇이 볼 수 없는 셀은 분모에서 뺀다.
+                rotation=None, occluder=None,
+                spec: Optional["visibility.SensorSpec"] = None) -> np.ndarray:
+    """검사 **대상**인 셀 = True. 물리적으로 못 보는 셀은 분모에서 뺀다.
 
     알고리즘의 실패("구멍")와 물리적 불가("애초에 못 보는 곳")를 섞지 않기 위한 구분이다.
-    판정 규칙은 bottom filter 와 같은 것을 쓴다(visibility.facing_up).
+    두 가지를 뺀다:
+
+      1. **아래를 향한 셀** — 로봇이 밑에서 올려다볼 수 없다. bottom filter 와 같은 규칙
+         (visibility.facing_up).
+      2. **가려진 셀** (``occluder`` 를 줬을 때) — 그 셀의 *이상적* 카메라, 즉 법선 위
+         WD 지점에 놓은 카메라조차 가려서 못 보는 곳. 파인 홈 바닥, 지그 뒤, 속 빈 물체의
+         안쪽 면이 여기 걸린다. 이런 셀을 분모에 남겨두면 커버리지가 "알고리즘이 못 덮었다"
+         고 말하지만 실제로는 **어떤 알고리즘도 못 덮는다** — 실제로 square_structure 는
+         이 때문에 67.1% 로 보고됐고, 모자란 255cm² 전부가 한 면(가려진 안쪽 판)이었다.
+
+    ⚠️ 판정은 우리 후보 모형(법선 정면, WD 고정)을 따른다. 기울인 카메라라면 볼 수 있는
+    셀도 '접근 불가' 로 빠진다 — 후보에 tilt 를 넣게 되면 이 기준도 같이 넓혀야 한다.
     """
-    return visibility.facing_up(cells.normals, rotation, bottom_angle_deg)
+    keep = visibility.facing_up(cells.normals, rotation, bottom_angle_deg)
+    if occluder is not None and spec is not None and len(cells):
+        keep &= visibility.self_visible(cells.points, cells.normals, occluder, spec)
+    return keep
 
 
 def coverage_report(step_path, positions, normals, point_fov_mm, *,
@@ -670,7 +685,8 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
 
     셀은 셋 중 하나다:
       * **covered**  — 어떤 viewpoint 가 검사 가능한 조건으로 본다
-      * **검사 대상 아님** — 아래를 향해 로봇이 볼 수 없음. 분모에서 뺀다
+      * **검사 불가** — 아래를 향하거나, 이상적 카메라로도 가려서 안 보임. 분모에서 뺀다
+        (뺀 면적은 ``unreachable_cm2``)
       * **uncovered** — 덮을 수 있는데 안 덮인 곳. **이것만이 진짜 구멍이다**
 
     판정은 ``visibility`` 가 전담한다 — 필터·선택과 같은 코드를 쓰므로 셋이 어긋날 수 없다.
@@ -695,6 +711,16 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         np.asarray(normals, dtype=np.float64).reshape(-1, 3),
         point_fov_mm, occluder_mesh, spec, mask=target, frames=frames)
 
+    # 접근 불가 셀을 분모에서 뺀다. 단 **덮인 셀은 절대 빼지 않는다** — 어떤 viewpoint 가
+    # 실제로 그 셀을 검사한다는 것은 접근 가능하다는 증거이고, 이상적 카메라 판정보다 강하다.
+    # (이 단서가 없으면 비스듬히 들여다보이는 셀에서 분모가 분자보다 작아져 100% 를 넘는다.)
+    unreachable_cm2 = 0.0
+    if occluder_mesh is not None and len(cells):
+        reachable = visibility.self_visible(cells.points, cells.normals, occluder_mesh, spec)
+        drop = target & ~reachable & ~covered
+        unreachable_cm2 = float(cells.areas_cm2[drop].sum())
+        target = target & ~drop
+
     area, face_of = cells.areas_cm2, cells.face_id
     report, total_t, total_c = {}, 0.0, 0.0
     for index in sorted(set(face_of.tolist())):
@@ -710,11 +736,14 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         total_c += covered_cm2
     result = {"faces": report, "covered_cm2": total_c, "target_cm2": total_t,
               "covered_ratio": (total_c / total_t) if total_t > 1e-9 else 1.0,
-              "cells": int(len(cells))}
+              "unreachable_cm2": unreachable_cm2, "cells": int(len(cells))}
     if verbose:
         print(f"  Coverage: {result['covered_ratio']*100:.1f}% "
               f"({total_c:.1f}/{total_t:.1f} cm² of inspectable area, "
               f"{result['cells']} cells)")
+        if unreachable_cm2 >= 0.05:
+            print(f"    excluded {unreachable_cm2:.1f} cm² no camera can reach "
+                  f"(occluded even from the ideal pose)")
         for index, row in sorted(report.items(), key=lambda kv: -kv[1]["target_cm2"])[:6]:
             if row["target_cm2"] < 0.5:
                 continue

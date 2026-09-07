@@ -934,9 +934,14 @@ class Studio:
                 tag += f" · 후보 {candidates}개에서 선택"
             cov = surface.get("coverage")
             if cov:
-                # 분모는 '검사 가능한 면적' 이다 — 아래를 향해 로봇이 못 보는 곳은 뺐다.
+                # 분모는 '검사 가능한 면적' 이다 — 아래를 향하거나 이상적 카메라로도
+                # 가려서 안 보이는 곳은 뺐다. 뺀 면적은 **반드시 같이 보여준다**: 조용히
+                # 줄이면 커버리지 100% 가 "다 덮었다" 인지 "볼 수 있는 것만 셌다" 인지
+                # 구분되지 않는다.
                 tag += (f"\n\n커버리지 **{cov['covered_ratio']*100:.1f}%** "
                         f"({cov['covered_cm2']:.0f}/{cov['target_cm2']:.0f} cm²)")
+                if cov.get("unreachable_cm2", 0.0) >= 0.5:
+                    tag += f" · 접근 불가 {cov['unreachable_cm2']:.0f}cm² 제외"
                 holes = [(i, r) for i, r in cov["faces"].items()
                          if r["ratio"] < 0.9 and r["target_cm2"] >= 1.0]
                 if holes:
@@ -1009,9 +1014,10 @@ class Studio:
         frames = visibility.ViewFrames.from_extras(surface["extras"])
         target_mask = None
         if cells is not None:
+            # 커버리지와 **같은 기준**이라야 greedy 가 아무도 못 보는 셀을 쫓지 않는다.
             target_mask = brep.inspectable(
                 cells, p["bottom_angle"] if p["filter_bottom"] else 0.0,
-                config.TARGET_OBJECT["rotation"])
+                config.TARGET_OBJECT["rotation"], occluder=full_mesh, spec=spec)
 
         # 선택은 **adjacency 앞**이다 — 그래프는 최종 집합 위에서 만들어야 한다.
         if cells is not None and p["selection_mode"] != select.SELECTION_ALL:
@@ -1091,6 +1097,9 @@ class Studio:
         coverage = surface.get("coverage")
         if coverage:
             metadata["coverage_ratio"] = float(coverage["covered_ratio"])
+            # ratio 만 남기면 분모가 무엇이었는지 알 수 없다 — 같이 적는다.
+            metadata["coverage_target_cm2"] = float(coverage["target_cm2"])
+            metadata["coverage_unreachable_cm2"] = float(coverage.get("unreachable_cm2", 0.0))
         try:
             save_viewpoints_hdf5(
                 surface["positions"], surface["normals"], out, metadata, camera_spec,
