@@ -721,6 +721,12 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         unreachable_cm2 = float(cells.areas_cm2[drop].sum())
         target = target & ~drop
 
+    # 화면에 그릴 셀 상태: 0 = 구멍, 1 = 덮임, 2 = 검사 불가(아래 향함 또는 접근 불가).
+    # 숫자만 주면 "어디가" 빠졌는지 알 수 없어 매번 진단 스크립트를 따로 짜야 했다.
+    state = np.full(len(cells), 2, dtype=np.uint8)
+    state[target & covered] = 1
+    state[target & ~covered] = 0
+
     area, face_of = cells.areas_cm2, cells.face_id
     report, total_t, total_c = {}, 0.0, 0.0
     for index in sorted(set(face_of.tolist())):
@@ -736,7 +742,8 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         total_c += covered_cm2
     result = {"faces": report, "covered_cm2": total_c, "target_cm2": total_t,
               "covered_ratio": (total_c / total_t) if total_t > 1e-9 else 1.0,
-              "unreachable_cm2": unreachable_cm2, "cells": int(len(cells))}
+              "unreachable_cm2": unreachable_cm2, "cells": int(len(cells)),
+              "cell_points": cells.points, "cell_state": state}
     if verbose:
         print(f"  Coverage: {result['covered_ratio']*100:.1f}% "
               f"({total_c:.1f}/{total_t:.1f} cm² of inspectable area, "

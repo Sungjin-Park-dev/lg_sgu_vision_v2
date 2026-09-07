@@ -173,6 +173,14 @@ def main():
             args.material_rgb = config.OBJECT_TARGET_MATERIAL.get(args.object)
             rgb_source = "config 기본값"
 
+    # STEP 에서 대상을 좁히는 것은 재질이 아니라 **부품**이다 — 위 재질 기본값과 같은 이유로
+    # config 에서 채운다. 안 그러면 sample 이 지그(SAMPLE_BRACKET)까지 조용히 샘플링한다.
+    part_source = "지정"
+    if args.part is None and args.mesh is not None \
+            and Path(args.mesh).suffix.lower() in (".stp", ".step"):
+        args.part = config.OBJECT_TARGET_PART.get(args.object)
+        part_source = "config 기본값"
+
     print("=" * 60)
     print("GENERATE VIEWPOINTS")
     print("=" * 60)
@@ -182,6 +190,8 @@ def main():
         print(f"Target RGB: {args.material_rgb}  ({rgb_source})")
     else:
         print(f"Target: entire mesh (no material filter)")
+    if args.part:
+        print(f"Target part: {args.part}  ({part_source})")
     print()
 
     # 1-2. Load mesh + extract target mesh (material filter)

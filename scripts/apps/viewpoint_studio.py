@@ -386,7 +386,7 @@ class Studio:
         self.data_root = data_root
 
         self.layers: dict[str, list] = {
-            "mesh": [], "surface": [], "markers": [], "delaunay": [],
+            "mesh": [], "surface": [], "markers": [], "delaunay": [], "cells": [],
         }
         self.data: dict | None = None
         self.scene_full_mesh = None
@@ -609,6 +609,12 @@ class Studio:
             self.cb_delaunay = g.add_checkbox(
                 "Graph edges", initial_value=True,
                 hint="GLNS 순서 제약 그래프. 색은 연결 성분")
+            # 커버리지 숫자가 "어디"인지 말하게 한다. 상태줄은 면 번호와 면적까지만 주는데,
+            # 구멍이 면의 어느 쪽인지는 그것으로 안 보인다.
+            self.cb_cells = g.add_checkbox(
+                "Coverage cells", initial_value=False,
+                hint="커버리지 셀을 상태별 색으로 — 초록 덮임 · 빨강 구멍 · 회색 검사 불가 "
+                     "(CAD faces + Coverage check 일 때만)")
 
         # 이 노브가 바꾸는 것(성분 색·GLNS 가 푸는 간선 수)이 바로 아래 진단창과 화면에
         # 있어서 그 옆에 둔다. 슬라이더인 이유: 끌면 즉시 반영된다(Generate 불필요) —
@@ -625,7 +631,8 @@ class Studio:
         self.dd_mesh.on_update(lambda _: self._on_mesh_source_change())
         self.existing_dd.on_update(lambda _: self._on_existing_change())
         self.sl_hops.on_update(lambda _: self._on_hops_change())
-        for cb in (self.cb_mesh, self.cb_surface, self.cb_markers, self.cb_delaunay):
+        for cb in (self.cb_mesh, self.cb_surface, self.cb_markers, self.cb_delaunay,
+                   self.cb_cells):
             cb.on_update(lambda _: self._apply_visibility())
         # 이건 표시/숨김이 아니라 노드 종류(add_glb vs add_mesh_simple)를 바꾼다 → 다시 그린다.
         self.cb_material_view.on_update(lambda _: self._on_material_view_change())
@@ -662,7 +669,14 @@ class Studio:
         self._refresh_part_options()
 
     def _refresh_part_options(self) -> None:
-        """지금 소스 파일 안의 부품 목록. 하나뿐이면 고를 것이 없으니 (all) 만 둔다."""
+        """지금 소스 파일 안의 부품 목록. 하나뿐이면 고를 것이 없으니 (all) 만 둔다.
+
+        기본값은 ``(all)`` 이 아니라 **config.OBJECT_TARGET_PART 의 검사 대상 부품**이다.
+        CAD 경로에는 재질 필터가 없어(B-rep 면에 삼각형 색이 없다) 부품이 대상을 좁히는
+        유일한 수단인데, 기본이 (all) 이면 지그까지 샘플링하고 커버리지 분모에도 넣는다 —
+        sample 이 그래서 90.9%(738cm²) 로 보고됐다. 가림체는 여전히 어셈블리 전체다
+        (load_meshes 의 full_mesh) — 지그에 가려지는 viewpoint 는 계속 걸러야 한다.
+        """
         options = [PART_ALL]
         try:
             # OBJ 는 재질 그룹이 부품처럼 보이지만 그건 Material RGB 가 고르는 것이다 —
@@ -675,7 +689,8 @@ class Studio:
         except Exception as exc:  # noqa: BLE001
             print(f"  [warn] part list failed: {exc}")
         self.dd_part.options = options
-        self.dd_part.value = PART_ALL
+        target = config.OBJECT_TARGET_PART.get(self.object_dd.value)
+        self.dd_part.value = target if target in options else PART_ALL
 
     def _current_part(self) -> str | None:
         value = self.dd_part.value
@@ -921,6 +936,11 @@ class Studio:
                 adjacency=adjacency,
                 fov_w_mm=p["fov_width_mm"], fov_h_mm=p["fov_height_mm"],
             )
+            cov_cells = surface.get("coverage") or {}
+            if cov_cells.get("cell_points") is not None:
+                # 저장본을 불러올 때는 이 키가 없어 셀 레이어가 그냥 비는다 — 커버리지는
+                # h5 에 없는(그때그때 CAD 에서 세는) 것이라 그게 맞다.
+                data["coverage_cells"] = (cov_cells["cell_points"], cov_cells["cell_state"])
             self.last = {"obj": obj, "surface": surface, "params": p,
                          "n": data["n"], "input_path": input_path,
                          "adjacency": adjacency}
@@ -1132,6 +1152,7 @@ class Studio:
         toggles = {
             "mesh": self.cb_mesh, "surface": self.cb_surface,
             "markers": self.cb_markers, "delaunay": self.cb_delaunay,
+            "cells": self.cb_cells,
         }
         for key, cb in toggles.items():
             for handle in self.layers[key]:
@@ -1194,6 +1215,21 @@ class Studio:
                 self.layers["delaunay"].append(srv.scene.add_spline_catmull_rom(
                     f"/scene/delaunay/e{edge_idx}", positions=np.stack([cam[a], cam[b]]),
                     color=group_colors[int(group_id[a])], line_width=1.0))
+
+        cells = data.get("coverage_cells")
+        if cells is not None:
+            cell_points, cell_state = cells
+            # 색은 판정의 세 갈래 그대로다 — 커버리지 숫자와 화면이 같은 배열에서 나온다.
+            for value, rgb, name in ((1, (70, 175, 95), "covered"),
+                                     (0, (235, 70, 60), "hole"),
+                                     (2, (140, 140, 140), "unreachable")):
+                idx = np.where(cell_state == value)[0]
+                if idx.size == 0:
+                    continue
+                self.layers["cells"].append(srv.scene.add_point_cloud(
+                    f"/scene/cells/{name}", points=cell_points[idx],
+                    colors=np.tile(np.array(rgb, dtype=np.uint8), (idx.size, 1)),
+                    point_size=0.0015, point_shape="circle"))
 
         self._apply_visibility()
 

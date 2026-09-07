@@ -197,6 +197,15 @@ OBJECT_TARGET_MATERIAL = {
     "sample": "0,255,0",
 }
 
+# 물체별 CAD(STEP) 검사 대상 부품. 위 재질 표의 **CAD 판**이다 — B-rep 면에는 삼각형 색이
+# 없어 재질 필터를 쓸 수 없으므로, CAD 경로에서 검사 대상을 좁히는 유일한 수단이 부품이다.
+# ⚠️ 안 고르면 어셈블리 전체(지그 포함)가 후보에도 커버리지 분모에도 들어간다 — sample 은
+#    지그 혼자 '접근 불가' 193cm² 를 만들어 커버리지를 90.9% 로 끌어내렸다(부품 지정 시 556cm²
+#    분모에 90.5%). 부품이 하나뿐인 파일은 적을 필요가 없다.
+OBJECT_TARGET_PART = {
+    "sample": "SAMPLE",
+}
+
 
 def apply_object_placement(object_name):
     """object_name 의 배치를 TARGET_OBJECT/support 에 in-place 반영(robot frame).
