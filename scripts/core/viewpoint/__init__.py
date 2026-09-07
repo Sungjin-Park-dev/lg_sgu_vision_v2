@@ -24,6 +24,7 @@ from .models import (
     ViewpointResult,
 )
 from .pipeline import (
+    append_viewpoints,
     finalize_viewpoints,
     generate_viewpoints_core,
     prepare_viewpoints,
@@ -52,6 +53,7 @@ __all__ = [
     "components_from_edges",
     "cut_vertices",
     "expand_edges_by_hops",
+    "append_viewpoints",
     "finalize_viewpoints",
     "generate_viewpoints_core",
     "load_meshes",

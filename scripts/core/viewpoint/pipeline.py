@@ -104,6 +104,35 @@ def subset_viewpoints(surface: dict, indices) -> dict:
     return out
 
 
+def append_viewpoints(surface: dict, positions, normals, params: ViewpointGenParams,
+                      extras=None) -> dict:
+    """``finalize_viewpoints`` 결과에 viewpoint 를 덧붙인다 — 구멍 보충이 쓴다.
+
+    ``subset_viewpoints`` 의 반대 방향이고 규약은 같다: positions/normals/camera_positions 와
+    ``extras`` 를 **한꺼번에** 잇는다. extras 키가 어긋나면 조용히 face_id 가 점과 안 맞으므로
+    양쪽에 같은 키가 있어야 한다.
+    """
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+    if not len(positions):
+        return surface
+    extras = {k: np.asarray(v) for k, v in (extras or {}).items()}
+    base = surface.get("extras", {})
+    if set(base) != set(extras):
+        raise ValueError(f"extras keys differ: {sorted(base)} vs {sorted(extras)}")
+
+    out = dict(surface)
+    cameras = positions + normals * (params.working_distance_mm / 1000.0)
+    out["positions"] = np.vstack([surface["positions"], positions.astype(np.float32)])
+    out["normals"] = np.vstack([surface["normals"], normals.astype(np.float32)])
+    out["camera_positions"] = np.vstack([surface["camera_positions"],
+                                         cameras.astype(np.float32)])
+    out["extras"] = {k: np.concatenate([np.asarray(base[k]), extras[k]]) for k in extras}
+    out["original_path_length_mm"] = _nn_path_length(
+        np.asarray(out["camera_positions"], dtype=np.float64)) * 1000.0
+    return out
+
+
 def prepare_viewpoints(target_mesh, params: ViewpointGenParams, occluder_mesh=None):
     """표면 FPS 샘플링 + 공통 후처리(bottom/가림 필터).
 

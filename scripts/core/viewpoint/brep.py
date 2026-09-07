@@ -579,6 +579,10 @@ class SurfaceCells:
     areas_cm2: np.ndarray       # (M,)
     face_id: np.ndarray         # (M,)
     transform: np.ndarray       # CAD(mm) → 파이프라인(m) 4x4
+    # 셀의 (u,v) 접선. 셀을 겨냥한 **보충 viewpoint** 가 촬영 사각형의 방향으로 쓴다
+    # (patch_uncovered). 격자 viewpoint 와 같은 규약이라 판정이 일관된다.
+    frame_u: np.ndarray = None   # (M,3)
+    frame_v: np.ndarray = None   # (M,3)
 
     def __len__(self) -> int:
         return len(self.points)
@@ -599,7 +603,7 @@ def surface_cells(step_path, *, part_name: Optional[str] = None,
     faces, o = read_faces(step_path, part_name)
     from OCP.BRepTools import BRepTools
 
-    points, normals, areas, face_of = [], [], [], []
+    points, normals, areas, face_of, tan_u, tan_v = [], [], [], [], [], []
     for index, face in enumerate(faces):
         surface = o["BRep_Tool"].Surface_s(face)
         u0, u1, v0, v1 = BRepTools.UVBounds_s(face)
@@ -625,25 +629,42 @@ def surface_cells(step_path, *, part_name: Optional[str] = None,
                 if not local.IsNormalDefined():
                     continue
                 point, normal = local.Value(), local.Normal()
+                d1u = np.array([local.D1U().X(), local.D1U().Y(), local.D1U().Z()])
+                norm_u = np.linalg.norm(d1u)
+                if norm_u < 1e-9:
+                    continue
+                unit_n = sign * np.array([normal.X(), normal.Y(), normal.Z()])
+                axis_u = d1u / norm_u
+                axis_v = np.cross(unit_n, axis_u)
+                norm_v = np.linalg.norm(axis_v)
+                if norm_v < 1e-9:
+                    continue
                 jac = np.linalg.norm(np.cross(
-                    [local.D1U().X(), local.D1U().Y(), local.D1U().Z()],
-                    [local.D1V().X(), local.D1V().Y(), local.D1V().Z()]))
+                    d1u, [local.D1V().X(), local.D1V().Y(), local.D1V().Z()]))
                 areas.append(jac * ((u1 - u0) / n_u) * ((v1 - v0) / n_v))
                 points.append([point.X(), point.Y(), point.Z()])
-                normals.append([sign * normal.X(), sign * normal.Y(), sign * normal.Z()])
+                normals.append(unit_n.tolist())
+                tan_u.append(axis_u.tolist())
+                tan_v.append((axis_v / norm_v).tolist())
                 face_of.append(index)
     if not points:
         empty = np.zeros((0, 3))
-        return SurfaceCells(empty, empty, np.zeros(0), np.zeros(0, dtype=np.int32), transform)
+        return SurfaceCells(empty, empty, np.zeros(0), np.zeros(0, dtype=np.int32), transform,
+                            frame_u=empty, frame_v=empty)
 
     rot, offset = transform[:3, :3], transform[:3, 3]
     P = (rot @ (np.asarray(points).T / 1000.0)).T + offset       # CAD(mm) → 파이프라인(m)
     N = (rot @ np.asarray(normals).T).T
     N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-12)
+    # 접선은 방향이라 회전만 씌운다(평행이동·스케일 없음).
+    U = (rot @ np.asarray(tan_u).T).T
+    V = (rot @ np.asarray(tan_v).T).T
     return SurfaceCells(points=P, normals=N,
                         areas_cm2=np.asarray(areas) / 100.0,     # mm² → cm²
                         face_id=np.asarray(face_of, dtype=np.int32),
-                        transform=transform)
+                        transform=transform,
+                        frame_u=U / np.maximum(np.linalg.norm(U, axis=1, keepdims=True), 1e-12),
+                        frame_v=V / np.maximum(np.linalg.norm(V, axis=1, keepdims=True), 1e-12))
 
 
 def inspectable(cells: SurfaceCells, bottom_angle_deg: float = 0.0,
@@ -700,6 +721,68 @@ def inspection_mask(cells: SurfaceCells, positions, normals, point_fov_mm,
         unreachable_cm2 = float(cells.areas_cm2[drop].sum())
         target = target & ~drop
     return target, unreachable_cm2
+
+
+def patch_uncovered(cells: SurfaceCells, hole_mask, face_fov_mm: dict,
+                    occluder, spec: "visibility.SensorSpec",
+                    default_fov_mm: Tuple[float, float] = (50.0, 50.0),
+                    verbose: bool = True):
+    """구멍으로 남은 셀을 **정면으로 겨냥한** 보충 viewpoint. (points_m, normals, extras)
+
+    격자를 건드리지 않고 모자란 곳만 채운다. 격자를 손보는 대안(예: 트리밍 경계 밖 프레임을
+    살리기)은 특정 원인 하나에만 듣고 격자의 규칙성을 깨뜨리는데, 이쪽은 **원인과 무관하게**
+    남은 구멍에 듣는다 — 트리밍 경계든, 곡률이 급해 유효 FOV 가 좁아진 자리든.
+
+    후보는 구멍 셀 하나당 하나(그 셀의 법선 위 WD 지점에서 정면으로 본다). 그대로 다 쓰면
+    수백 개가 되므로 **greedy set cover 로 최소 집합만** 남긴다 — 한 컷이 구멍 여러 개를
+    한꺼번에 덮기 때문이다. 프레임 축과 폭은 그 셀이 속한 면의 것을 그대로 쓴다(격자와 같은
+    규약이라 판정이 어긋나지 않는다).
+
+    Args:
+        hole_mask: (M,) bool — 덮어야 하는데 안 덮인 셀.
+        face_fov_mm: {face_id: (fov_u, fov_v)} — 면별 유효 FOV(샘플러의 ``infos``).
+    """
+    from . import select  # 지연 import: select 는 brep 을 모른다(순환 없음)
+
+    hole = np.asarray(hole_mask, dtype=bool)
+    idx = np.flatnonzero(hole)
+    empty = (np.zeros((0, 3)), np.zeros((0, 3)), {})
+    if not len(idx) or cells.frame_u is None:
+        return empty
+
+    points, normals = cells.points[idx], cells.normals[idx]
+    fov = np.array([face_fov_mm.get(int(f), default_fov_mm) for f in cells.face_id[idx]],
+                   dtype=np.float64)
+    frames = visibility.ViewFrames(cells.frame_u[idx], cells.frame_v[idx],
+                                   fov[:, 0], fov[:, 1])
+
+    # 후보 적격성은 격자와 같은 규칙이다 — 자기 점을 볼 수 있어야 한다(가림).
+    ok = visibility.self_visible(points, normals, occluder, spec)
+    if not ok.any():
+        if verbose:
+            print(f"  Hole patching: {len(idx)} uncovered cells, none reachable")
+        return empty
+    points, normals, fov = points[ok], normals[ok], fov[ok]
+    frames = frames[ok]
+
+    sets = select.coverage_sets(cells, points, normals, np.maximum(fov[:, 0], fov[:, 1]),
+                                occluder, spec, mask=hole, frames=frames)
+    chosen = select.greedy_cover(sets, cells.areas_cm2, mask=hole, target_ratio=1.0)
+    if not len(chosen):
+        return empty
+    points, normals, fov = points[chosen], normals[chosen], fov[chosen]
+    frames = frames[chosen]
+    if verbose:
+        area = float(cells.areas_cm2[hole].sum())
+        print(f"  Hole patching: {len(chosen)} viewpoints added for {int(hole.sum())} "
+              f"uncovered cells ({area:.1f} cm²)")
+    extras = {
+        "face_id": cells.face_id[idx][ok][chosen],
+        "frame_u": frames.axis_u, "frame_v": frames.axis_v,
+        "fov_u_mm": fov[:, 0], "fov_v_mm": fov[:, 1],
+        "effective_fov_mm": np.maximum(fov[:, 0], fov[:, 1]),
+    }
+    return points, normals, extras
 
 
 def coverage_report(step_path, positions, normals, point_fov_mm, *,
