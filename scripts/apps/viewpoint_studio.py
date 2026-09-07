@@ -23,8 +23,14 @@ Two ways to put viewpoints on screen, both object-centric:
          trimming boundary, and takes positions/normals analytically (no
          tessellation error). Both then pass the same bottom / occlusion
          filters (``finalize_viewpoints``).
-      2. **Selection** — keep them all, or let greedy set cover pick a minimal
-         subset that still meets the coverage target.
+      2. **Selection** — the only place the candidate set is reduced. ``격자만``
+         keeps the sampler's output as-is (holes may remain; a diagnostic view).
+         ``Greedy set cover`` widens the pool with one candidate per uncovered
+         cell — aimed head-on at it — and then greedily picks a minimal subset
+         that meets the coverage target. Widening before reducing is what closes
+         holes the grid cannot reach on its own, and it usually costs fewer
+         points than the grid, not more (curved_structure 45°: 60 points at
+         97.8% → 54 at 100%).
       3. **Verify** — count how much of each face is actually covered.
       4. **Solver graph** — build the local-tangent Delaunay graph on whatever
          survived. This stage cannot change the points, only the edges.
@@ -141,7 +147,7 @@ MAX_GLNS_HOPS = 4
 SAMPLER_FPS = "Surface FPS (mesh)"
 SAMPLER_BREP = "CAD faces (STEP)"
 # 선택 단계 표기. 기본은 '전부' = 지금까지의 동작.
-SELECTION_LABELS = {"전부 사용": select.SELECTION_ALL,
+SELECTION_LABELS = {"격자만": select.SELECTION_GRID,
                     "Greedy set cover": select.SELECTION_GREEDY}
 STEP_SUFFIXES = (".stp", ".step")
 # 어셈블리에서 부품을 안 고른 상태. 파일 전체를 하나로 다룬다.
@@ -200,8 +206,6 @@ def surface_key(obj: str, p: dict) -> tuple:
         # 샘플러가 다르면 점 자체가 다르다.
         p["sampler"],
         round(float(p["fillet_skip_mm"]), 4),
-        # 보충은 후보 집합 자체를 바꾼다 — 키에서 빼면 토글해도 캐시 히트로 옛 점이 나온다.
-        bool(p["patch_holes"]),
         round(float(p["max_incidence_deg"]), 4),
         round(float(p["dof_mm"]), 4),
         bool(p["filter_bottom"]),
@@ -563,24 +567,19 @@ class Studio:
                     min=0.0, max=50.0, step=1.0,
                     hint="이보다 반지름이 작은 원통/토러스 면(=모서리 필렛)은 건너뛴다 — "
                          "이웃 면 촬영이 이미 덮는다. 0 이면 모두 샘플링 (CAD faces 전용)")
-                # 격자는 규칙적이라 좋지만 구멍이 남는다 — 트리밍 경계 밖이라 버려진 프레임
-                # 자리(curved_structure 45°: 22개 버려져 13.4cm²), 곡률이 급해 유효 FOV 가
-                # 좁아진 자리. 격자를 손대는 대신 **모자란 곳만 정면으로 겨냥해** 덧붙인다.
-                # 구멍 셀 하나당 후보 하나를 만들고 greedy 로 최소 집합만 남긴다.
-                self.cb_patch = g.add_checkbox(
-                    "Patch holes", initial_value=True,
-                    hint="덮이지 않은 셀을 정면으로 보는 viewpoint 를 추가한다 — 격자는 그대로 "
-                         "두고 구멍만 채운다. 셀마다 후보를 만든 뒤 greedy set cover 로 최소 "
-                         "집합만 남긴다(아래 Selection 과는 별개로 늘 돈다 — 안 그러면 셀 "
-                         "하나당 한 점이 되어 수백 개가 붙는다). CAD faces 전용")
-
-            # 후보 중 무엇을 쓸지. 격자는 규칙적이라 중복이 남고, greedy 는 커버리지를
-            # 지키면서 그 중복을 걷어낸다(curved_structure 52→37점, 커버리지 동일).
+            # 후보 풀에서 무엇을 쓸지 — **줄이는 결정은 여기 한 곳에서만** 한다.
+            # 한때 구멍 보충이 Candidates 자리에서 자체 greedy 를 돌렸는데, set cover 가
+            # 두 번 일어나 어느 쪽이 최종 집합을 정했는지 알 수 없었다.
+            #
+            # greedy 는 격자에 **구멍 후보**(덮이지 않은 셀을 정면으로 보는 자리)를 더한
+            # 풀에서 고른다. 그래서 격자만으로 안 되던 곳까지 닫으면서 점은 오히려 준다:
+            # sample 45° 격자만 61점 89.9% → greedy 68점 100%.
             with g.add_folder("Selection"):
                 self.dd_selection = g.add_dropdown(
-                    "Selection", options=tuple(SELECTION_LABELS), initial_value="전부 사용",
-                    hint="Greedy 는 커버리지를 유지하며 최소 집합을 고른다 "
-                         "(CAD faces 전용 — 셀이 CAD 면에서 나온다)")
+                    "Selection", options=tuple(SELECTION_LABELS),
+                    initial_value="Greedy set cover",
+                    hint="격자만 = 샘플러 결과 그대로(구멍이 남을 수 있다, 진단용). "
+                         "Greedy = 격자 + 구멍 후보에서 최소 집합 (CAD faces 전용)")
                 self.nb_sel_target = g.add_number(
                     "Target coverage (%)", initial_value=100.0, min=50.0, max=100.0, step=1.0,
                     hint="greedy 가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 "
@@ -884,9 +883,8 @@ class Studio:
             "sampler": self.dd_sampler.value,
             "fillet_skip_mm": float(self.nb_fillet.value),
             "coverage": bool(self.cb_coverage.value),
-            "patch_holes": bool(self.cb_patch.value),
             "selection_mode": SELECTION_LABELS.get(self.dd_selection.value,
-                                                   select.SELECTION_ALL),
+                                                   select.SELECTION_GRID),
             "selection_target": float(self.nb_sel_target.value) / 100.0,
             "max_incidence_deg": float(self.nb_incidence.value),
             "dof_mm": float(self.nb_dof.value),
@@ -978,9 +976,9 @@ class Studio:
             self._refresh_existing_options(select=GENERATED_LABEL, keep_generated=True)
             self.graph_status.content = "Idle — 점이 새로 생겼습니다. **Build graph**."
             tag = " · CAD faces" if p["sampler"] == SAMPLER_BREP else ""
-            patched = surface.get("patched_count")
-            if patched:
-                tag += f" · 구멍 보충 {patched}개"
+            holes = surface.get("hole_candidates")
+            if holes:
+                tag += f" · 구멍 후보 {holes}개"
             candidates = surface.get("candidate_count")
             if candidates and candidates != data["n"]:
                 tag += f" · 후보 {candidates}개에서 선택"
@@ -1122,9 +1120,8 @@ class Studio:
                     "effective_fov_mm": meta["effective_fov_mm"],
                     "frame_u": meta["frame_u"], "frame_v": meta["frame_v"],
                     "fov_u_mm": meta["fov_u_mm"], "fov_v_mm": meta["fov_v_mm"]})
-        need_cells = len(surface["positions"]) and (
-            p["coverage"] or p["patch_holes"]
-            or p["selection_mode"] != select.SELECTION_ALL)
+        greedy = p["selection_mode"] == select.SELECTION_GREEDY
+        need_cells = len(surface["positions"]) and (p["coverage"] or greedy)
         cells = None
         if need_cells:
             try:
@@ -1136,21 +1133,26 @@ class Studio:
 
         spec = visibility.SensorSpec.from_params(params)
         frames = visibility.ViewFrames.from_extras(surface["extras"])
+        bottom_deg = p["bottom_angle"] if p["filter_bottom"] else 0.0
+        rotation = config.TARGET_OBJECT["rotation"]
+
+        def denominator(surf, frm):
+            """검사 대상 셀 = 커버리지의 분모. **후보 풀** 기준으로 잡는다 — 선택 뒤에 다시
+            계산하면 greedy 가 버린 셀이 분모에서도 빠져, 더 작은 과녁을 맞히고 100% 를
+            주장한다(square_structure 에서 520 vs 632cm²)."""
+            return brep.inspection_mask(
+                cells, surf["positions"], surf["normals"],
+                surf["extras"]["effective_fov_mm"], full_mesh, spec,
+                bottom_angle_deg=bottom_deg, rotation=rotation, frames=frm)
+
         target_mask, unreachable_cm2 = None, 0.0
         if cells is not None:
-            # 분모는 **후보 전체** 기준으로 여기서 한 번 정하고, 선택과 커버리지가 같이
-            # 쓴다. 선택 뒤에 다시 계산하면 greedy 가 버린 셀이 분모에서도 빠져 더 작은
-            # 과녁을 맞히고 100% 를 주장한다(square_structure 에서 520 vs 632cm²).
-            target_mask, unreachable_cm2 = brep.inspection_mask(
-                cells, surface["positions"], surface["normals"],
-                surface["extras"]["effective_fov_mm"], full_mesh, spec,
-                bottom_angle_deg=p["bottom_angle"] if p["filter_bottom"] else 0.0,
-                rotation=config.TARGET_OBJECT["rotation"], frames=frames)
+            target_mask, unreachable_cm2 = denominator(surface, frames)
 
-        # 구멍 보충: 격자를 손대지 않고 **모자란 곳만** 겨냥해 덧붙인다. 격자 규칙성을
-        # 지키면서 원인과 무관하게 듣는다 — 트리밍 경계 밖이라 버려진 프레임 자리든,
-        # 곡률이 급해 유효 FOV 가 좁아진 자리든.
-        if cells is not None and p["patch_holes"]:
+        # 격자만으로 못 덮은 셀을 정면으로 겨냥한 **후보**를 풀에 더한다. 여기서 고르지
+        # 않는다 — 줄이는 것은 Selection 한 곳에서만 한다. 격자 모드는 이 단계를 건너뛴다
+        # (그 모드의 뜻이 "샘플러 결과 그대로" 이기 때문이다).
+        if cells is not None and greedy:
             covered = visibility.covered_by_any(
                 cells.points, cells.normals, surface["positions"], surface["normals"],
                 surface["extras"]["effective_fov_mm"], full_mesh, spec,
@@ -1160,34 +1162,28 @@ class Studio:
                 face_fov = {i: tuple(info["effective_fov_mm"])
                             for i, info in enumerate(meta["infos"])
                             if "effective_fov_mm" in info}
-                extra_p, extra_n, extra_e = brep.patch_uncovered(
+                extra_p, extra_n, extra_e = brep.hole_candidates(
                     cells, hole, face_fov, full_mesh, spec,
                     default_fov_mm=(p["fov_width_mm"], p["fov_height_mm"]))
                 if len(extra_p):
                     surface = append_viewpoints(surface, extra_p, extra_n, params,
                                                 extras=extra_e)
-                    surface["patched_count"] = int(len(extra_p))
+                    surface["hole_candidates"] = int(len(extra_p))
                     frames = visibility.ViewFrames.from_extras(surface["extras"])
-                    # 분모를 다시 잡는다 — 보충 점이 덮은 셀은 더 이상 '접근 불가' 가 아니다.
-                    target_mask, unreachable_cm2 = brep.inspection_mask(
-                        cells, surface["positions"], surface["normals"],
-                        surface["extras"]["effective_fov_mm"], full_mesh, spec,
-                        bottom_angle_deg=p["bottom_angle"] if p["filter_bottom"] else 0.0,
-                        rotation=config.TARGET_OBJECT["rotation"], frames=frames)
+                    # 분모를 다시 잡는다 — 구멍 후보가 닿는 셀은 '접근 불가' 가 아니다.
+                    target_mask, unreachable_cm2 = denominator(surface, frames)
 
-        # 후보 수는 **선택 직전** 값이다 — 격자 + 보충까지가 고를 수 있는 전부다.
+        # 후보 수는 **선택 직전** 값이다 — 격자 + 구멍 후보까지가 고를 수 있는 전부다.
         surface["candidate_count"] = int(len(surface["positions"]))
 
         # 선택은 **adjacency 앞**이다 — 그래프는 최종 집합 위에서 만들어야 한다.
-        if cells is not None and p["selection_mode"] != select.SELECTION_ALL:
+        if cells is not None and greedy:
             chosen = select.select(
                 p["selection_mode"], cells, surface["positions"], surface["normals"],
                 surface["extras"]["effective_fov_mm"], full_mesh, spec,
                 mask=target_mask, target_ratio=p["selection_target"], frames=frames)
             if chosen is not None and len(chosen):
                 frames = frames[chosen] if frames is not None else None
-                # candidate_count 는 **필터를 통과한** 후보 수 그대로 둔다. 샘플러 원본
-                # 개수로 덮으면 필터가 지운 것과 선택이 고른 것이 섞여 읽힌다.
                 surface = subset_viewpoints(surface, chosen)
                 surface["selection_mode"] = p["selection_mode"]
 
@@ -1247,7 +1243,7 @@ class Studio:
             "align_mode": p["align"],
             # 선택 단계 — 같은 설정인데 개수가 다른 이유가 된다. **요청값이 아니라 실제로
             # 적용된 값**을 남긴다(FPS 경로는 셀이 없어 선택을 돌리지 않는다).
-            "selection_mode": surface.get("selection_mode", select.SELECTION_ALL),
+            "selection_mode": surface.get("selection_mode", select.SELECTION_GRID),
             "candidate_count": int(surface.get("candidate_count", L["n"])),
             # 유효 FOV 를 좁힌 검사 품질 한계 — 개수가 달라지는 이유가 된다(0 = 미사용).
             "max_incidence_deg": p["max_incidence_deg"],

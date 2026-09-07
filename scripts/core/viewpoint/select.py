@@ -5,9 +5,12 @@
 지금까지는 셋째가 없어서 "만든 것을 전부 쓴다" 였다. 격자는 겹침 50% 로 규칙적으로 깔리므로
 중복이 있고, 실제로 curved_structure 는 105점 중 **67점만으로 커버리지 100% 가 유지**된다.
 
-선택을 별도 단계로 두는 이유는 강제하지 않기 위해서다 — 기본값 ``all`` 은 지금까지의 동작
-그대로이고, ``greedy`` 는 옵션이다. 커버 관계는 ``visibility`` 를 그대로 쓰므로 커버리지
-리포트와 **같은 판정** 위에서 고른다(둘이 어긋날 수 없다).
+**줄이는 결정은 여기 한 곳에서만 한다.** 한때 구멍 보충이 후보 생성 자리에서 자체 greedy 를
+돌렸는데, 그러면 set cover 가 두 번 일어나 어느 쪽이 최종 집합을 정했는지 알 수 없었다.
+지금은 후보 생성이 격자와 구멍 후보를 **고르지 않고** 내놓고, 여기가 전부 결정한다.
+
+커버 관계는 ``visibility`` 를 그대로 쓰므로 커버리지 리포트와 **같은 판정** 위에서 고른다
+(둘이 어긋날 수 없다).
 
 set covering 은 NP-hard 지만 greedy 가 (1+ln n) 근사를 보장하고, 우리 규모(후보 10²,
 셀 10³~10⁴)에서는 순식간이다.
@@ -21,9 +24,9 @@ import numpy as np
 
 from . import visibility
 
-SELECTION_ALL = "all"          # 전부 사용 = 지금까지의 동작
-SELECTION_GREEDY = "greedy"    # 면적 이득이 큰 순으로 최소 집합
-SELECTION_MODES = (SELECTION_ALL, SELECTION_GREEDY)
+SELECTION_GRID = "grid"        # 격자 그대로 — 구멍이 남을 수 있다(진단용)
+SELECTION_GREEDY = "greedy"    # 격자 + 구멍 후보에서 면적 이득 순으로 최소 집합
+SELECTION_MODES = (SELECTION_GRID, SELECTION_GREEDY)
 
 
 def coverage_sets(cells, positions, normals, point_fov_mm, occluder,
@@ -105,7 +108,7 @@ def select(mode: str, cells, positions, normals, point_fov_mm, occluder,
            spec: visibility.SensorSpec, mask=None, target_ratio: float = 1.0,
            frames: Optional[visibility.ViewFrames] = None,
            verbose: bool = True) -> Optional[np.ndarray]:
-    """모드에 따라 쓸 viewpoint 인덱스를 고른다. ``all`` 이면 None(=전부)."""
+    """모드에 따라 쓸 viewpoint 인덱스를 고른다. ``grid`` 면 None(=후보 그대로)."""
     if mode != SELECTION_GREEDY or cells is None or len(cells.points) == 0:
         return None
     sets = coverage_sets(cells, positions, normals, point_fov_mm, occluder, spec,

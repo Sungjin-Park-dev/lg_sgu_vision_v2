@@ -723,31 +723,27 @@ def inspection_mask(cells: SurfaceCells, positions, normals, point_fov_mm,
     return target, unreachable_cm2
 
 
-def patch_uncovered(cells: SurfaceCells, hole_mask, face_fov_mm: dict,
+def hole_candidates(cells: SurfaceCells, hole_mask, face_fov_mm: dict,
                     occluder, spec: "visibility.SensorSpec",
                     default_fov_mm: Tuple[float, float] = (50.0, 50.0),
                     verbose: bool = True):
-    """구멍으로 남은 셀을 **정면으로 겨냥한** 보충 viewpoint. (points_m, normals, extras)
+    """구멍으로 남은 셀을 **정면으로 겨냥한** 후보 viewpoint. (points_m, normals, extras)
 
-    격자를 건드리지 않고 모자란 곳만 채운다. 격자를 손보는 대안(예: 트리밍 경계 밖 프레임을
+    격자를 건드리지 않고 후보 풀만 넓힌다. 격자를 손보는 대안(예: 트리밍 경계 밖 프레임을
     살리기)은 특정 원인 하나에만 듣고 격자의 규칙성을 깨뜨리는데, 이쪽은 **원인과 무관하게**
     남은 구멍에 듣는다 — 트리밍 경계든, 곡률이 급해 유효 FOV 가 좁아진 자리든.
 
-    후보는 구멍 셀 하나당 하나(그 셀의 법선 위 WD 지점에서 정면으로 본다). 그대로 다 쓰면
-    수백 개가 되므로 **greedy set cover 로 최소 집합만** 남긴다 — 한 컷이 구멍 여러 개를
-    한꺼번에 덮기 때문이다(sample 0°: 361셀 → 14점).
+    구멍 셀 하나당 후보 하나(그 셀의 법선 위 WD 지점에서 정면으로 본다)를 그대로 내놓는다.
+    **여기서 고르지 않는다** — 줄이는 것은 select 한 곳에서만 한다. 예전에는 이 함수가
+    자체 greedy 를 돌려 최소 집합만 내놨는데, 그러면 set cover 가 두 번 일어나 Selection 이
+    무엇을 결정하는지 알 수 없었다.
 
-    ⚠️ 여기의 greedy 는 ``Selection`` 노브와 **별개**이고 늘 돈다. 저쪽은 "최종 집합을
-    줄일까" 라는 정책이고, 이쪽은 "셀을 촬영으로 바꾸는" 변환이다. 목표도 늘 100% 다 —
-    구멍을 남기려고 보충하는 것이 아니므로 ``Target coverage`` 를 보지 않는다. 프레임 축과 폭은 그 셀이 속한 면의 것을 그대로 쓴다(격자와 같은
-    규약이라 판정이 어긋나지 않는다).
+    후보 적격성만 본다: 그 자리 카메라가 제 점을 볼 수 있어야 한다(가림) — 격자와 같은 규칙.
 
     Args:
         hole_mask: (M,) bool — 덮어야 하는데 안 덮인 셀.
         face_fov_mm: {face_id: (fov_u, fov_v)} — 면별 유효 FOV(샘플러의 ``infos``).
     """
-    from . import select  # 지연 import: select 는 brep 을 모른다(순환 없음)
-
     hole = np.asarray(hole_mask, dtype=bool)
     idx = np.flatnonzero(hole)
     empty = (np.zeros((0, 3)), np.zeros((0, 3)), {})
@@ -757,36 +753,22 @@ def patch_uncovered(cells: SurfaceCells, hole_mask, face_fov_mm: dict,
     points, normals = cells.points[idx], cells.normals[idx]
     fov = np.array([face_fov_mm.get(int(f), default_fov_mm) for f in cells.face_id[idx]],
                    dtype=np.float64)
-    frames = visibility.ViewFrames(cells.frame_u[idx], cells.frame_v[idx],
-                                   fov[:, 0], fov[:, 1])
-
-    # 후보 적격성은 격자와 같은 규칙이다 — 자기 점을 볼 수 있어야 한다(가림).
     ok = visibility.self_visible(points, normals, occluder, spec)
     if not ok.any():
         if verbose:
-            print(f"  Hole patching: {len(idx)} uncovered cells, none reachable")
+            print(f"  Hole candidates: {len(idx)} uncovered cells, none reachable")
         return empty
-    points, normals, fov = points[ok], normals[ok], fov[ok]
-    frames = frames[ok]
-
-    sets = select.coverage_sets(cells, points, normals, np.maximum(fov[:, 0], fov[:, 1]),
-                                occluder, spec, mask=hole, frames=frames)
-    chosen = select.greedy_cover(sets, cells.areas_cm2, mask=hole, target_ratio=1.0)
-    if not len(chosen):
-        return empty
-    points, normals, fov = points[chosen], normals[chosen], fov[chosen]
-    frames = frames[chosen]
+    keep = np.flatnonzero(ok)
     if verbose:
-        area = float(cells.areas_cm2[hole].sum())
-        print(f"  Hole patching: {len(chosen)} viewpoints added for {int(hole.sum())} "
-              f"uncovered cells ({area:.1f} cm²)")
+        print(f"  Hole candidates: {len(keep)} added for {int(hole.sum())} uncovered cells "
+              f"({float(cells.areas_cm2[hole].sum()):.1f} cm²)")
     extras = {
-        "face_id": cells.face_id[idx][ok][chosen],
-        "frame_u": frames.axis_u, "frame_v": frames.axis_v,
-        "fov_u_mm": fov[:, 0], "fov_v_mm": fov[:, 1],
-        "effective_fov_mm": np.maximum(fov[:, 0], fov[:, 1]),
+        "face_id": cells.face_id[idx][keep],
+        "frame_u": cells.frame_u[idx][keep], "frame_v": cells.frame_v[idx][keep],
+        "fov_u_mm": fov[keep, 0], "fov_v_mm": fov[keep, 1],
+        "effective_fov_mm": np.maximum(fov[keep, 0], fov[keep, 1]),
     }
-    return points, normals, extras
+    return points[keep], normals[keep], extras
 
 
 def coverage_report(step_path, positions, normals, point_fov_mm, *,
