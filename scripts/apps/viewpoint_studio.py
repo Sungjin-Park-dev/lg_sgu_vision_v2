@@ -8,8 +8,10 @@ Two ways to put viewpoints on screen, both object-centric:
     ``prepare_viewpoints`` / ``build_local_delaunay_adjacency``). The panel follows
     the four stages, in the order they run:
 
-    Above those four sits **Target**: which file, which part or material of it is
-    the inspection target, and which of the sampled points stay eligible (bottom /
+    Above those four sits **Target**: which file (STEP sources are tessellated at a
+    fixed ``DEFAULT_STEP_TOL_LINEAR``, which the CAD sampler never reads — it
+    evaluates the B-rep directly), which part or material of it is the inspection
+    target, and which of the sampled points stay eligible (bottom /
     hollow-interior / occlusion filters). ``Part`` and ``Material RGB`` are the same
     knob for two file kinds — B-rep faces carry no triangle colour, so a STEP source
     selects by part and an OBJ source by material; the studio blanks whichever does
@@ -481,12 +483,13 @@ class Studio:
                 self.dd_mesh = g.add_dropdown(
                     "Mesh source", options=("source.obj",), initial_value="source.obj",
                     hint="data/{object}/mesh/ 안의 메시 파일. .stp 는 CAD 원본")
-                self.nb_tol = g.add_number(
-                    "STEP tessellation (mm)", initial_value=float(DEFAULT_STEP_TOL_LINEAR),
-                    min=0.01, max=5.0, step=0.05,
-                    hint="곡면을 몇 mm 오차로 근사할지 — 작을수록 삼각형이 많다 (.stp 전용). "
-                         "CAD faces 샘플러는 곡면을 직접 쓰므로 이 값은 화면과 가림 판정에만 "
-                         "영향을 준다")
+                # STEP 테셀레이션 허용 오차는 노브로 두지 않는다. STEP 에는 삼각형이 없어
+                # 화면·가림 광선·convex hull·auto align 용으로 만들어야 하는데, **CAD faces
+                # 샘플러의 점과 법선은 곡면에서 직접 나오므로 이 값과 무관**하다. 실측:
+                # square_structure 를 0.02·0.1·2.0mm 로 테셀레이션해도 32점 · 커버리지
+                # 100% · 접근 불가 255cm² 로 전부 같았다(삼각형 수는 2,084 vs 964 vs 892).
+                # 결과를 안 바꾸는 노브는 "뭘 넣어야 하지" 만 묻게 한다.
+                # 바꿔야 할 일이 생기면 cli.py 의 --mesh-tol 이 남아 있다.
                 # STEP 은 CAD 좌표계를 그대로 들고 온다. auto 는 source.obj 와 방향별 면적
                 # 분포를 맞추는데, 두 파일이 다른 형상이면(어셈블리 vs 부품) 사실상 동점이
                 # 되어 물체가 뒤집힌다 — 그때 손으로 못박으라고 둔 노브다.
@@ -544,8 +547,10 @@ class Studio:
                 self.dd_sampler = g.add_dropdown(
                     "Sampler", options=(SAMPLER_FPS, SAMPLER_BREP),
                     initial_value=SAMPLER_FPS,
-                    hint="CAD faces 는 Mesh source 가 .stp 일 때만 — 면마다 FOV 격자를 깔고 "
-                         "트리밍 경계 안쪽만 남긴다")
+                    hint=f"CAD faces 는 Mesh source 가 .stp 일 때만 — 면마다 FOV 격자를 깔고 "
+                         f"트리밍 경계 안쪽만 남긴다(법선이 해석적이라 테셀레이션 오차 0). "
+                         f"Surface FPS 로 .stp 를 읽으면 점이 삼각형에서 나오므로 "
+                         f"{DEFAULT_STEP_TOL_LINEAR}mm 테셀레이션이 결과를 정한다")
                 # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**라 h5 camera_spec 이
                 # 아니라 여기 산다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
                 #
@@ -872,7 +877,7 @@ class Studio:
             "material_rgb": self._current_material(),
             "mesh_path": self._current_mesh_path(),
             "mesh_file": self._current_mesh_path().name,
-            "tol_linear": float(self.nb_tol.value),
+            "tol_linear": float(DEFAULT_STEP_TOL_LINEAR),
             "part_name": self._current_part(),
             "align": self.dd_align.value,
             "sampler": self.dd_sampler.value,
