@@ -8,6 +8,13 @@ Two ways to put viewpoints on screen, both object-centric:
     ``prepare_viewpoints`` / ``build_local_delaunay_adjacency``). The panel follows
     the four stages, in the order they run:
 
+    Above those four sits **Target**: which file, which part or material of it is
+    the inspection target, and which of the sampled points stay eligible (bottom /
+    hollow-interior / occlusion filters). ``Part`` and ``Material RGB`` are the same
+    knob for two file kinds — B-rep faces carry no triangle colour, so a STEP source
+    selects by part and an OBJ source by material; the studio blanks whichever does
+    not apply.
+
       1. **Candidates** — two samplers. **Surface FPS** scatters points over the
          triangles; **CAD faces** walks each B-rep face of a STEP source, lays out
          camera frames along arc length in (u,v), keeps what falls inside the
@@ -47,12 +54,10 @@ under **Display**. One line at the bottom reports the graph the next stage
 actually consumes: edge count, component count, isolated points, and the edge
 count GLNS will really solve on (**Solver graph (hops)**).
 
-Which faces get sampled is tuned under **Faces**: the material RGB filter, the
-bottom-face filter (angle from world −z), the hollow-object interior filter, and
-the ray-cast occlusion filter.
-The defaults come from the per-object tables in ``config`` — the fields just make
-them visible and overridable per run. Found parameters can be persisted with
-**Save** for the GLNS solve step.
+Which faces get sampled is tuned under **Target**. The defaults come from the
+per-object tables in ``config`` (``OBJECT_TARGET_PART`` / ``OBJECT_TARGET_MATERIAL``
+/ ``OBJECT_FILTER_INTERIOR``) — the fields just make them visible and overridable
+per run. Found parameters can be persisted with **Save** for the GLNS solve step.
 
 Usage:
     uv run scripts/apps/viewpoint_studio.py --object sample
@@ -464,23 +469,24 @@ class Studio:
                     min=0.0, max=100.0, step=1.0,
                     hint="초점이 맞는 거리 범위. 0 = 제한 없음 (CAD faces 샘플러 전용)")
 
-            # 어떤 파일의 기하 위에 뿌릴지. 기본은 source.obj 지만, CAD 원본(.stp)을 바로
-            # 읽어 비교할 수 있다 — STEP 은 B-rep 이라 삼각형이 없어서 테셀레이션을 거치고,
-            # CAD 좌표계를 쓰므로 source.obj 자세/원점에 자동 정렬한다(load_meshes).
-            with g.add_folder("Mesh"):
+            # 무엇을 검사하나 — 파일, 그 파일에서 고른 대상, 그리고 후보 적격성 필터.
+            # 예전에는 Mesh/Faces 두 폴더였는데 경계가 실제와 달랐다: '어느 면을 검사할지'
+            # 를 정하는 노브가 Part(Mesh)와 Material RGB(Faces)로 갈라져 있어, 같은 질문의
+            # 두 답이 서로 다른 폴더에 앉아 있었다.
+            with g.add_folder("Target"):
+                # ── 어느 파일의 기하인가 ─────────────────────────────────────
+                # 기본은 source.obj 지만 CAD 원본(.stp)을 바로 읽어 비교할 수 있다. STEP 은
+                # B-rep 이라 삼각형이 없어 테셀레이션을 거치고, CAD 좌표계를 쓰므로
+                # source.obj 자세/원점에 자동 정렬한다(load_meshes).
                 self.dd_mesh = g.add_dropdown(
                     "Mesh source", options=("source.obj",), initial_value="source.obj",
                     hint="data/{object}/mesh/ 안의 메시 파일. .stp 는 CAD 원본")
                 self.nb_tol = g.add_number(
                     "STEP tessellation (mm)", initial_value=float(DEFAULT_STEP_TOL_LINEAR),
                     min=0.01, max=5.0, step=0.05,
-                    hint="곡면을 몇 mm 오차로 근사할지 — 작을수록 삼각형이 많다 (.stp 에만 적용)")
-                # 어셈블리 STEP 은 지그까지 들어 있다(sample_step: SAMPLE + SAMPLE_BRACKET).
-                # 검사 대상만 고르는 자리 — OBJ 의 Material RGB 에 대응한다.
-                self.dd_part = g.add_dropdown(
-                    "Part", options=(PART_ALL,), initial_value=PART_ALL,
-                    hint="파일 안의 부품(솔리드). 고르면 그 부품만 샘플링하고 "
-                         "자세·원점도 그 부품 기준으로 맞춘다")
+                    hint="곡면을 몇 mm 오차로 근사할지 — 작을수록 삼각형이 많다 (.stp 전용). "
+                         "CAD faces 샘플러는 곡면을 직접 쓰므로 이 값은 화면과 가림 판정에만 "
+                         "영향을 준다")
                 # STEP 은 CAD 좌표계를 그대로 들고 온다. auto 는 source.obj 와 방향별 면적
                 # 분포를 맞추는데, 두 파일이 다른 형상이면(어셈블리 vs 부품) 사실상 동점이
                 # 되어 물체가 뒤집힌다 — 그때 손으로 못박으라고 둔 노브다.
@@ -489,25 +495,38 @@ class Studio:
                     hint="CAD 의 어느 축이 '위' 인가. auto 는 source.obj 와 맞춘다"
                          "(모호하면 콘솔에 경고가 뜬다)")
 
-            # 어느 '면' 에 점을 뿌릴지. 셋 다 원래는 config 표
-            # (OBJECT_TARGET_MATERIAL / OBJECT_FILTER_INTERIOR)와 CLI 플래그에만 있어서,
-            # 화면만 봐서는 왜 개수가 그렇게 나왔는지 알 수 없었다. 기본값은 여전히 그 표에서
-            # 오고(물체를 바꾸면 다시 채워진다), 여기서는 이번 실행만 덮어쓴다.
-            with g.add_folder("Faces"):
+                # ── 그 파일에서 무엇이 검사 대상인가 ────────────────────────
+                # 아래 둘은 **같은 일**을 파일 종류별로 한다. 동시에 살지 않는다: .stp 를
+                # 고르면 Material 칸이 비고(B-rep 면에는 삼각형 색이 없다), .obj 는 부품이
+                # 하나뿐이라 Part 가 (all) 로 고정된다. 기본값은 둘 다 config 표에서 온다 —
+                # 화면만 봐서는 왜 개수가 그렇게 나왔는지 알 수 없던 것을 드러낸 자리다.
+                self.dd_part = g.add_dropdown(
+                    "Part", options=(PART_ALL,), initial_value=PART_ALL,
+                    hint="[.stp] 파일 안의 부품(솔리드). 검사 대상만 샘플링하고 자세·원점도 "
+                         "그 부품 기준으로 맞춘다. 기본값 = config.OBJECT_TARGET_PART")
                 self.tb_material = g.add_text(
                     "Material RGB", initial_value=config.OBJECT_TARGET_MATERIAL.get(
                         initial_object) or "",
-                    hint="예 '0,255,0' — 그 재질 면만 검사한다. 비우면 메시 전체")
+                    hint="[.obj] 예 '0,255,0' — 그 재질 면만 검사한다. 비우면 메시 전체. "
+                         "기본값 = config.OBJECT_TARGET_MATERIAL")
+
+                # ── 뽑은 점 중 무엇을 후보로 남기나 ─────────────────────────
                 self.cb_filter_bottom = g.add_checkbox(
                     "Filter bottom faces", initial_value=True,
                     hint="아래를 보는 viewpoint 제거 — 로봇이 밑에서 올려다볼 수 없다")
                 self.nb_bottom_angle = g.add_number(
                     "Bottom angle (°)", initial_value=80.0, min=1.0, max=179.0, step=1.0,
                     hint="월드 −z 에서 이 각 안쪽을 보는 면을 버린다 (기본 80)")
+                # 아래 가림 필터와 겹치지 않는다 — 위로 열린 공동의 안쪽 바닥은 카메라가
+                # 제 점을 볼 수 있어 광선 판정을 통과한다(측정: square_structure 는 가림
+                # 필터를 통과한 82점 중 11점이 hull 법선과 정확히 −1.0 로 반대였다).
+                # ⚠ 대신 hull 과 **수직**인 면(측벽)도 문턱 0.3 에 걸린다 — curved_structure
+                #   는 정렬도 ≈0.0 인 멀쩡한 측벽 9점을 잃는다. 그래서 물체별 opt-in 이다.
                 self.cb_filter_interior = g.add_checkbox(
                     "Filter interior (hollow)",
                     initial_value=config.OBJECT_FILTER_INTERIOR.get(initial_object) is not None,
-                    hint="속 빈 물체의 안쪽 껍데기 제거 — 오목한 바깥 형상엔 부적합")
+                    hint="속 빈 물체의 안쪽 껍데기 제거 — 오목한 바깥 형상·측벽이 있으면 "
+                         "정상 면도 지운다. config.OBJECT_FILTER_INTERIOR 물체만 기본 ON")
                 # 법선 필터로는 못 잡는 것: 파인 곳·지그 뒤. 카메라 자리에서 광선을 쏴
                 # 실제로 보이는지 묻는다. 가림체는 어셈블리 전체(지그 포함)다.
                 self.cb_filter_occluded = g.add_checkbox(
