@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 from common import config, scene_config  # noqa: E402
 from core.viewpoint import (  # noqa: E402
     DEFAULT_DELAUNAY_DISTANCE_FACTOR,
+    DEFAULT_STEP_TOL_LINEAR,
     DEFAULT_DELAUNAY_MAX_NORMAL_ANGLE_DEG,
     DEFAULT_DELAUNAY_NEIGHBORS,
     ViewpointGenParams,
@@ -46,6 +47,21 @@ Examples:
     # --- Viewpoint generation ---
     parser.add_argument('--object', type=str, required=True, help='오브젝트 이름')
     scene_config.add_cli_argument(parser)
+    # 기본은 data/{object}/mesh/source.obj 다. STEP(.stp/.step)을 주면 cascadio 로 테셀레이션하고
+    # source.obj 와 같은 자세·원점으로 맞춘 뒤 파이프라인에 태운다.
+    parser.add_argument('--mesh', type=Path, default=None,
+                        help='읽을 메시 파일 (기본: data/{object}/mesh/source.obj). '
+                             '.stp/.step 지원')
+    parser.add_argument('--mesh-tol', type=float, default=None,
+                        help=f'STEP 테셀레이션 허용 오차 mm '
+                             f'(기본 {DEFAULT_STEP_TOL_LINEAR}) — 작을수록 삼각형이 많다')
+    parser.add_argument('--part', type=str, default=None,
+                        help='어셈블리 STEP 에서 샘플링할 부품(솔리드) 이름. 나머지 부품은 '
+                             '화면·가시성 판정에는 남는다')
+    parser.add_argument('--no-filter-occluded', action='store_true',
+                        help='가시성(가림) 필터 끄기 — 카메라가 못 보는 점도 남긴다')
+    parser.add_argument('--no-mesh-align', action='store_true',
+                        help='--mesh 를 source.obj 자세/원점에 맞추지 않고 파일 좌표 그대로 쓴다')
     parser.add_argument('--material-rgb', type=str, default=None,
                         help='Target material RGB color as "R,G,B" (e.g., "0,255,0")')
     parser.add_argument('--color-tolerance', type=float, default=5.0,
@@ -143,14 +159,19 @@ def main():
     if config.apply_object_placement(args.object):
         print(f"  Per-object placement '{args.object}': quat={config.TARGET_OBJECT['rotation']}")
 
-    input_path = str(config.get_mesh_path(args.object, mesh_type="source"))
+    input_path = str(args.mesh) if args.mesh \
+        else str(config.get_mesh_path(args.object, mesh_type="source"))
 
     # 재질 필터를 안 주면 물체별 기본값(config)에서 채운다 — 안 그러면 sample 이 조용히
     # 161개(전체 메시)로 나온다. 정답은 초록 재질만 74개다.
     rgb_source = "지정"
     if args.material_rgb is None:
-        args.material_rgb = config.OBJECT_TARGET_MATERIAL.get(args.object)
-        rgb_source = "config 기본값"
+        # STEP/CAD 에는 재질 구분이 없다 — 물체 기본값을 그대로 들고 가면 매칭 실패로
+        # 끝난다(viewpoint_studio 도 소스가 STEP 이면 재질 칸을 비운다).
+        is_step = args.mesh is not None and Path(args.mesh).suffix.lower() in (".stp", ".step")
+        if not is_step:
+            args.material_rgb = config.OBJECT_TARGET_MATERIAL.get(args.object)
+            rgb_source = "config 기본값"
 
     print("=" * 60)
     print("GENERATE VIEWPOINTS")
@@ -167,6 +188,8 @@ def main():
     try:
         mesh, target_mesh, input_path = load_meshes(
             args.object, args.material_rgb, args.color_tolerance,
+            mesh_path=args.mesh, part_name=args.part,
+            align="none" if args.no_mesh_align else "auto", tol_linear=args.mesh_tol,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -186,6 +209,7 @@ def main():
         bottom_angle=args.bottom_angle,
         filter_interior=_fi is not None,
         interior_hull_align_min=(_fi or {}).get("hull_align_min", 0.3),
+        filter_occluded=not args.no_filter_occluded,
         surface_spacing_mm=args.surface_spacing,
         build_delaunay=not args.no_delaunay,
         delaunay_neighbors=args.delaunay_neighbors,
@@ -196,7 +220,9 @@ def main():
     # ------------------------------------------------------------------
     # 생성 코어 호출 → 저장
     # ------------------------------------------------------------------
-    res = generate_viewpoints_core(target_mesh, params)
+    # hull·가림체는 자르기 전 **전체** 메시다 — 선택한 조각의 hull 은 물체의 hull 이 아니고,
+    # 부품만 가림체로 쓰면 지그가 가리는 시야를 놓친다.
+    res = generate_viewpoints_core(target_mesh, params, hull_mesh=mesh, occluder_mesh=mesh)
 
     # 9. Save to HDF5
     if args.dry_run:

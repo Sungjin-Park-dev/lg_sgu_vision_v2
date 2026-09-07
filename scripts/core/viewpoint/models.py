@@ -119,10 +119,16 @@ class ViewpointGenParams:
     fov_width_mm: Optional[float] = None
     fov_height_mm: Optional[float] = None
     overlap_ratio: Optional[float] = None
+    # 검사 품질 한계 — 면의 곡률과 함께 '유효 FOV' 를 정한다(0 이면 제한 없음).
+    max_incidence_deg: Optional[float] = None
+    depth_of_field_mm: Optional[float] = None
     filter_bottom: bool = True
     bottom_angle: float = 80.0
     filter_interior: bool = False
     interior_hull_align_min: float = 0.3
+    # 가시성(가림) 필터. 법선 필터로는 못 잡는 '파인 곳·지그 뒤' 를 걸러낸다.
+    filter_occluded: bool = True
+    occlusion_tolerance_mm: float = 1.0
     # 샘플링은 메시 표면 직접 FPS 하나뿐이다(grid 모드는 2026-08-26 제거).
     surface_spacing_mm: Optional[float] = None
     build_delaunay: bool = True
@@ -145,6 +151,12 @@ class ViewpointGenParams:
             config.CAMERA_FOV_HEIGHT_MM if self.fov_height_mm is None else self.fov_height_mm)
         self.overlap_ratio = float(
             config.CAMERA_OVERLAP_RATIO if self.overlap_ratio is None else self.overlap_ratio)
+        self.max_incidence_deg = float(
+            config.CAMERA_MAX_INCIDENCE_DEG if self.max_incidence_deg is None
+            else self.max_incidence_deg)
+        self.depth_of_field_mm = float(
+            config.CAMERA_DEPTH_OF_FIELD_MM if self.depth_of_field_mm is None
+            else self.depth_of_field_mm)
 
     @property
     def camera_spec(self) -> dict:

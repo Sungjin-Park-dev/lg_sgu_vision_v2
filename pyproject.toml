@@ -13,6 +13,8 @@ dependencies = [
     "scikit-learn",
     "h5py",
     "trimesh",
+    # STEP(.stp) 로더 — trimesh 가 이걸 통해 OpenCASCADE 로 테셀레이션한다
+    "cascadio",
     "plotly",
     "viser>=0.2.11",
     "pyyaml",
@@ -23,6 +25,11 @@ dependencies = [
     "isaacsim[all,extscache]==6.0.0",
     "nvidia-curobo[cu12] @ git+https://github.com/NVlabs/curobo.git@v0.8.0",
 ]
+
+[project.optional-dependencies]
+# CAD(B-rep) 면 샘플러용 OpenCASCADE 바인딩. 163MB 라 기본 의존성에 넣지 않는다 —
+# core/viewpoint/brep.py 가 쓰는 시점에 없으면 설치 방법을 안내한다.
+cad = ["cadquery-ocp"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"

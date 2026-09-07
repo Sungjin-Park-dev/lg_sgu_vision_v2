@@ -43,6 +43,16 @@ CAMERA_WORKING_DISTANCE_MM = 195.0
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
 
+# 검사 품질 한계 두 가지. 0 이면 제한 없음(지금까지의 동작).
+#  - 입사각: 프레임 가장자리에서 표면이 얼마나 기울어 보여도 되는가. 조명·결함 종류가 정한다.
+#  - 심도(DOF): 초점이 맞는 거리 범위 ±mm. 렌즈 스펙에서 온다.
+# 이 둘이 정해지면 **면의 곡률에서 유효 FOV 가 닫힌 형태로 계산된다**(core/viewpoint/brep.py
+# effective_fov_mm). 곡률이 큰 면일수록 프레임 가장자리가 기울고 멀어져서 공칭 FOV 를
+# 다 쓸 수 없다 — 예: R=23mm 원통은 입사각 45°·심도 ±5mm 에서 유효 FOV 29.4mm(공칭의 59%).
+# 곡면 정의가 있어야 계산되므로 CAD(STEP) 샘플러에서만 쓰인다.
+CAMERA_MAX_INCIDENCE_DEG = 0.0
+CAMERA_DEPTH_OF_FIELD_MM = 0.0
+
 # Isaac Sim 렌더/퍼블리시 해상도 — **FOV 종횡비에서 유도**한다.
 # USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산한다(verticalAperture 는 사실상
 # 무시). 그래서 해상도 비율이 FOV 비율과 다르면 퍼블리시된 이미지가 FOV_H 를 덮지 않는다 —
@@ -180,7 +190,7 @@ OBJECT_FILTER_INTERIOR = {
 # 물체별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.
 # 컨벤션: 초록(0,255,0) = 검사대상. 회색(170,163,158)은 비대상이라 제외.
 # (source.obj usemtl 스왑으로 대상 평면을 초록으로 통일)
-# ⚠️ 이 표를 안 보고 viewpoint 를 만들면 조용히 틀린 개수가 나온다 — sample 은 74 대신 161.
+# ⚠️ 이 표를 안 보고 viewpoint 를 만들면 조용히 틀린 개수가 나온다 — sample 은 76 대신 161.
 #    viewpoint_studio 와 viewpoint/cli.py 가 같은 표를 봐야 하는 이유다(예전엔 studio 에만 있어
 #    CLI 는 사람이 --material-rgb 를 기억해 넘겨야 했다).
 OBJECT_TARGET_MATERIAL = {
