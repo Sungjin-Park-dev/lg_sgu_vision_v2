@@ -570,7 +570,9 @@ class Studio:
                 self.cb_patch = g.add_checkbox(
                     "Patch holes", initial_value=True,
                     hint="덮이지 않은 셀을 정면으로 보는 viewpoint 를 추가한다 — 격자는 그대로 "
-                         "두고 구멍만 채운다 (CAD faces 전용)")
+                         "두고 구멍만 채운다. 셀마다 후보를 만든 뒤 greedy set cover 로 최소 "
+                         "집합만 남긴다(아래 Selection 과는 별개로 늘 돈다 — 안 그러면 셀 "
+                         "하나당 한 점이 되어 수백 개가 붙는다). CAD faces 전용")
 
             # 후보 중 무엇을 쓸지. 격자는 규칙적이라 중복이 남고, greedy 는 커버리지를
             # 지키면서 그 중복을 걷어낸다(curved_structure 52→37점, 커버리지 동일).
