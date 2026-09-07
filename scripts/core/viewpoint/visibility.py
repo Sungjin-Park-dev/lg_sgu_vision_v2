@@ -38,6 +38,48 @@ DEFAULT_CANDIDATE_CAP = 12
 
 
 @dataclass(frozen=True)
+class ViewFrames:
+    """viewpoint 마다의 **촬영 사각형** — 두 축(단위벡터)과 축별 프레임 폭(mm).
+
+    센서는 원이 아니라 사각형이다. 내접원으로 근사하면 간격 = FOV 로 깔았을 때 대각선에
+    틈이 있는 것으로 계산된다(원으로 정사각 격자를 덮으려면 반경 ≥ 0.707×간격 이어야 하고,
+    그래서 겹침 29.3% 미만이 전부 구멍으로 보였다). 축을 알면 그 왜곡이 사라지고, 덤으로
+    비등방 FOV(50×40)도 축별로 쓸 수 있다.
+
+    축은 CAD 면의 (u,v) 접선에서 온다 — 격자와 프레임이 같은 방향을 보므로 타일링이 정확하다.
+    """
+
+    axis_u: np.ndarray          # (N,3) 단위벡터
+    axis_v: np.ndarray          # (N,3) 단위벡터, axis_u 와 직교
+    fov_u_mm: np.ndarray        # (N,)
+    fov_v_mm: np.ndarray        # (N,)
+
+    def __len__(self) -> int:
+        return len(self.axis_u)
+
+    def __getitem__(self, index) -> "ViewFrames":
+        return ViewFrames(self.axis_u[index], self.axis_v[index],
+                          np.atleast_1d(self.fov_u_mm[index]),
+                          np.atleast_1d(self.fov_v_mm[index]))
+
+    @property
+    def half_diagonal_mm(self) -> np.ndarray:
+        """프레임을 감싸는 원의 반경 — 후보 탐색 반경으로 쓴다(놓치지 않으려면 외접원)."""
+        return np.hypot(self.fov_u_mm, self.fov_v_mm) / 2.0
+
+    @classmethod
+    def from_extras(cls, extras: dict) -> Optional["ViewFrames"]:
+        """샘플러가 실어 보낸 배열에서 만든다. 없으면 None(원 근사로 떨어진다)."""
+        keys = ("frame_u", "frame_v", "fov_u_mm", "fov_v_mm")
+        if not all(k in extras and len(np.asarray(extras[k])) for k in keys):
+            return None
+        return cls(np.asarray(extras["frame_u"], dtype=np.float64).reshape(-1, 3),
+                   np.asarray(extras["frame_v"], dtype=np.float64).reshape(-1, 3),
+                   np.asarray(extras["fov_u_mm"], dtype=np.float64).reshape(-1),
+                   np.asarray(extras["fov_v_mm"], dtype=np.float64).reshape(-1))
+
+
+@dataclass(frozen=True)
 class SensorSpec:
     """판정에 필요한 센서 스펙. 0 은 '그 제한을 걸지 않음' 을 뜻한다.
 
@@ -109,7 +151,8 @@ def _blocked(occluder, origins: np.ndarray, directions: np.ndarray,
 
 
 def sees(view_positions, view_normals, targets, target_normals,
-         occluder, spec: SensorSpec, fov_mm=None) -> np.ndarray:
+         occluder, spec: SensorSpec, fov_mm=None,
+         frames: Optional[ViewFrames] = None) -> np.ndarray:
     """**쌍 단위** 판정 — i번째 viewpoint 가 i번째 표면점을 검사 가능한 조건으로 보는가.
 
     카메라는 ``view_positions + view_normals × WD`` 에 있다(광축은 그 표면점의 법선).
@@ -117,6 +160,8 @@ def sees(view_positions, view_normals, targets, target_normals,
     Args:
         view_positions/view_normals: (N,3) viewpoint 의 표면점과 법선 (미터)
         targets/target_normals: (N,3) 판정할 표면점과 그 법선 (미터)
+        frames: (N,) 촬영 사각형. 주면 두 축에 투영해 판정한다(정확). 없으면 ``fov_mm``
+            내접원으로 근사한다(FPS 처럼 프레임 방향이 없는 샘플러용).
         fov_mm: 프레임 폭(mm). 스칼라 또는 (N,) 배열. None 이면 FOV 검사를 건너뛴다
             (자기 점을 보는 경우처럼 거리가 0 인 상황).
     Returns:
@@ -132,9 +177,16 @@ def sees(view_positions, view_normals, targets, target_normals,
 
     ok = np.ones(n, dtype=bool)
 
-    # ① FOV — 표면점이 그 촬영의 프레임 안인가. 프레임은 사각형이지만 **내접원**으로
-    #    근사한다(보수적: 모서리 쪽을 안 세므로 커버리지를 낮게 잡는다).
-    if fov_mm is not None:
+    # ① FOV — 표면점이 그 촬영의 프레임 안인가.
+    if frames is not None:
+        # 사각 프레임: 표면점을 두 축에 투영한다. 카메라 광축이 법선이라 이 투영이 곧
+        # 이미지 평면 좌표다(작은 FOV 에서 원근 보정은 무시할 만하다).
+        delta = targets - view_positions
+        ok &= np.abs(np.einsum("ij,ij->i", delta, frames.axis_u)) \
+            <= frames.fov_u_mm / 2.0 / 1000.0
+        ok &= np.abs(np.einsum("ij,ij->i", delta, frames.axis_v)) \
+            <= frames.fov_v_mm / 2.0 / 1000.0
+    elif fov_mm is not None:
         radius_m = np.asarray(fov_mm, dtype=np.float64) / 2.0 / 1000.0
         ok &= np.linalg.norm(targets - view_positions, axis=1) <= radius_m
 
@@ -170,7 +222,15 @@ def self_visible(positions, normals, occluder, spec: SensorSpec) -> np.ndarray:
     return sees(positions, normals, positions, normals, occluder, spec, fov_mm=None)
 
 
-def pair_candidates(targets, view_positions, fov_mm,
+def search_radius_m(fov_mm=None, frames: Optional[ViewFrames] = None) -> float:
+    """후보 탐색 반경(m). 사각 프레임이면 **외접원**이라야 모서리 쪽을 안 놓친다."""
+    if frames is not None and len(frames):
+        return float(np.max(frames.half_diagonal_mm)) / 1000.0
+    fov = np.asarray(fov_mm, dtype=np.float64)
+    return float(fov.max() if fov.ndim else fov) / 2.0 / 1000.0
+
+
+def pair_candidates(targets, view_positions, radius_m: float,
                     cap: int = DEFAULT_CANDIDATE_CAP) -> Tuple[np.ndarray, np.ndarray]:
     """표면점마다 시험해 볼 viewpoint 후보를 가까운 순으로 (idx, dist) 로 돌려준다.
 
@@ -190,8 +250,6 @@ def pair_candidates(targets, view_positions, fov_mm,
         return (np.full((len(targets), 1), -1, dtype=np.int64),
                 np.full((len(targets), 1), np.inf))
 
-    fov = np.asarray(fov_mm, dtype=np.float64)
-    radius_m = float(fov.max() if fov.ndim else fov) / 2.0 / 1000.0
     tree = cKDTree(view_positions)
     neighbours = tree.query_ball_point(targets, radius_m)
     width = max(1, min(int(cap), max((len(c) for c in neighbours), default=1)))
@@ -210,7 +268,8 @@ def pair_candidates(targets, view_positions, fov_mm,
 
 def covered_by_any(targets, target_normals, view_positions, view_normals,
                    point_fov_mm, occluder, spec: SensorSpec,
-                   mask=None, cap: int = DEFAULT_CANDIDATE_CAP) -> np.ndarray:
+                   mask=None, cap: int = DEFAULT_CANDIDATE_CAP,
+                   frames: Optional[ViewFrames] = None) -> np.ndarray:
     """표면점마다 '하나라도 이 점을 검사할 수 있는 viewpoint 가 있는가'.
 
     커버리지 평가가 쓰는 형태다. 가까운 후보부터 라운드로 시험하고, 라운드마다 광선을 한 번에
@@ -224,7 +283,8 @@ def covered_by_any(targets, target_normals, view_positions, view_normals,
     point_fov_mm = np.asarray(point_fov_mm, dtype=np.float64).reshape(-1)
     todo_mask = np.ones(n, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
 
-    idx, dist = pair_candidates(targets, view_positions, point_fov_mm, cap=cap)
+    idx, dist = pair_candidates(
+        targets, view_positions, search_radius_m(point_fov_mm, frames), cap=cap)
     for rank in range(idx.shape[1]):
         pending = np.where(todo_mask & ~covered)[0]
         if not len(pending):
@@ -236,6 +296,7 @@ def covered_by_any(targets, target_normals, view_positions, view_normals,
             continue
         ok = sees(view_positions[view], view_normals[view],
                   targets[pending], target_normals[pending],
-                  occluder, spec, fov_mm=point_fov_mm[view])
+                  occluder, spec, fov_mm=point_fov_mm[view],
+                  frames=frames[view] if frames is not None else None)
         covered[pending[ok]] = True
     return covered

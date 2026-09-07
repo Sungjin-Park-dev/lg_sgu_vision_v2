@@ -226,6 +226,49 @@ def effective_fov_mm(radius_mm: float, fov_mm: float, wd_mm: float,
     return max(1e-3, min(limits))
 
 
+def directional_radii_mm(face, o, probes: int = 3) -> Tuple[float, float]:
+    """프레임 두 축(u, v) **각각의** 부호 있는 곡률 반지름(mm). 평면 방향은 inf.
+
+    곡률은 방향에 따라 다르다 — 원통은 둘레 방향으로만 휘고 축 방향은 완전히 평평하다.
+    오일러 공식 ``κ(θ) = κ₁cos²θ + κ₂sin²θ`` 로 주곡률을 u/v 축에 투영한다. 축 하나에
+    가장 급한 값을 몰아 쓰면(예전 방식) 평평한 방향까지 촘촘해져 점을 낭비한다
+    (원통 옆면 108×80mm 기준 40칸 → 24칸).
+
+    부호 규약은 ``effective_fov_mm`` 과 같다: 양수 = 볼록, 음수 = 오목.
+    """
+    from OCP.BRepTools import BRepTools
+    from OCP.gp import gp_Dir
+
+    surface = o["BRep_Tool"].Surface_s(face)
+    u0, u1, v0, v1 = BRepTools.UVBounds_s(face)
+    sign = -1.0 if face.Orientation() == o["TopAbs_REVERSED"] else 1.0
+    sharpest_u, sharpest_v = 0.0, 0.0
+    for i in range(probes):
+        for j in range(probes):
+            u = u0 + (i + 0.5) * (u1 - u0) / probes
+            v = v0 + (j + 0.5) * (v1 - v0) / probes
+            props = o["GeomLProp_SLProps"](surface, float(u), float(v), 2, 1e-7)
+            if not props.IsCurvatureDefined():
+                continue
+            d1, d2 = gp_Dir(), gp_Dir()
+            props.CurvatureDirections(d1, d2)
+            du = props.D1U()
+            if du.Magnitude() < 1e-9:
+                continue
+            u_hat = np.array([du.X(), du.Y(), du.Z()]) / du.Magnitude()
+            principal = np.array([d1.X(), d1.Y(), d1.Z()])
+            cos2 = float(np.clip(abs(u_hat @ principal), 0.0, 1.0)) ** 2
+            k1, k2 = float(props.MaxCurvature()), float(props.MinCurvature())
+            k_u = -sign * (k1 * cos2 + k2 * (1.0 - cos2))       # 양수 = 볼록
+            k_v = -sign * (k1 * (1.0 - cos2) + k2 * cos2)
+            if abs(k_u) > abs(sharpest_u):
+                sharpest_u = k_u
+            if abs(k_v) > abs(sharpest_v):
+                sharpest_v = k_v
+    radius = lambda k: (1.0 / k) if abs(k) > 1e-9 else float("inf")
+    return radius(sharpest_u), radius(sharpest_v)
+
+
 def signed_radius_mm(face, o, probes: int = 3) -> float:
     """면에서 가장 급한 곡률 반지름(mm), **부호 포함**. 평면이면 inf.
 
@@ -255,11 +298,46 @@ def signed_radius_mm(face, o, probes: int = 3) -> float:
     return (1.0 / sharpest) if abs(sharpest) > 1e-9 else float("inf")
 
 
-def sample_face(face, o, fov_mm: float, overlap: float,
+# 축 하나의 호길이를 적분할 때 쓰는 표본 수. 곡률이 급해도 65개면 0.1% 이내로 수렴한다.
+ARC_SAMPLES = 65
+
+
+def _axis_positions(speed_at, t0: float, t1: float, fov_mm: float, overlap: float,
+                    closed: bool) -> Tuple[np.ndarray, float]:
+    """축 하나의 격자 좌표를 **호길이 기준**으로 배치한다. (매개변수 좌표, 실제 길이mm)
+
+    매개변수는 거리가 아니고, 그 환산비(``|∂S/∂t|``)는 위치마다 다르다 — 구면의 경도 방향은
+    ``R·cos(위도)`` 라 극으로 갈수록 좁아진다. 면 중점에서 한 번만 재서 상수로 쓰면 그만큼
+    간격이 어긋나고, 큰 구면에서는 그게 커버리지 구멍으로 나타난다(측정: 298cm² 구면의 10%).
+    그래서 축을 따라 속도를 적분해 누적 호길이를 만들고, **거리 기준으로** 점을 놓은 뒤
+    매개변수로 되돌린다.
+
+    간격은 ``fov×(1-overlap)`` 을 넘지 않는다. 열린 축은 양 끝에서 FOV/2 안쪽에 첫·마지막
+    점을 두어 경계까지 덮고, 닫힌 축(원통 둘레)은 경계가 없으므로 균등 분할한다.
+    """
+    ts = np.linspace(t0, t1, ARC_SAMPLES)
+    speed = np.array([max(float(speed_at(t)), 1e-12) for t in ts])
+    arc = np.concatenate([[0.0], np.cumsum(np.diff(ts) * 0.5 * (speed[1:] + speed[:-1]))])
+    length = float(arc[-1])
+    if length <= 1e-9:
+        return np.array([(t0 + t1) / 2.0]), 0.0
+    step = max(fov_mm * (1.0 - overlap), 1e-6)
+    if closed:
+        count = max(1, math.ceil(length / step))
+        targets = (np.arange(count) + 0.5) * length / count
+    elif length <= fov_mm:
+        targets = np.array([length / 2.0])              # 한 컷으로 덮인다
+    else:
+        count = max(2, math.ceil((length - fov_mm) / step) + 1)
+        targets = np.linspace(fov_mm / 2.0, length - fov_mm / 2.0, count)
+    return np.interp(targets, arc, ts), length
+
+
+def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
                 min_area_cm2: float = DEFAULT_MIN_FACE_AREA_CM2,
                 working_distance_mm: float = 195.0,
                 max_incidence_deg: float = 0.0, dof_mm: float = 0.0):
-    """면 하나 → (points_mm, normals, info). 격자 + 트리밍 + 해석적 법선."""
+    """면 하나 → (points_mm, normals, extras, info). 격자 + 트리밍 + 해석적 법선·프레임축."""
     surface = o["BRep_Tool"].Surface_s(face)
     adaptor = o["BRepAdaptor_Surface"](face)
     u0, u1, v0, v1 = o["BRepTools"].UVBounds_s(face)
@@ -268,85 +346,116 @@ def sample_face(face, o, fov_mm: float, overlap: float,
     info = {"type": _surface_type_name(face, o), "area_cm2": props.Mass() / 100.0}
     if info["area_cm2"] < min_area_cm2:
         info["skipped"] = "tiny"
-        return np.zeros((0, 3)), np.zeros((0, 3)), info
+        return np.zeros((0, 3)), np.zeros((0, 3)), {}, info
 
-    # 매개변수 → mm 환산은 면 중앙에서 재서 상수로 쓴다. 평면·원통·원뿔은 정확하고,
-    # 구·토러스는 근사다(그쪽은 대개 필렛이라 어차피 건너뛴다).
-    mid = o["GeomLProp_SLProps"](surface, (u0 + u1) / 2.0, (v0 + v1) / 2.0, 1, 1e-7)
-    du_mm = max(mid.D1U().Magnitude(), 1e-9)
-    dv_mm = max(mid.D1V().Magnitude(), 1e-9)
-    len_u, len_v = (u1 - u0) * du_mm, (v1 - v0) * dv_mm
-    # 이 면에서 실제로 쓸 수 있는 프레임 폭. 곡률이 급할수록 좁아진다(평면은 공칭 그대로).
-    radius = signed_radius_mm(face, o)
-    fov_mm = effective_fov_mm(radius, fov_mm, working_distance_mm,
-                              max_incidence_deg, dof_mm)
-    info["radius_mm"] = radius
-    info["effective_fov_mm"] = fov_mm
-    step = fov_mm * (1.0 - overlap)
+    # 이 면에서 축별로 쓸 수 있는 프레임 폭. 곡률이 급한 축만 좁아진다 — 원통 축 방향은
+    # 평평하므로 공칭 그대로 쓴다(예전에는 급한 쪽을 두 축에 몰아 써서 낭비했다).
+    radius_u, radius_v = directional_radii_mm(face, o)
+    fov_u = effective_fov_mm(radius_u, fov_w_mm, working_distance_mm,
+                             max_incidence_deg, dof_mm)
+    fov_v = effective_fov_mm(radius_v, fov_h_mm, working_distance_mm,
+                             max_incidence_deg, dof_mm)
+    info["radius_mm"] = (radius_u, radius_v)
+    info["effective_fov_mm"] = (fov_u, fov_v)
 
-    def count(length: float, closed: bool) -> int:
-        # 닫힌 방향(원통 둘레)은 시작·끝이 이어져 경계가 없다. 열린 방향은 첫 컷이 이미
-        # FOV 만큼 덮으므로 나머지를 step 으로 채운다 — '덮을 때까지' 공식.
-        if closed:
-            return max(1, math.ceil(length / step))
-        return max(1, math.ceil((length - fov_mm) / step) + 1)
+    def speed_v(t):
+        return o["GeomLProp_SLProps"](surface, (u0 + u1) / 2.0, float(t), 1, 1e-7) \
+            .D1V().Magnitude()
 
-    n_u = count(len_u, adaptor.IsUClosed())
-    n_v = count(len_v, adaptor.IsVClosed())
-    us = u0 + (np.arange(n_u) + 0.5) * (u1 - u0) / n_u
-    vs = v0 + (np.arange(n_v) + 0.5) * (v1 - v0) / n_v
+    # v 축을 먼저 놓고, **행마다** u 축을 다시 잰다 — |∂S/∂u| 가 v 에 따라 달라지는 면
+    # (구면의 경도 방향)에서 행마다 열 수가 달라져야 간격이 맞는다.
+    vs, len_v = _axis_positions(speed_v, v0, v1, fov_v, overlap, adaptor.IsVClosed())
 
     classifier = o["BRepTopAdaptor_FClass2d"](face, 1e-6)
     sign = -1.0 if face.Orientation() == o["TopAbs_REVERSED"] else 1.0
     inside_states = (o["TopAbs_IN"], o["TopAbs_ON"])
-    points, normals = [], []
-    for u in us:
-        for v in vs:
+    points, normals, frames_u, frames_v = [], [], [], []
+    n_u, len_u, grid_cells = 0, 0.0, 0
+    for v in vs:
+        us, len_u = _axis_positions(
+            lambda t, _v=v: o["GeomLProp_SLProps"](surface, float(t), float(_v), 1, 1e-7)
+            .D1U().Magnitude(), u0, u1, fov_u, overlap, adaptor.IsUClosed())
+        n_u = max(n_u, len(us))
+        grid_cells += len(us)
+        for u in us:
             if classifier.Perform(o["gp_Pnt2d"](float(u), float(v))) not in inside_states:
                 continue
             local = o["GeomLProp_SLProps"](surface, float(u), float(v), 1, 1e-7)
             if not local.IsNormalDefined():
                 continue
             point, normal = local.Value(), local.Normal()
+            unit_n = sign * np.array([normal.X(), normal.Y(), normal.Z()])
+            # 촬영 프레임의 두 축. u 는 ∂S/∂u 방향, v 는 법선과의 외적으로 직교화한다 —
+            # 우리 곡면(평면·원통·구·토러스)은 매개변수가 직교라 ∂S/∂v 와 일치한다.
+            d1u = local.D1U()
+            axis_u = np.array([d1u.X(), d1u.Y(), d1u.Z()])
+            norm_u = np.linalg.norm(axis_u)
+            if norm_u < 1e-9:
+                continue
+            axis_u = axis_u / norm_u
+            axis_v = np.cross(unit_n, axis_u)
+            norm_v = np.linalg.norm(axis_v)
+            if norm_v < 1e-9:
+                continue
             points.append([point.X(), point.Y(), point.Z()])
-            normals.append([sign * normal.X(), sign * normal.Y(), sign * normal.Z()])
-    info.update(grid=(n_u, n_v), size_mm=(len_u, len_v), kept=len(points),
-                dropped=n_u * n_v - len(points))
+            normals.append(unit_n.tolist())
+            frames_u.append(axis_u.tolist())
+            frames_v.append((axis_v / norm_v).tolist())
+    info.update(grid=(n_u, len(vs)), size_mm=(len_u, len_v), kept=len(points),
+                dropped=grid_cells - len(points))
+    extras = {
+        "frame_u": np.asarray(frames_u, dtype=np.float64).reshape(-1, 3),
+        "frame_v": np.asarray(frames_v, dtype=np.float64).reshape(-1, 3),
+        "fov_u_mm": np.full(len(points), fov_u),
+        "fov_v_mm": np.full(len(points), fov_v),
+    }
     return (np.asarray(points, dtype=np.float64).reshape(-1, 3),
-            np.asarray(normals, dtype=np.float64).reshape(-1, 3), info)
+            np.asarray(normals, dtype=np.float64).reshape(-1, 3), extras, info)
 
 
-def sample_step(step_path, fov_mm: float, overlap: float,
+def sample_step(step_path, fov_w_mm: float, fov_h_mm: float, overlap: float,
                 fillet_max_radius_mm: float = DEFAULT_FILLET_MAX_RADIUS_MM,
                 min_area_cm2: float = DEFAULT_MIN_FACE_AREA_CM2,
                 part_name: Optional[str] = None, working_distance_mm: float = 195.0,
                 max_incidence_deg: float = 0.0, dof_mm: float = 0.0,
                 verbose: bool = True):
-    """STEP(또는 그 안의 한 부품) → (points_mm, normals, per-face info). 좌표계는 CAD 그대로."""
+    """STEP(또는 그 안의 한 부품) → (points_mm, normals, meta). 좌표계는 CAD 그대로.
+
+    ``meta`` 는 점별 배열을 담는다 — face_id(어느 면에서 왔나), 프레임 축 두 개, 축별 유효
+    FOV. 프레임 축이 있어야 판정이 촬영 사각형을 사각형으로 볼 수 있다(내접원 근사는 간격
+    = FOV 에서 대각선 틈을 만든다).
+    """
     faces, o = read_faces(step_path, part_name)
-    all_points, all_normals, all_ids, all_fov, infos = [], [], [], [], []
+    columns = {"face_id": [], "frame_u": [], "frame_v": [], "fov_u_mm": [], "fov_v_mm": []}
+    all_points, all_normals, infos = [], [], []
     for index, face in enumerate(faces):
         radius = _fillet_radius(face, o)
         if fillet_max_radius_mm > 0 and radius is not None and radius < fillet_max_radius_mm:
             infos.append({"type": _surface_type_name(face, o), "skipped": "fillet",
                           "radius_mm": radius})
             continue
-        points, normals, info = sample_face(
-            face, o, fov_mm, overlap, min_area_cm2,
+        points, normals, extras, info = sample_face(
+            face, o, fov_w_mm, fov_h_mm, overlap, min_area_cm2,
             working_distance_mm=working_distance_mm,
             max_incidence_deg=max_incidence_deg, dof_mm=dof_mm)
         infos.append(info)
         if len(points):
             all_points.append(points)
             all_normals.append(normals)
-            # 점마다 '어느 면에서 왔나' 와 '그 면의 유효 FOV' 를 달아 보낸다 — 커버리지
-            # 계산과 h5 추적성이 둘 다 이걸 필요로 한다.
-            all_ids.append(np.full(len(points), index, dtype=np.int32))
-            all_fov.append(np.full(len(points), info.get("effective_fov_mm", fov_mm)))
+            columns["face_id"].append(np.full(len(points), index, dtype=np.int32))
+            for key in ("frame_u", "frame_v", "fov_u_mm", "fov_v_mm"):
+                columns[key].append(extras[key])
     points = np.vstack(all_points) if all_points else np.zeros((0, 3))
     normals = np.vstack(all_normals) if all_normals else np.zeros((0, 3))
-    face_ids = np.concatenate(all_ids) if all_ids else np.zeros(0, dtype=np.int32)
-    point_fov = np.concatenate(all_fov) if all_fov else np.zeros(0)
+    meta = {"infos": infos}
+    for key, chunks in columns.items():
+        if not chunks:
+            meta[key] = np.zeros((0, 3)) if key.startswith("frame") else np.zeros(0)
+        else:
+            meta[key] = np.vstack(chunks) if key.startswith("frame") \
+                else np.concatenate(chunks)
+    # 원 근사로 떨어질 때(프레임 축이 없는 경로)와 보고용 대표값. 두 축 중 큰 쪽을 쓴다.
+    meta["effective_fov_mm"] = np.maximum(meta["fov_u_mm"], meta["fov_v_mm"])
     if verbose:
         sampled = sum(1 for i in infos if "skipped" not in i)
         fillets = sum(1 for i in infos if i.get("skipped") == "fillet")
@@ -354,14 +463,15 @@ def sample_step(step_path, fov_mm: float, overlap: float,
         print(f"  CAD faces: {len(faces)} (sampled {sampled}, fillet-skipped {fillets}, "
               f"tiny {len(infos) - sampled - fillets})")
         print(f"  Grid points: {len(points)} kept, {dropped} outside trimming boundary")
+        nominal = (fov_w_mm, fov_h_mm)
         narrowed = [i for i in infos
-                    if i.get("effective_fov_mm", fov_mm) < fov_mm - 1e-6]
+                    if any(e < n - 1e-6 for e, n in
+                           zip(i.get("effective_fov_mm", nominal), nominal))]
         if narrowed:
-            worst = min(i["effective_fov_mm"] for i in narrowed)
+            worst = min(min(i["effective_fov_mm"]) for i in narrowed)
             print(f"  Curvature-limited FOV on {len(narrowed)} face(s): "
-                  f"down to {worst:.1f}mm (nominal {fov_mm:.0f}mm)")
-    return points, normals, {"infos": infos, "face_id": face_ids,
-                             "effective_fov_mm": point_fov}
+                  f"down to {worst:.1f}mm (nominal {fov_w_mm:.0f}×{fov_h_mm:.0f}mm)")
+    return points, normals, meta
 
 
 def cad_to_reference_transform(step_path, reference_mesh,
@@ -394,24 +504,36 @@ def cad_to_reference_transform(step_path, reference_mesh,
     return bottom_center_transform(tess) @ rotate, score
 
 
-def sample_step_aligned(step_path, reference_mesh, fov_mm: float, overlap: float,
+def sample_step_aligned(step_path, reference_mesh, fov_w_mm: float, fov_h_mm: float,
+                        overlap: float,
                         fillet_max_radius_mm: float = DEFAULT_FILLET_MAX_RADIUS_MM,
                         tol_linear: Optional[float] = None, align: str = ALIGN_AUTO,
                         part_name: Optional[str] = None, working_distance_mm: float = 195.0,
                         max_incidence_deg: float = 0.0, dof_mm: float = 0.0,
                         verbose: bool = True):
-    """``sample_step`` 결과를 파이프라인 좌표계(미터)로 옮겨 돌려준다."""
+    """``sample_step`` 결과를 파이프라인 좌표계(미터)로 옮겨 돌려준다.
+
+    법선과 **프레임 축**도 같은 회전을 받는다 — 판정이 촬영 사각형을 이 축으로 재기 때문에
+    하나라도 빠뜨리면 프레임이 표면 위에서 돌아간 채 계산된다.
+    """
     points_mm, normals, meta = sample_step(
-        step_path, fov_mm, overlap, fillet_max_radius_mm,
+        step_path, fov_w_mm, fov_h_mm, overlap, fillet_max_radius_mm,
         part_name=part_name, working_distance_mm=working_distance_mm,
         max_incidence_deg=max_incidence_deg, dof_mm=dof_mm, verbose=verbose)
     transform, score = cad_to_reference_transform(
         step_path, reference_mesh, tol_linear, align=align, part_name=part_name)
     rotation = transform[:3, :3]
     points = (rotation @ (points_mm.T / 1000.0)).T + transform[:3, 3]
-    normals = (rotation @ normals.T).T
-    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
-    normals = normals / np.where(lengths < 1e-9, 1.0, lengths)
+
+    def rotate_unit(vectors):
+        out = (rotation @ np.asarray(vectors).reshape(-1, 3).T).T
+        lengths = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.where(lengths < 1e-9, 1.0, lengths)
+
+    normals = rotate_unit(normals)
+    for key in ("frame_u", "frame_v"):
+        if len(meta.get(key, ())):
+            meta[key] = rotate_unit(meta[key])
     if verbose:
         print(f"  Aligned CAD → pipeline frame ({align}, match {score:.3f})")
     meta["transform"] = transform
@@ -523,6 +645,7 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
                     align: str = ALIGN_AUTO, reference_mesh=None,
                     cell_mm: float = DEFAULT_COVERAGE_CELL_MM,
                     cells: Optional[SurfaceCells] = None,
+                    frames: Optional["visibility.ViewFrames"] = None,
                     verbose: bool = True) -> dict:
     """생성된 viewpoint 가 각 CAD 면을 얼마나 덮는지 면적 가중으로 센다.
 
@@ -532,6 +655,7 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
       * **uncovered** — 덮을 수 있는데 안 덮인 곳. **이것만이 진짜 구멍이다**
 
     판정은 ``visibility`` 가 전담한다 — 필터·선택과 같은 코드를 쓰므로 셋이 어긋날 수 없다.
+    ``frames`` 를 주면 촬영 프레임을 **사각형**으로 판정한다(없으면 내접원 근사).
     ``cells`` 를 주면 다시 만들지 않는다(선택 단계와 공유용).
     """
     if cells is None:
@@ -550,7 +674,7 @@ def coverage_report(step_path, positions, normals, point_fov_mm, *,
         cells.points, cells.normals,
         np.asarray(positions, dtype=np.float64).reshape(-1, 3),
         np.asarray(normals, dtype=np.float64).reshape(-1, 3),
-        point_fov_mm, occluder_mesh, spec, mask=target)
+        point_fov_mm, occluder_mesh, spec, mask=target, frames=frames)
 
     area, face_of = cells.areas_cm2, cells.face_id
     report, total_t, total_c = {}, 0.0, 0.0

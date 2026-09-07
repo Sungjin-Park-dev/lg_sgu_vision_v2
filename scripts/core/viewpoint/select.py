@@ -27,7 +27,8 @@ SELECTION_MODES = (SELECTION_ALL, SELECTION_GREEDY)
 
 
 def coverage_sets(cells, positions, normals, point_fov_mm, occluder,
-                  spec: visibility.SensorSpec, mask=None) -> List[np.ndarray]:
+                  spec: visibility.SensorSpec, mask=None,
+                  frames: Optional[visibility.ViewFrames] = None) -> List[np.ndarray]:
     """viewpoint 마다 **자기가 덮는 셀 인덱스**. set covering 의 '집합' 들이다.
 
     셀 기준이 아니라 viewpoint 기준으로 훑는다 — 커버리지 평가와 방향만 반대이고 판정은
@@ -44,17 +45,27 @@ def coverage_sets(cells, positions, normals, point_fov_mm, occluder,
     tree = cKDTree(cells.points)
     sets: List[np.ndarray] = []
     for k in range(len(positions)):
+        # 사각 프레임이면 외접원 반경으로 후보를 모아야 모서리 쪽을 안 놓친다.
+        radius_m = (float(frames.half_diagonal_mm[k]) / 1000.0 if frames is not None
+                    else point_fov_mm[k] / 2.0 / 1000.0)
         candidates = np.asarray(
-            tree.query_ball_point(positions[k], point_fov_mm[k] / 2.0 / 1000.0), dtype=int)
+            tree.query_ball_point(positions[k], radius_m), dtype=int)
         candidates = candidates[keep[candidates]] if len(candidates) else candidates
         if not len(candidates):
             sets.append(np.zeros(0, dtype=int))
             continue
+        frame_k = None
+        if frames is not None:
+            frame_k = visibility.ViewFrames(
+                np.repeat(frames.axis_u[k][None, :], len(candidates), axis=0),
+                np.repeat(frames.axis_v[k][None, :], len(candidates), axis=0),
+                np.full(len(candidates), frames.fov_u_mm[k]),
+                np.full(len(candidates), frames.fov_v_mm[k]))
         ok = visibility.sees(
             np.repeat(positions[k][None, :], len(candidates), axis=0),
             np.repeat(normals[k][None, :], len(candidates), axis=0),
             cells.points[candidates], cells.normals[candidates],
-            occluder, spec, fov_mm=point_fov_mm[k])
+            occluder, spec, fov_mm=point_fov_mm[k], frames=frame_k)
         sets.append(candidates[ok])
     return sets
 
@@ -92,11 +103,13 @@ def greedy_cover(sets: Sequence[np.ndarray], areas, mask=None,
 
 def select(mode: str, cells, positions, normals, point_fov_mm, occluder,
            spec: visibility.SensorSpec, mask=None, target_ratio: float = 1.0,
+           frames: Optional[visibility.ViewFrames] = None,
            verbose: bool = True) -> Optional[np.ndarray]:
     """모드에 따라 쓸 viewpoint 인덱스를 고른다. ``all`` 이면 None(=전부)."""
     if mode != SELECTION_GREEDY or cells is None or len(cells.points) == 0:
         return None
-    sets = coverage_sets(cells, positions, normals, point_fov_mm, occluder, spec, mask=mask)
+    sets = coverage_sets(cells, positions, normals, point_fov_mm, occluder, spec,
+                         mask=mask, frames=frames)
     chosen = greedy_cover(sets, cells.areas_cm2, mask=mask, target_ratio=target_ratio)
     if verbose:
         print(f"  Selection (greedy set cover): {len(chosen)}/{len(positions)} viewpoints kept")

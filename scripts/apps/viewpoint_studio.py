@@ -3,14 +3,26 @@
 
 Two ways to put viewpoints on screen, both object-centric:
 
-  * **Generate** — pick an object, tune sampling and graph parameters, and
-    regenerate in-process via the ``viewpoint/cli.py`` seam
-    (``load_meshes`` / ``prepare_viewpoints`` / ``build_local_delaunay_adjacency``).
-    Two samplers, both spaced by camera FOV and overlap: **Surface FPS** scatters
-    points over the triangles, while **CAD faces** lays a (u,v) grid on each B-rep
-    face of a STEP source, keeps what falls inside the trimming boundary, and takes
-    positions/normals analytically (no tessellation error). Both then pass through
-    the same bottom/interior filters (``finalize_viewpoints``).
+  * **Generate** — pick an object, tune the stage parameters, and regenerate
+    in-process via the ``viewpoint/cli.py`` seam (``load_meshes`` /
+    ``prepare_viewpoints`` / ``build_local_delaunay_adjacency``). The panel follows
+    the four stages, in the order they run:
+
+      1. **Candidates** — two samplers. **Surface FPS** scatters points over the
+         triangles; **CAD faces** walks each B-rep face of a STEP source, lays out
+         camera frames along arc length in (u,v), keeps what falls inside the
+         trimming boundary, and takes positions/normals analytically (no
+         tessellation error). Both then pass the same bottom/interior/occlusion
+         filters (``finalize_viewpoints``).
+      2. **Selection** — keep them all, or let greedy set cover pick a minimal
+         subset that still meets the coverage target.
+      3. **Verify** — count how much of each face is actually covered.
+      4. **Solver graph** — build the local-tangent Delaunay graph on whatever
+         survived. This stage cannot change the points, only the edges.
+
+    Stages 2 and 3 ask the same question ("does this camera inspect this bit of
+    surface?") and get it from the same place, ``viewpoint/visibility.py``, so the
+    selected set and the reported coverage cannot disagree.
   * **Saved viewpoints** — load a previously saved ``viewpoints*.h5``.
 
 A viewpoint file carries two layers: **geometry** (positions/normals + camera
@@ -26,7 +38,8 @@ actually consumes: edge count, component count, isolated points, and the edge
 count GLNS will really solve on (**Solver graph (hops)**).
 
 Which faces get sampled is tuned under **Faces**: the material RGB filter, the
-bottom-face filter (angle from world −z), and the hollow-object interior filter.
+bottom-face filter (angle from world −z), the hollow-object interior filter, and
+the ray-cast occlusion filter.
 The defaults come from the per-object tables in ``config`` — the fields just make
 them visible and overridable per run. Found parameters can be persisted with
 **Save** for the GLNS solve step.
@@ -81,7 +94,9 @@ SURFACE_RGB = (255, 255, 255)
 # 재질 보기의 불투명도. 단색 보기(0.25)보다 조금 올린다 — 색이 실려 있어 더 옅으면 안 읽힌다.
 MATERIAL_ALPHA = 0.35
 
-OVERLAP_MIN_PCT = 20
+# 하한이 0 인 이유: CAD faces 는 프레임을 사각형으로 놓으므로 겹침 없이도 면이 타일링된다
+# (원판 근사이던 시절에는 r ≥ s·√2/2, 즉 29.3% 겹침이 있어야 모서리가 덮였다).
+OVERLAP_MIN_PCT = 0
 OVERLAP_MAX_PCT = 90
 FOV_MIN_MM = 5.0
 FOV_MAX_MM = 500.0
@@ -490,8 +505,11 @@ class Studio:
                     hint="카메라 자리에서 안 보이는 점 제거 — 물체 자신이나 지그에 "
                          "가려지는 경우")
 
-            self.generate_folder = g.add_folder("Generate viewpoints")
-            with self.generate_folder:
+            # 아래 넷은 파이프라인의 **단계** 다: 후보를 만들고 → 그중 일부를 고르고 →
+            # 덮였는지 세고 → 남은 점 위에 GLNS 순서 제약 그래프를 만든다. 예전에는 넷이
+            # "Generate viewpoints" 한 폴더에 섞여 있어, 그래프 노브(Max edge/normal/k)가
+            # 점의 개수나 위치를 바꾼다고 읽혔다 — 그 셋은 점이 다 정해진 **뒤** 에만 쓴다.
+            with g.add_folder("Candidates"):
                 # 어디에 점을 뿌리나: 삼각형 위(FPS) vs CAD 곡면 위(면별 (u,v) 격자).
                 # 후자는 STEP 소스에서만 되고, 법선이 해석적이라 테셀레이션 오차가 없다.
                 self.dd_sampler = g.add_dropdown(
@@ -499,36 +517,61 @@ class Studio:
                     initial_value=SAMPLER_FPS,
                     hint="CAD faces 는 Mesh source 가 .stp 일 때만 — 면마다 FOV 격자를 깔고 "
                          "트리밍 경계 안쪽만 남긴다")
-                # 생성 결과가 면을 실제로 덮는지 (u,v) 격자로 센다. 필터가 점을 지우면
-                # 커버리지가 깨지는데, 지금까지는 그걸 눈으로만 확인했다.
-                self.cb_coverage = g.add_checkbox(
-                    "Coverage check", initial_value=True,
-                    hint="면마다 매개변수 공간을 잘게 나눠 '덮임/덮을 수 없음/구멍' 을 센다 "
-                         "(CAD faces 전용, 0.5초 내외)")
+                # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**라 h5 camera_spec 이
+                # 아니라 여기 산다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
+                #
+                # CAD faces 에서 겹침은 더 이상 커버리지를 만드는 수단이 아니다: 프레임이
+                # 사각형이라 겹침 0 으로도 타일링되고, 곡률·DOF 는 유효 FOV 를 줄이는 쪽으로
+                # 이미 반영된다(옛날의 50% 겹침이 그 둘을 근사하려던 대용품이었다). 남은
+                # 역할은 오차 여유뿐 — 행마다 u 간격을 그 행에서 재기 때문에, 행 중앙에서
+                # 멀어지면 u 눈금이 조금 어긋난다(curved_structure 0%→98.6%, 10%→99.8%).
+                # Surface FPS 는 프레임 모형 자체가 없어 여전히 50% 가 필요하다.
+                self.nb_overlap = g.add_number(
+                    "FOV overlap (%)", initial_value=initial_overlap,
+                    min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1,
+                    hint="이웃 촬영이 겹치는 비율 — 간격 = FOV × (1-overlap). CAD faces 는 "
+                         "오차 여유라 ≈10% 면 되고, Surface FPS 는 50% 가 필요하다")
                 self.nb_fillet = g.add_number(
                     "Fillet skip radius (mm)",
                     initial_value=float(brep.DEFAULT_FILLET_MAX_RADIUS_MM),
                     min=0.0, max=50.0, step=1.0,
                     hint="이보다 반지름이 작은 원통/토러스 면(=모서리 필렛)은 건너뛴다 — "
                          "이웃 면 촬영이 이미 덮는다. 0 이면 모두 샘플링 (CAD faces 전용)")
-                # 노브 이름은 알고리즘이 아니라 **무엇의 상한인지**를 말하게 한다.
-                # 'delaunay' 접두사는 붙이지 않는다 — 그건 폴더/hint 가 이미 말한다.
-                # 넷 다 슬라이더가 아니라 number 다: 끌어도 Generate 전까지 화면이
-                # 바뀌지 않아, 드래그 어포던스가 지키지 못할 약속을 하기 때문이다.
-                #
-                # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**라 h5 camera_spec 이
-                # 아니라 여기 산다(ViewpointGenParams 도 camera_spec property 밖에 둔다).
-                self.nb_overlap = g.add_number(
-                    "FOV overlap (%)", initial_value=initial_overlap,
-                    min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1,
-                    hint="이웃 촬영 영역이 겹치는 비율 — 표면 점 간격 = min(FOV) × (1-overlap)")
-                # 아래 셋이 GLNS 의 순서 제약 그래프를 만든다. 앞의 둘이 그래프 '모양' 을
-                # 정하고, k 는 '탐색 폭' 이라 성격이 달라 맨 아래에 둔다.
-                #
-                # 간선 길이 상한을 mm 로 미리 보여주고 싶어지는데, 하지 않는다: factor 는
-                # 표면 간격이 아니라 **카메라 위치** 간격에 곱해지고, 카메라는 WD 만큼
-                # 떨어져 곡면에서 부챗살처럼 벌어진다(cylinder_sample: 표면 9.5mm vs
-                # 카메라 31.1mm, 국소 최대 152mm). 생성 전에는 맞는 값을 낼 수 없다.
+
+            # 후보 중 무엇을 쓸지. 격자는 규칙적이라 중복이 남고, greedy 는 커버리지를
+            # 지키면서 그 중복을 걷어낸다(curved_structure 52→37점, 커버리지 동일).
+            with g.add_folder("Selection"):
+                self.dd_selection = g.add_dropdown(
+                    "Selection", options=tuple(SELECTION_LABELS), initial_value="전부 사용",
+                    hint="Greedy 는 커버리지를 유지하며 최소 집합을 고른다 "
+                         "(CAD faces 전용 — 셀이 CAD 면에서 나온다)")
+                self.nb_sel_target = g.add_number(
+                    "Target coverage (%)", initial_value=100.0, min=50.0, max=100.0, step=1.0,
+                    hint="greedy 가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 "
+                         "더 보탤 것이 없을 때까지")
+
+            # 생성 결과가 면을 실제로 덮는지 (u,v) 셀로 센다. Selection 과 **같은 판정**
+            # (visibility.sees)을 쓰므로 두 숫자가 어긋날 수 없다.
+            with g.add_folder("Verify"):
+                self.cb_coverage = g.add_checkbox(
+                    "Coverage check", initial_value=True,
+                    hint="면마다 매개변수 공간을 잘게 나눠 '덮임/덮을 수 없음/구멍' 을 센다 "
+                         "(CAD faces 전용, 0.5초 내외)")
+
+            # 점이 다 정해진 뒤, 그 위에 GLNS 의 순서 제약 그래프를 만든다. 점의 개수·위치는
+            # 이 셋으로 바뀌지 않는다 — 바뀌는 것은 간선(= GLNS 가 고를 수 있는 이동)뿐.
+            #
+            # 노브 이름은 알고리즘이 아니라 **무엇의 상한인지**를 말하게 한다. 'delaunay'
+            # 접두사는 붙이지 않는다 — 그건 폴더/hint 가 이미 말한다. 앞의 둘이 그래프 '모양'
+            # 을 정하고, k 는 '탐색 폭' 이라 성격이 달라 맨 아래에 둔다. 셋 다 슬라이더가
+            # 아니라 number 다: 끌어도 Generate 전까지 화면이 바뀌지 않아, 드래그 어포던스가
+            # 지키지 못할 약속을 하기 때문이다.
+            #
+            # 간선 길이 상한을 mm 로 미리 보여주고 싶어지는데, 하지 않는다: factor 는
+            # 표면 간격이 아니라 **카메라 위치** 간격에 곱해지고, 카메라는 WD 만큼
+            # 떨어져 곡면에서 부챗살처럼 벌어진다(cylinder_sample: 표면 9.5mm vs
+            # 카메라 31.1mm, 국소 최대 152mm). 생성 전에는 맞는 값을 낼 수 없다.
+            with g.add_folder("Solver graph"):
                 self.nb_distfactor = g.add_number(
                     "Max edge length (×)",
                     initial_value=DEFAULT_DELAUNAY_DISTANCE_FACTOR,
@@ -543,20 +586,11 @@ class Studio:
                     "Neighbor search (k)", initial_value=DEFAULT_DELAUNAY_NEIGHBORS,
                     min=3, max=30, step=1,
                     hint="삼각분할 후보로 볼 이웃 수")
-                # 실행과 상태는 자기가 쓰는 노브 바로 아래에 둔다.
-                # 후보 중 무엇을 쓸지. 격자는 겹침 50% 로 규칙적이라 중복이 있고,
-                # greedy 는 커버리지를 지키면서 그 중복을 걷어낸다(curved 105→67점).
-                self.dd_selection = g.add_dropdown(
-                    "Selection", options=tuple(SELECTION_LABELS), initial_value="전부 사용",
-                    hint="Greedy 는 커버리지를 유지하며 최소 집합을 고른다 "
-                         "(CAD faces 전용 — 셀이 CAD 면에서 나온다)")
-                self.nb_sel_target = g.add_number(
-                    "Target coverage (%)", initial_value=100.0, min=50.0, max=100.0, step=1.0,
-                    hint="greedy 가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 "
-                         "더 보탤 것이 없을 때까지")
-                self.btn_generate = g.add_button("Generate")
-                self.btn_save = g.add_button("Save h5")
-                self.gen_status = g.add_markdown("Idle.")
+
+            # 실행과 상태는 네 폴더 **밖** 에 둔다 — 어느 한 단계가 아니라 넷 전부를 돌린다.
+            self.btn_generate = g.add_button("Generate")
+            self.btn_save = g.add_button("Save h5")
+            self.gen_status = g.add_markdown("Idle.")
 
         # 화면에 무엇을 그릴지 — 순수 토글만 둔다. hops 는 표시가 아니라 데이터를 다시
         # 계산하는 렌즈라 여기가 아니라 진단창 옆에 있다.
@@ -940,7 +974,7 @@ class Studio:
         reference = load_as_trimesh(canonical) if canonical.exists() else None
         positions, normals, meta = brep.sample_step_aligned(
             mesh_path, reference,
-            fov_mm=min(p["fov_width_mm"], p["fov_height_mm"]),
+            fov_w_mm=p["fov_width_mm"], fov_h_mm=p["fov_height_mm"],
             overlap=p["surface_overlap_pct"] / 100.0,
             fillet_max_radius_mm=p["fillet_skip_mm"],
             tol_linear=p["tol_linear"], align=p["align"], part_name=p["part_name"],
@@ -952,8 +986,12 @@ class Studio:
         surface = finalize_viewpoints(
             positions, normals, params, hull_mesh=full_mesh, occluder_mesh=full_mesh,
             # face_id 는 필터를 함께 통과해야 한다 — 커버리지 계산과 h5 추적성이 쓴다.
+            # 프레임 축까지 실어 보낸다 — 판정이 촬영 사각형을 사각형으로 보려면 필요하고,
+            # 필터가 점을 지울 때 함께 지워져야 어긋나지 않는다.
             extras={"face_id": meta["face_id"],
-                    "effective_fov_mm": meta["effective_fov_mm"]})
+                    "effective_fov_mm": meta["effective_fov_mm"],
+                    "frame_u": meta["frame_u"], "frame_v": meta["frame_v"],
+                    "fov_u_mm": meta["fov_u_mm"], "fov_v_mm": meta["fov_v_mm"]})
         surface["candidate_count"] = int(len(surface["positions"]))
 
         need_cells = len(surface["positions"]) and (
@@ -968,6 +1006,7 @@ class Studio:
                 print(f"  [warn] surface cells failed: {exc}")
 
         spec = visibility.SensorSpec.from_params(params)
+        frames = visibility.ViewFrames.from_extras(surface["extras"])
         target_mask = None
         if cells is not None:
             target_mask = brep.inspectable(
@@ -979,8 +1018,9 @@ class Studio:
             chosen = select.select(
                 p["selection_mode"], cells, surface["positions"], surface["normals"],
                 surface["extras"]["effective_fov_mm"], full_mesh, spec,
-                mask=target_mask, target_ratio=p["selection_target"])
+                mask=target_mask, target_ratio=p["selection_target"], frames=frames)
             if chosen is not None and len(chosen):
+                frames = frames[chosen] if frames is not None else None
                 # candidate_count 는 **필터를 통과한** 후보 수 그대로 둔다. 샘플러 원본
                 # 개수로 덮으면 필터가 지운 것과 선택이 고른 것이 섞여 읽힌다.
                 surface = subset_viewpoints(surface, chosen)
@@ -995,7 +1035,7 @@ class Studio:
                 bottom_angle_deg=p["bottom_angle"] if p["filter_bottom"] else 0.0,
                 rotation=config.TARGET_OBJECT["rotation"],
                 part_name=p["part_name"], tol_linear=p["tol_linear"],
-                align=p["align"], reference_mesh=reference, cells=cells)
+                align=p["align"], reference_mesh=reference, cells=cells, frames=frames)
         return surface
 
     def _on_save(self) -> None:
