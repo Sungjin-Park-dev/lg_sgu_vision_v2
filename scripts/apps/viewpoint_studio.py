@@ -22,7 +22,10 @@ Two ways to put viewpoints on screen, both object-centric:
          camera frames along arc length in (u,v), keeps what falls inside the
          trimming boundary, and takes positions/normals analytically (no
          tessellation error). Both then pass the same bottom / occlusion
-         filters (``finalize_viewpoints``).
+         filters (``finalize_viewpoints``). Fillet faces — rounded edges, i.e.
+         cylinders/tori under a fixed radius — are skipped: neighbouring shots
+         cover them, and they stay in the coverage denominator so a wrong
+         assumption shows up as a hole rather than passing silently.
       2. **Selection** — the only place the candidate set is reduced. *샘플러
          그대로* keeps what the sampler produced (holes may remain; a diagnostic
          view). *최소 집합* widens the pool with one candidate per uncovered cell
@@ -566,12 +569,16 @@ class Studio:
                     min=OVERLAP_MIN_PCT, max=OVERLAP_MAX_PCT, step=1,
                     hint="이웃 촬영이 겹치는 비율 — 간격 = FOV × (1-overlap). CAD faces 는 "
                          "오차 여유라 ≈10% 면 되고, Surface FPS 는 50% 가 필요하다")
-                self.nb_fillet = g.add_number(
-                    "Fillet skip radius (mm)",
-                    initial_value=float(brep.DEFAULT_FILLET_MAX_RADIUS_MM),
-                    min=0.0, max=50.0, step=1.0,
-                    hint="이보다 반지름이 작은 원통/토러스 면(=모서리 필렛)은 건너뛴다 — "
-                         "이웃 면 촬영이 이미 덮는다. 0 이면 모두 샘플링 (CAD faces 전용)")
+                # 필렛(모서리를 굴린 좁은 면)은 노브로 두지 않는다. 반지름이
+                # DEFAULT_FILLET_MAX_RADIUS_MM 보다 작은 원통/토러스 면은 건너뛰고, 이웃 면
+                # 촬영이 그 자리를 덮는다(측정: square_structure 의 건너뛴 필렛 12면이
+                # 29.3/29.3cm² = 100% 덮임 — 커버리지 분모에는 그대로 남으므로 가정이 틀리면
+                # 바로 드러난다).
+                #
+                # 값을 바꿔서 좋아지는 경우를 못 찾았다. 0(전부 샘플링)으로 두면 유효 FOV 가
+                # 0.5mm 까지 좁아지는 면이 생겨 greedy 가 좁은 프레임을 여러 개 이어붙인다 —
+                # cylinder_sample 입사각 45°: 21점 → 31점(+48%), 커버리지는 양쪽 100%.
+                # 물체마다 달리 줘야 할 일이 생기면 config 표로 옮긴다(OBJECT_TARGET_PART 처럼).
             # 후보 풀에서 무엇을 쓸지 — **줄이는 결정은 여기 한 곳에서만** 한다.
             # 한때 구멍 보충이 Candidates 자리에서 자체 greedy 를 돌렸는데, set cover 가
             # 두 번 일어나 어느 쪽이 최종 집합을 정했는지 알 수 없었다.
@@ -911,7 +918,7 @@ class Studio:
             "part_name": self._current_part(),
             "align": self.dd_align.value,
             "sampler": self.dd_sampler.value,
-            "fillet_skip_mm": float(self.nb_fillet.value),
+            "fillet_skip_mm": float(brep.DEFAULT_FILLET_MAX_RADIUS_MM),
             "coverage": bool(self.cb_coverage.value),
             "selection_mode": SELECTION_LABELS.get(self.dd_selection.value,
                                                    select.SELECTION_NONE),
@@ -1139,8 +1146,8 @@ class Studio:
             working_distance_mm=p["working_distance_mm"],
             max_incidence_deg=p["max_incidence_deg"], dof_mm=p["dof_mm"])
         if len(positions) == 0:
-            raise ValueError("CAD 면에서 점이 하나도 나오지 않았다 — "
-                             "Fillet skip radius 를 낮춰보세요")
+            raise ValueError("CAD 면에서 점이 하나도 나오지 않았다 — Part 선택과 "
+                             "Faces 필터를 확인하세요")
         surface = finalize_viewpoints(
             positions, normals, params, occluder_mesh=full_mesh,
             # face_id 는 필터를 함께 통과해야 한다 — 커버리지 계산과 h5 추적성이 쓴다.
