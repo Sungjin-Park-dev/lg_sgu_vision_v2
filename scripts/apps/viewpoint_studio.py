@@ -56,11 +56,13 @@ order — GLNS solves the order jointly with the IK configuration, reading only
 positions/normals/edges/WD. Clustering and lawnmower ordering belonged to the
 plan_trajectory era and were removed on 2026-08-26.
 
-Rendered elements: translucent mesh, surface points, camera positions, and the
-graph edges — all coloured by connected component, each toggled independently
-under **Display**. One line at the bottom reports the graph the next stage
-actually consumes: edge count, component count, isolated points, and the edge
-count GLNS will really solve on (**Solver graph (hops)**).
+Rendered elements: translucent mesh, surface points, camera positions, the graph
+edges, and the coverage cells — all toggled under **Display**, which also carries
+**Solver graph (hops)**: the only non-toggle there, because it changes nothing that
+gets saved (the h5 always stores the 1-hop edges) and only re-derives the component
+colouring and the diagnostic. One line below reports the graph the next stage
+actually consumes: edge count, component count, isolated points, and the edge count
+GLNS will really solve on.
 
 Which faces get sampled is tuned under **Target**. The defaults come from the
 per-object tables in ``config`` (``OBJECT_TARGET_PART`` /
@@ -660,15 +662,19 @@ class Studio:
                 "Coverage cells", initial_value=False,
                 hint="커버리지 셀을 상태별 색으로 — 초록 덮임 · 빨강 구멍 · 회색 검사 불가 "
                      "(CAD faces + Coverage check 일 때만)")
+            # 유일한 토글 아닌 항목인데 여기 있는 이유: **저장되는 것을 바꾸지 않는다**.
+            # h5 에는 늘 1-hop 간선이 들어가고, 이 값은 그것을 몇 hop 으로 펼쳐 볼지만
+            # 정한다 — 성분 색과 아래 진단줄이 그 렌즈로 다시 그려진다. 슬라이더인 이유도
+            # 같다: 끌면 즉시 반영된다(Generate/Build graph 불필요).
+            self.sl_hops = g.add_slider(
+                "Solver graph (hops)", min=1, max=MAX_GLNS_HOPS, step=1,
+                initial_value=DEFAULT_GLNS_HOPS,
+                hint="GLNS 는 저장된 1-hop 간선을 N-hop 으로 확장해 푼다. "
+                     "solve.py --delaunay-expand-hops 와 같은 값으로 두세요 (기본 2). "
+                     "저장 내용은 바뀌지 않는다 — 보는 방식만 바뀐다")
 
-        # 이 노브가 바꾸는 것(성분 색·GLNS 가 푸는 간선 수)이 바로 아래 진단창과 화면에
-        # 있어서 그 옆에 둔다. 슬라이더인 이유: 끌면 즉시 반영된다(Generate 불필요) —
-        # Generate 폴더의 숫자칸들과 반대다.
-        self.sl_hops = g.add_slider(
-            "Solver graph (hops)", min=1, max=MAX_GLNS_HOPS, step=1,
-            initial_value=DEFAULT_GLNS_HOPS,
-            hint="GLNS 는 저장된 1-hop 간선을 N-hop 으로 확장해 푼다. "
-                 "solve.py --delaunay-expand-hops 와 같은 값으로 두세요 (기본 2)")
+        # 진단줄은 폴더 밖이다 — Display 를 접어도 "다음 단계가 실제로 무엇을 받는가" 는
+        # 계속 보여야 한다.
         self.info = g.add_markdown(IDLE_HINT)
 
         # callbacks
