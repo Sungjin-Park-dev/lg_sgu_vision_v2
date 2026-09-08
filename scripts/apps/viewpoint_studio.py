@@ -23,14 +23,14 @@ Two ways to put viewpoints on screen, both object-centric:
          trimming boundary, and takes positions/normals analytically (no
          tessellation error). Both then pass the same bottom / occlusion
          filters (``finalize_viewpoints``).
-      2. **Selection** — the only place the candidate set is reduced. ``격자만``
-         keeps the sampler's output as-is (holes may remain; a diagnostic view).
-         ``Greedy set cover`` widens the pool with one candidate per uncovered
-         cell — aimed head-on at it — and then greedily picks a minimal subset
-         that meets the coverage target. Widening before reducing is what closes
-         holes the grid cannot reach on its own, and it usually costs fewer
-         points than the grid, not more (curved_structure 45°: 60 points at
-         97.8% → 54 at 100%).
+      2. **Selection** — the only place the candidate set is reduced. *샘플러
+         그대로* keeps what the sampler produced (holes may remain; a diagnostic
+         view). *최소 집합* widens the pool with one candidate per uncovered cell
+         — aimed head-on at it — and then greedily picks the smallest subset that
+         meets the coverage target. Widening before reducing is what closes holes
+         the sampler cannot reach on its own, and it usually costs fewer points
+         than the raw output, not more (curved_structure 45°: 60 points at 97.8%
+         → 54 at 100%).
       3. **Verify** — count how much of each face is actually covered.
       4. **Solver graph** — build the local-tangent Delaunay graph on whatever
          survived. This stage cannot change the points, only the edges.
@@ -149,8 +149,10 @@ MAX_GLNS_HOPS = 4
 SAMPLER_FPS = "Surface FPS (mesh)"
 SAMPLER_BREP = "CAD faces (STEP)"
 # 선택 단계 표기. 기본은 '전부' = 지금까지의 동작.
-SELECTION_LABELS = {"격자만": select.SELECTION_GRID,
-                    "Greedy set cover": select.SELECTION_GREEDY}
+# 두 모드는 **결과**로 이름 짓는다 — 하나는 방식(greedy), 하나는 내용(격자)으로 부르면
+# 나란히 읽히지 않는다. '격자' 도 못 쓴다: Surface FPS 샘플러에는 격자가 없다.
+SELECTION_LABELS = {"샘플러 그대로": select.SELECTION_NONE,
+                    "최소 집합 (greedy)": select.SELECTION_GREEDY}
 STEP_SUFFIXES = (".stp", ".step")
 # 어셈블리에서 부품을 안 고른 상태. 파일 전체를 하나로 다룬다.
 PART_ALL = "(all)"
@@ -575,14 +577,17 @@ class Studio:
             # 두 번 일어나 어느 쪽이 최종 집합을 정했는지 알 수 없었다.
             #
             # greedy 는 격자에 **구멍 후보**(덮이지 않은 셀을 정면으로 보는 자리)를 더한
-            # 풀에서 고른다. 그래서 격자만으로 안 되던 곳까지 닫으면서 점은 오히려 준다:
-            # sample 45° 격자만 61점 89.9% → greedy 68점 100%.
+            # 풀에서 고른다. 그래서 샘플러 혼자로는 안 되던 곳까지 닫으면서 점은 오히려
+            # 준다: curved_structure 45° 60점 97.8% → 54점 100%.
             with g.add_folder("Selection"):
+                # 필드 이름은 'Selection' 이 아니라 'Mode' 다 — 폴더가 이미 Selection 이라
+                # 같은 말을 두 번 하게 된다.
                 self.dd_selection = g.add_dropdown(
-                    "Selection", options=tuple(SELECTION_LABELS),
-                    initial_value="Greedy set cover",
-                    hint="격자만 = 샘플러 결과 그대로(구멍이 남을 수 있다, 진단용). "
-                         "Greedy = 격자 + 구멍 후보에서 최소 집합 (CAD faces 전용)")
+                    "Mode", options=tuple(SELECTION_LABELS),
+                    initial_value="최소 집합 (greedy)",
+                    hint="샘플러 그대로 = 뽑은 점을 그대로 쓴다(구멍이 남을 수 있다, 진단용). "
+                         "최소 집합 = 못 덮은 셀을 겨냥한 후보까지 넣고 그 풀에서 "
+                         "커버리지를 채우는 최소 집합을 고른다 (CAD faces 전용)")
                 self.nb_sel_target = g.add_number(
                     "Target coverage (%)", initial_value=100.0, min=50.0, max=100.0, step=1.0,
                     hint="greedy 가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 "
@@ -909,7 +914,7 @@ class Studio:
             "fillet_skip_mm": float(self.nb_fillet.value),
             "coverage": bool(self.cb_coverage.value),
             "selection_mode": SELECTION_LABELS.get(self.dd_selection.value,
-                                                   select.SELECTION_GRID),
+                                                   select.SELECTION_NONE),
             "selection_target": float(self.nb_sel_target.value) / 100.0,
             "max_incidence_deg": float(self.nb_incidence.value),
             "dof_mm": float(self.nb_dof.value),
@@ -1174,9 +1179,9 @@ class Studio:
         if cells is not None:
             target_mask, unreachable_cm2 = denominator(surface, frames)
 
-        # 격자만으로 못 덮은 셀을 정면으로 겨냥한 **후보**를 풀에 더한다. 여기서 고르지
-        # 않는다 — 줄이는 것은 Selection 한 곳에서만 한다. 격자 모드는 이 단계를 건너뛴다
-        # (그 모드의 뜻이 "샘플러 결과 그대로" 이기 때문이다).
+        # 샘플러가 못 덮은 셀을 정면으로 겨냥한 **후보**를 풀에 더한다. 여기서 고르지
+        # 않는다 — 줄이는 것은 Selection 한 곳에서만 한다. '샘플러 그대로' 모드는 이 단계를
+        # 건너뛴다(그 모드의 뜻이 정확히 그것이기 때문이다).
         if cells is not None and greedy:
             covered = visibility.covered_by_any(
                 cells.points, cells.normals, surface["positions"], surface["normals"],
@@ -1268,7 +1273,7 @@ class Studio:
             "align_mode": p["align"],
             # 선택 단계 — 같은 설정인데 개수가 다른 이유가 된다. **요청값이 아니라 실제로
             # 적용된 값**을 남긴다(FPS 경로는 셀이 없어 선택을 돌리지 않는다).
-            "selection_mode": surface.get("selection_mode", select.SELECTION_GRID),
+            "selection_mode": surface.get("selection_mode", select.SELECTION_NONE),
             "candidate_count": int(surface.get("candidate_count", L["n"])),
             # 유효 FOV 를 좁힌 검사 품질 한계 — 개수가 달라지는 이유가 된다(0 = 미사용).
             "max_incidence_deg": p["max_incidence_deg"],

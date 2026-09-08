@@ -24,9 +24,11 @@ import numpy as np
 
 from . import visibility
 
-SELECTION_GRID = "grid"        # 격자 그대로 — 구멍이 남을 수 있다(진단용)
-SELECTION_GREEDY = "greedy"    # 격자 + 구멍 후보에서 면적 이득 순으로 최소 집합
-SELECTION_MODES = (SELECTION_GRID, SELECTION_GREEDY)
+# 모드 이름은 **결과가 무엇인가**로 짓는다. 한때 'grid'(격자만) 였는데 Surface FPS
+# 샘플러에는 격자가 없어서 그 조합에서 라벨이 거짓말을 했다.
+SELECTION_NONE = "none"        # 샘플러가 낸 것 그대로 — 구멍이 남을 수 있다
+SELECTION_GREEDY = "greedy"    # 구멍 후보까지 넣은 풀에서 면적 이득 순으로 최소 집합
+SELECTION_MODES = (SELECTION_NONE, SELECTION_GREEDY)
 
 
 def coverage_sets(cells, positions, normals, point_fov_mm, occluder,
@@ -108,7 +110,7 @@ def select(mode: str, cells, positions, normals, point_fov_mm, occluder,
            spec: visibility.SensorSpec, mask=None, target_ratio: float = 1.0,
            frames: Optional[visibility.ViewFrames] = None,
            verbose: bool = True) -> Optional[np.ndarray]:
-    """모드에 따라 쓸 viewpoint 인덱스를 고른다. ``grid`` 면 None(=후보 그대로)."""
+    """모드에 따라 쓸 viewpoint 인덱스를 고른다. ``none`` 이면 None(=후보 그대로)."""
     if mode != SELECTION_GREEDY or cells is None or len(cells.points) == 0:
         return None
     sets = coverage_sets(cells, positions, normals, point_fov_mm, occluder, spec,
