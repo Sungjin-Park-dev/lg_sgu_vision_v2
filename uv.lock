@@ -1423,6 +1423,7 @@ name = "lg-sgu-vision"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "cadquery-ocp" },
     { name = "cascadio" },
     { name = "coacd" },
     { name = "h5py" },
@@ -1445,14 +1446,9 @@ dependencies = [
     { name = "yourdfpy" },
 ]
 
-[package.optional-dependencies]
-cad = [
-    { name = "cadquery-ocp" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "cadquery-ocp", marker = "extra == 'cad'" },
+    { name = "cadquery-ocp" },
     { name = "cascadio" },
     { name = "coacd" },
     { name = "h5py" },
@@ -1472,7 +1468,6 @@ requires-dist = [
     { name = "warp-lang", specifier = ">=1.12,<1.13" },
     { name = "yourdfpy" },
 ]
-provides-extras = ["cad"]
 
 [[package]]
 name = "llvmlite"

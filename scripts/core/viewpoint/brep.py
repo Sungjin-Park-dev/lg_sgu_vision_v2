@@ -38,8 +38,7 @@ DEFAULT_FILLET_MAX_RADIUS_MM = 8.0
 # 이보다 작은 면은 격자를 깔아도 점 하나가 전부라 의미가 없다.
 DEFAULT_MIN_FACE_AREA_CM2 = 0.05
 
-_OCP_HINT = ("CAD 면 샘플러에는 OCP 가 필요하다 — `uv pip install cadquery-ocp` "
-             "(또는 pyproject 의 optional-dependency 'cad')")
+_OCP_HINT = ("CAD 면 샘플러에는 OCP 가 필요하다 — `uv sync` (pyproject 의 cadquery-ocp)")
 
 
 def _ocp():
