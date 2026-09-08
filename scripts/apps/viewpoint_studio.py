@@ -547,6 +547,7 @@ class Studio:
                     initial_value=SAMPLER_FPS,
                     hint=f"CAD faces 는 Mesh source 가 .stp 일 때만 — 면마다 FOV 격자를 깔고 "
                          f"트리밍 경계 안쪽만 남긴다(법선이 해석적이라 테셀레이션 오차 0). "
+                         f".obj 로 돌아가면 자동으로 Surface FPS 가 된다. "
                          f"Surface FPS 로 .stp 를 읽으면 점이 삼각형에서 나오므로 "
                          f"{DEFAULT_STEP_TOL_LINEAR}mm 테셀레이션이 결과를 정한다")
                 # overlap 은 카메라 속성이 아니라 **샘플링 파라미터**라 h5 camera_spec 이
@@ -742,6 +743,13 @@ class Studio:
                 handle.visible = shown
             except Exception:  # noqa: BLE001 - viser 버전에 따라 없을 수 있다
                 pass
+        # CAD faces 샘플러는 B-rep 이 있어야 하므로 .obj 로 돌아오면 되돌린다. 그대로 두면
+        # Generate 때 "STEP 소스가 필요하다" 로 실패하는데, 그 결과는 파일을 바꾼 순간 이미
+        # 정해져 있다 — Generate 까지 미룰 이유가 없다. 반대 방향(.stp 로 갈 때 CAD faces 로
+        # 바꾸기)은 하지 않는다: .stp 를 삼각형으로 테셀레이션해 FPS 로 뽑는 것은 두 샘플러를
+        # 비교하는 정당한 사용법이다.
+        if not is_step and self.dd_sampler.value == SAMPLER_BREP:
+            self.dd_sampler.value = SAMPLER_FPS
         try:
             # OBJ 는 재질 그룹이 부품처럼 보이지만 그건 Material RGB 가 고르는 것이다 —
             # 같은 것을 두 노브가 고르면 어느 쪽이 이겼는지 화면으로 알 수 없다.
