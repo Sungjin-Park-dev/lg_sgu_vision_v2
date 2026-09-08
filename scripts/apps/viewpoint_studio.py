@@ -14,8 +14,8 @@ Two ways to put viewpoints on screen, both object-centric:
     target, and which of the sampled points stay eligible (bottom /
     occlusion filters). ``Part`` and ``Material RGB`` are the same
     knob for two file kinds — B-rep faces carry no triangle colour, so a STEP source
-    selects by part and an OBJ source by material; the studio blanks whichever does
-    not apply.
+    selects by part and an OBJ source by material; the studio shows only the one that
+    applies (``Align`` follows the STEP side, being a CAD-axis convention).
 
       1. **Candidates** — two samplers. **Surface FPS** scatters points over the
          triangles; **CAD faces** walks each B-rep face of a STEP source, lays out
@@ -730,12 +730,23 @@ class Studio:
         (load_meshes 의 full_mesh) — 지그에 가려지는 viewpoint 는 계속 걸러야 한다.
         """
         options = [PART_ALL]
+        # 파일 종류가 어느 선택자가 사는지를 정한다 — 안 쓰는 쪽은 **숨긴다**. 둘 다 떠
+        # 있으면 "어느 쪽이 이겼나" 를 화면으로 알 수 없고, .stp 에서 비워둔 Material 칸이
+        # 필터를 끈 것인지 애초에 안 쓰이는 것인지 구분되지 않는다.
+        #   .stp → Part(부품) + Align(CAD 축 규약)
+        #   .obj → Material RGB(재질 색)
+        is_step = self._current_mesh_path().suffix.lower() in STEP_SUFFIXES
+        for handle, shown in ((self.dd_part, is_step), (self.dd_align, is_step),
+                              (self.tb_material, not is_step)):
+            try:
+                handle.visible = shown
+            except Exception:  # noqa: BLE001 - viser 버전에 따라 없을 수 있다
+                pass
         try:
             # OBJ 는 재질 그룹이 부품처럼 보이지만 그건 Material RGB 가 고르는 것이다 —
             # 같은 것을 두 노브가 고르면 어느 쪽이 이겼는지 화면으로 알 수 없다.
             path = self._current_mesh_path()
-            names = list(load_source_parts(path)) \
-                if path.suffix.lower() in STEP_SUFFIXES else []
+            names = list(load_source_parts(path)) if is_step else []
             if len(names) > 1:
                 options += names
         except Exception as exc:  # noqa: BLE001
