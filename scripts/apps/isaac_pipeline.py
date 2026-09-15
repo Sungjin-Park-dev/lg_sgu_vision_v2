@@ -1271,46 +1271,27 @@ class PipelineWindow:
         # (No-op in real mode if its stack uses the same controller names; best-effort
         # if the ROS stack isn't up yet.)
         if self._mode == "sim":
-            # Inspection SIM executes directly through SingleArticulation and must
-            # not require ROS or allow /SimRobotGraph to overwrite PD targets.
-            # (그래서 sim × inspection 에서는 두 그래프 모두 꺼진다.)
-            #
-            # 전환 자체가 로봇을 움직이면 안 된다. 움직일 수 있는 길은 전부 "묵은 명령"이다:
-            #  (a) 릴레이는 goal 이 활성인 동안 /isaac_joint_commands 를 흘린다. 예전엔
-            #      sim×inspection 에서 scaled 컨트롤러를 끄지 않아 RViz Execute 가 그대로
-            #      통과했고, 그 명령이 **꺼진** 그래프의 구독 큐에 쌓였다가 MoveIt 으로
-            #      돌아오는 순간 한꺼번에 재생됐다. → 양방향 모두 컨트롤러를 전환한다
-            #      (다른 소스를 컨트롤러 레벨에서 막고, 진행 중 goal 도 취소한다).
-            #  (b) 그래도 큐에 남은 것이 있을 수 있다(전환 순간에 흐르던 것). 그래프를 켤 때
-            #      ArticulationController 노드를 잠깐 꺼 둔 채 tick 시켜 큐를 비운 뒤 켠다.
-            #      구독 노드의 execOut 은 **새 메시지가 왔을 때만** 울리므로, 비운 뒤에는
-            #      진짜 새 명령만 적용된다.
-            #  (c) 그래프를 끌 때는 방금 읽은 현재 자세를 PD 목표로 다시 써 둔다 — 드라이브에
-            #      다른 목표가 남아 있어도 제자리를 지킨다.
+            # 원칙: **구독은 항상, 관절에 쓰는 노드만 모드로 켜고 끈다.** 구독 노드가 매 프레임
+            # 돌면 메시지가 큐에 쌓일 수 없고, 쓰는 노드가 꺼져 있으면 그냥 버려진다.
+            # 그래프 통째로 껐다 켜면 꺼진 동안 쌓인 묵은 명령이 켜는 순간 한꺼번에 적용돼
+            # 로봇이 튀었다 — 그 문제가 구조적으로 사라진다(드레인·타이머 불필요).
             hold_q = None
             try:
                 hold_q = self._sim_executor.current_joints()
             except Exception:  # noqa: BLE001 — 부팅 직후엔 아직 physics view 가 없다
                 pass
+            # 다른 소스는 컨트롤러 레벨에서도 막는다(양방향) — RViz 가 "controller not
+            # active" 로 거부당해 사용자에게도 막힌 것이 보인다. 진행 중 goal 은 취소된다.
             if mode == "moveit":
                 self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
             else:
                 self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
-            clear_artic_commands(self._sim_graph_path)
             self._real_graph.set_active(False)
-            if mode == "moveit":
-                self._sim_graph.set_node_disabled("ArticulationController", True)
-                self._sim_graph.set_active(True)
-                # 켜는 시점은 시계가 아니라 **사건**이다: 위 _switch_controllers(취소 포함)가
-                # 끝나야 "흐르던 명령"이 멈춘 것이고, 그 뒤 몇 프레임이면 큐가 빈다.
-                self._sim_graph_arm_pending = True
-                self._sim_graph_arm_settled_at = None
-                self._sim_graph_arm_deadline = time.time() + self.SIM_GRAPH_ARM_DEADLINE_S
-            else:
-                self._sim_graph_arm_pending = False
-                self._sim_graph.set_active(False)
-                if hold_q is not None:
-                    self._sim_executor.hold(hold_q)
+            self._apply_sim_graph_gates()
+            if mode == "inspection" and hold_q is not None:
+                # 쓰는 노드를 끈 순간의 자세를 PD 목표로 다시 써 둔다 — 드라이브에 다른
+                # 목표가 남아 있어도 제자리를 지킨다.
+                self._sim_executor.hold(hold_q)
         elif mode == "moveit":
             self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
         else:
@@ -1320,38 +1301,21 @@ class PipelineWindow:
             + ("MoveIt active, Inspection locked" if mode == "moveit"
                else "Inspection active, MoveIt blocked"))
 
-    # sim 에서 MoveIt 그래프를 켤 때, 컨트롤러 전환(goal 취소 포함)이 **끝난 뒤** 구독 큐에
-    # 남은 것을 흘려보내는 프레임 수(시간). 큐 깊이 10 이라 몇 프레임이면 충분하다.
-    SIM_GRAPH_DRAIN_S = 0.3
-    # 전환 서브프로세스가 끝나기를 기다리는 상한. ROS 스택이 반쯤 떠 있으면 ros2 CLI 가 매달릴
-    # 수 있는데, 그 때문에 MoveIt 이 영영 안 켜지면 안 된다 — 이 시간이 지나면 그냥 켠다.
-    SIM_GRAPH_ARM_DEADLINE_S = 5.0
+    def _apply_sim_graph_gates(self):
+        """/SimRobotGraph 의 노드 게이트 — 지금 (run mode, pipeline mode) 에서 정해진다.
 
-    def _arm_sim_graph_if_due(self):
-        """컨트롤러 전환이 끝나고 큐가 비면 ArticulationController 노드를 켠다.
+            tick(구독)               항상 ON   ← 큐가 쌓이지 않게. 모드와 무관.
+            ArticulationController  sim × moveit 일 때만  ← 관절에 쓰는 유일한 자리
+            PublishJointState/Clock sim 일 때만           ← real 에서는 twin 루프를 먹이지 않는다
 
-        순서: (1) _switch_controllers 가 띄운 서브프로세스(취소+전환)가 끝난다 → 그 뒤로는
-        릴레이가 새 명령을 만들지 않는다 (2) 그 시점부터 SIM_GRAPH_DRAIN_S 동안 그래프가
-        tick 하며 이미 큐에 있던 것을 흘려보낸다 (3) 켠다. 시계 추정이 아니라 사건 기준이다.
+        run mode 와 pipeline mode 어느 쪽이 바뀌어도 이 한 함수가 다시 계산한다.
         """
-        if not getattr(self, "_sim_graph_arm_pending", False):
-            return
-        now = time.time()
-        if self._ctrl_runner.running and now < self._sim_graph_arm_deadline:
-            return                                  # (1) 아직 취소/전환 중
-        if self._sim_graph_arm_settled_at is None:
-            self._sim_graph_arm_settled_at = now    # (2) 드레인 시작
-            return
-        if now - self._sim_graph_arm_settled_at < self.SIM_GRAPH_DRAIN_S:
-            return
-        self._sim_graph_arm_pending = False         # (3)
-        self._sim_graph.set_node_disabled("ArticulationController", False)
-        timed_out = self._ctrl_runner.running
-        self._append_log(
-            "[pipeline] MoveIt graph armed - controller switch "
-            + ("did not finish in time (ROS stack half up?), armed anyway"
-               if timed_out else "done, stale command queue drained")
-            + "; new RViz commands now drive the robot")
+        sim = self._mode == "sim"
+        drive = sim and self._pipeline_mode == "moveit"
+        self._sim_graph.set_active(True)
+        self._sim_graph.set_node_disabled("ArticulationController", not drive)
+        self._sim_graph.set_node_disabled("PublishJointState", not sim)
+        self._sim_graph.set_node_disabled("PublishClock", not sim)
 
     def _switch_controllers(self, activate: str, deactivate: str):
         """Activate one trajectory controller and deactivate the other, cancelling any
@@ -1582,21 +1546,19 @@ class PipelineWindow:
         """
         self._mode = mode
         if mode == "sim":
-            clear_artic_commands(self._sim_graph_path)
             self._real_graph.set_active(False)      # /RealRobotGraph mirror off
-            if self._pipeline_mode == "moveit":
-                self._set_relay_forwarding(True)
-                self._sim_graph.set_active(True)
-                which = "/SimRobotGraph drives (live /isaac_joint_commands)"
-            else:
-                self._sim_graph.set_active(False)
-                which = "in-process executor drives Isaac UR20 (ROS-free)"
+            self._set_relay_forwarding(True)
+            which = ("/SimRobotGraph drives (live /isaac_joint_commands)"
+                     if self._pipeline_mode == "moveit"
+                     else "in-process executor drives Isaac UR20 (ROS-free)")
         else:  # real
             self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
-            self._sim_graph.set_active(False)
             clear_artic_commands(self._real_graph_path)
             self._real_graph.set_active(True)       # /RealRobotGraph mirror on
             which = "/RealRobotGraph mirrors real /joint_states (twin)"
+        # /SimRobotGraph 는 껐다 켜지 않는다 — 구독은 늘 돌고, 쓰는 노드만 모드로 게이트한다
+        # (apply_pipeline_mode 의 원칙과 같다). 여기서도 같은 함수로 다시 계산한다.
+        self._apply_sim_graph_gates()
         self._mode_applied = mode
         self._sync_mode_ui()
         self._append_log(f"[run-mode] -> {mode.upper()} :: {which}")
@@ -4883,7 +4845,6 @@ class PipelineWindow:
         self._studio_runner.pump()
         self._gate_runner.pump()
         self._ros_gate_tick(dt)
-        self._arm_sim_graph_if_due()
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
         try:
