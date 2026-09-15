@@ -562,7 +562,7 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py</pre>
 <p>컨트롤러가 붙고 계획기와 RViz가 뜨면 터미널에 <code>You can start planning now!</code>가 출력된다. 이때부터 RViz를 쓰면 된다.</p>
 
 <h3>MoveIt × Real</h3>
-<p>셸 1의 Isaac 앱을 <code>--mode real --pipeline-mode moveit</code>으로 켜고, 셸 2에서 real 스택을 띄운다. <strong>기본값은 실제 로봇이 아니라 mock hardware</strong>라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다.</p>
+<p>셸 1의 Isaac 앱을 <code>--mode real --pipeline-mode moveit</code>으로 켜고, 셸 2에서 real 스택을 띄운다. <strong>기본값은 실제 로봇이 아니라 mock hardware</strong>라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다. mock 로봇은 sim과 같은 준비 자세에서 시작한다(실제 로봇은 지금 있는 자세가 그대로다).</p>
 
 <div class="term">
   <div class="term__tag">REAL · 셸 2 · mock hardware (기본)</div>

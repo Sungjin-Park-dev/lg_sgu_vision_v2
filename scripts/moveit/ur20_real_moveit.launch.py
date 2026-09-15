@@ -88,6 +88,10 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     use_cumotion = str(context.perform_substitution(
         LaunchConfiguration('use_cumotion'))).lower() not in ('false', '0')
 
+    # mock 하드웨어가 sim 과 같은 준비 자세(config.ROBOT_START_STATE)에서 시작하도록,
+    # 드라이버 description 에 initial_positions 를 우리 값으로 넣는다(래퍼 xacro 참고).
+    moveit_assets.prepare_initial_positions()
+
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
     ur_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -101,6 +105,9 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
             # mode_gate 가 앱의 /looksgood/mode 를 보고 정한다 — 앱이 말하기 전엔 아무것도
             # 실로봇을 못 움직인다.
             'activate_joint_controller': 'false',
+            # ur_control → ur_rsp 로 내려가는 launch configuration. 우리 래퍼가 드라이버
+            # xacro 를 포함하면서 initial_positions_file 만 바꾼다.
+            'description_file': moveit_assets.START_POSE_XACRO,
         }.items(),
     )
     mode_gate = ExecuteProcess(

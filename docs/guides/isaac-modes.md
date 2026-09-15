@@ -75,6 +75,8 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
 ## Real 또는 mock
 
 Isaac 앱은 `--mode real`로 시작하고 ROS 셸에서 real 스택을 실행한다. 기본은 mock hardware다.
+mock 은 sim 과 같은 준비 자세(`config.ROBOT_START_STATE`)에서 시작한다 — launch 가 그 값을
+드라이버의 `initial_positions` 로 넣는다. 실로봇에는 영향이 없다(실측 자세가 진실).
 
 ```bash
 ros2 launch scripts/moveit/ur20_real_moveit.launch.py

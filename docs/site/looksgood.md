@@ -425,7 +425,7 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
 
 ### MoveIt × Real
 
-셸 1의 Isaac 앱을 `--mode real --pipeline-mode moveit`으로 켜고, 셸 2에서 real 스택을 띄운다. **기본값은 실제 로봇이 아니라 mock hardware**라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다.
+셸 1의 Isaac 앱을 `--mode real --pipeline-mode moveit`으로 켜고, 셸 2에서 real 스택을 띄운다. **기본값은 실제 로봇이 아니라 mock hardware**라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다. mock 로봇은 sim과 같은 준비 자세에서 시작한다(실제 로봇은 지금 있는 자세가 그대로다).
 
 **REAL · 셸 2 · mock hardware (기본)**
 
