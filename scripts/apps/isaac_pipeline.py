@@ -1301,9 +1301,13 @@ class PipelineWindow:
             if mode == "moveit":
                 self._sim_graph.set_node_disabled("ArticulationController", True)
                 self._sim_graph.set_active(True)
-                self._sim_graph_arm_at = time.time() + self.SIM_GRAPH_DRAIN_S
+                # 켜는 시점은 시계가 아니라 **사건**이다: 위 _switch_controllers(취소 포함)가
+                # 끝나야 "흐르던 명령"이 멈춘 것이고, 그 뒤 몇 프레임이면 큐가 빈다.
+                self._sim_graph_arm_pending = True
+                self._sim_graph_arm_settled_at = None
+                self._sim_graph_arm_deadline = time.time() + self.SIM_GRAPH_ARM_DEADLINE_S
             else:
-                self._sim_graph_arm_at = None
+                self._sim_graph_arm_pending = False
                 self._sim_graph.set_active(False)
                 if hold_q is not None:
                     self._sim_executor.hold(hold_q)
@@ -1316,19 +1320,38 @@ class PipelineWindow:
             + ("MoveIt active, Inspection locked" if mode == "moveit"
                else "Inspection active, MoveIt blocked"))
 
-    # sim 에서 MoveIt 그래프를 켤 때 구독 큐를 비우는 시간. 큐 깊이 10 이라 몇 프레임이면
-    # 되지만, 전환 직후 아직 흐르던 명령(취소 전파 ~1s)까지 흘려보내려면 이만큼은 둔다.
-    SIM_GRAPH_DRAIN_S = 1.5
+    # sim 에서 MoveIt 그래프를 켤 때, 컨트롤러 전환(goal 취소 포함)이 **끝난 뒤** 구독 큐에
+    # 남은 것을 흘려보내는 프레임 수(시간). 큐 깊이 10 이라 몇 프레임이면 충분하다.
+    SIM_GRAPH_DRAIN_S = 0.3
+    # 전환 서브프로세스가 끝나기를 기다리는 상한. ROS 스택이 반쯤 떠 있으면 ros2 CLI 가 매달릴
+    # 수 있는데, 그 때문에 MoveIt 이 영영 안 켜지면 안 된다 — 이 시간이 지나면 그냥 켠다.
+    SIM_GRAPH_ARM_DEADLINE_S = 5.0
 
     def _arm_sim_graph_if_due(self):
-        """드레인 시간이 지나면 ArticulationController 노드를 다시 켠다 — 그때부터 MoveIt 이 움직인다."""
-        due = getattr(self, "_sim_graph_arm_at", None)
-        if due is None or time.time() < due:
+        """컨트롤러 전환이 끝나고 큐가 비면 ArticulationController 노드를 켠다.
+
+        순서: (1) _switch_controllers 가 띄운 서브프로세스(취소+전환)가 끝난다 → 그 뒤로는
+        릴레이가 새 명령을 만들지 않는다 (2) 그 시점부터 SIM_GRAPH_DRAIN_S 동안 그래프가
+        tick 하며 이미 큐에 있던 것을 흘려보낸다 (3) 켠다. 시계 추정이 아니라 사건 기준이다.
+        """
+        if not getattr(self, "_sim_graph_arm_pending", False):
             return
-        self._sim_graph_arm_at = None
+        now = time.time()
+        if self._ctrl_runner.running and now < self._sim_graph_arm_deadline:
+            return                                  # (1) 아직 취소/전환 중
+        if self._sim_graph_arm_settled_at is None:
+            self._sim_graph_arm_settled_at = now    # (2) 드레인 시작
+            return
+        if now - self._sim_graph_arm_settled_at < self.SIM_GRAPH_DRAIN_S:
+            return
+        self._sim_graph_arm_pending = False         # (3)
         self._sim_graph.set_node_disabled("ArticulationController", False)
-        self._append_log("[pipeline] MoveIt graph armed - stale command queue drained, "
-                         "new RViz commands now drive the robot")
+        timed_out = self._ctrl_runner.running
+        self._append_log(
+            "[pipeline] MoveIt graph armed - controller switch "
+            + ("did not finish in time (ROS stack half up?), armed anyway"
+               if timed_out else "done, stale command queue drained")
+            + "; new RViz commands now drive the robot")
 
     def _switch_controllers(self, activate: str, deactivate: str):
         """Activate one trajectory controller and deactivate the other, cancelling any
