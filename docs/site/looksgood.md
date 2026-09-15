@@ -141,17 +141,28 @@ uv run scripts/apps/viewpoint_studio.py
 
 > 📷 **PLATE 03 · 사진**
 >
-> Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.
+> Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 `Viewpoints` 폴더가 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.
 
-### 화면 구성
+### 화면 구성 — 위에서 아래로가 곧 작업 순서
 
 | 영역 | 역할 |
 | --- | --- |
 | `Object` | 물체 선택. 패널 맨 위에 접히지 않고 항상 보인다. **바꾸면 화면이 비워진다** |
-| `Viewpoints` | 이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 새로 만든다 |
-| `Display` | 화면에 무엇을 그릴지 켜고 끄는 토글만 모여 있다 |
-| `Solver graph (hops)` | 다음 단계가 실제로 풀 그래프로 관점을 바꾸는 슬라이더 |
+| `Viewpoints` | 이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 아래 단계로 새로 만든다 |
+| `Camera spec` | 카메라의 물리 스펙 5개 |
+| `Target` | 어느 파일의 어느 면을 검사할지, 후보에서 무엇을 걸러낼지 |
+| `Candidates` | 표면에 점을 어떻게 뿌릴지 |
+| `Selection` | 뿌린 점 중 무엇을 쓸지 |
+| `Verify` | 덮였는지 셀지 |
+| `Generate viewpoints` | 위 네 단계를 한 번에 돌리는 버튼 |
+| `Solver graph` | 점 위에 이동 제약 그래프를 만든다 (`Build graph`) |
+| `Save h5` | 전부 파일로 저장 |
+| `Display` | 화면에 무엇을 그릴지 토글 + `Solver graph (hops)` 렌즈 |
 | 진단 한 줄 | 패널 맨 아래. 지금 그래프의 상태를 숫자로 말한다 |
+
+> 💡 **버튼이 셋인 이유**
+>
+> **점을 만드는 일**(`Generate viewpoints`)과 **점 위에 그래프를 얹는 일**(`Build graph`)은 별개다. 그래프 노브를 바꿔도 점의 개수·위치는 안 바뀌고 간선만 바뀐다. 그래서 그래프만 다시 만들 때 점을 다시 뽑을 필요가 없다. `Save h5`는 둘의 결과를 함께 쓴다 — 그래프가 없으면 저장이 먼저 만들어 준다(그래프 없는 파일은 다음 단계가 거부하기 때문).
 
 ### 물체 및 Viewpoint 불러오기
 
@@ -168,64 +179,124 @@ uv run scripts/apps/viewpoint_studio.py
 | `(generated · unsaved)` | 방금 만들었지만 **아직 저장하지 않았다** |
 | 파일 이름 | 그 파일을 불러온 상태 |
 
-### 카메라 스펙
+### Camera spec — 카메라 스펙
 
-세 값이 viewpoint의 위치를 직접 결정한다. 그리고 이 값들은 `.h5`에 함께 저장되어 **이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.** 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.
+다섯 값이 viewpoint의 위치를 직접 결정한다. 앞의 셋은 `.h5`에 함께 저장되어 **이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.** 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.
 
-| 컨트롤 | 의미 | 영향 |
+| 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
-| `FOV width (mm)` | working distance에서 카메라가 담는 가로 실폭 | 클수록 viewpoint 수가 준다 |
-| `FOV height (mm)` | 같은 거리에서의 세로 실폭 | 〃 |
-| `Working distance (mm)` | 표면에서 카메라까지 띄우는 거리 | **로봇이 실제로 가는 위치가 바뀐다** |
+| `FOV width (mm)` | 50 | working distance에서 카메라가 담는 가로 실폭. 클수록 viewpoint 수가 준다 |
+| `FOV height (mm)` | 50 | 같은 거리에서의 세로 실폭 |
+| `Working distance (mm)` | 195 | 표면에서 카메라까지 띄우는 거리. **로봇이 실제로 가는 위치가 바뀐다** |
+| `Max incidence (°)` | 0 | 프레임 가장자리에서 표면이 기울어 보여도 되는 한계. `0` = 제한 없음. **CAD faces 샘플러에서만 반영** |
+| `Depth of field ± (mm)` | 0 | 초점이 맞는 거리 범위. `0` = 제한 없음. **CAD faces 샘플러에서만 반영** |
 
-> 💡 **Working distance에는 하한이 있다**
+> ⚠️ **주의 · Working distance의 기준점은 카메라 끝이다**
 >
-> 렌즈 물리 제약이라, 그보다 작은 값을 넣으면 생성이 거부된다. 검사면이 렌즈 배럴 안쪽에 놓이는 값이기 때문이다.
+> 렌즈 배럴 앞면에서 검사면까지의 거리다. 벤더 공칭 WD는 카메라 몸체 앞면 기준이라 **77.77 mm 더 큰 숫자**다 — 공칭값을 그대로 넣으면 검사면이 그만큼 멀어진다. 하한이 있어 검사면이 카메라 끝보다 안쪽이면 생성이 거부된다.
+>
+> 뒤의 둘(`Max incidence`·`Depth of field`)은 면의 곡률과 함께 **‘유효 FOV’**를 정한다. 곡률이 급한 면은 프레임 가장자리가 기울고 멀어져 공칭 FOV를 다 못 쓴다. 곡면 정의가 필요해서 CAD 샘플러에서만 쓰인다.
 
-### 생성 파라미터
+### Target — 무엇을 검사하나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Mesh source` | `source.obj` | `data/{물체}/mesh/` 안의 파일. `.stp`를 고르면 CAD 원본을 직접 읽는다 |
+| `Align` | auto | CAD의 어느 축이 ‘위’인가. `auto`는 `source.obj`와 맞춘다. 모호하면 콘솔에 경고가 뜨고, 그때 `z-up`/`y-up`으로 못박는다 |
+| `Part` | (all) | **[.stp 전용]** 파일 안의 부품(솔리드). 검사 대상만 샘플링하고 자세·원점도 그 부품 기준으로 맞춘다. 물체별 기본값이 있다 |
+| `Material RGB` | 물체별 | **[.obj 전용]** 예 `0,255,0` — 그 재질 면만 검사한다. 비우면 메시 전체 |
+| `Filter bottom faces` | 켬 | 아래를 보는 viewpoint 제거 — 로봇이 밑에서 올려다볼 수 없다 |
+| `Bottom angle (°)` | 80 | 월드 −z에서 이 각 안쪽을 보는 면을 버린다 |
+| `Filter occluded (ray)` | 켬 | 카메라 자리에서 광선을 쏴 **실제로 안 보이는 점**을 제거 — 파인 곳, 지그 뒤 |
+
+> 💡 **Part와 Material RGB는 같은 질문의 두 답이다**
+>
+> “이 파일에서 어느 면이 검사 대상인가.” 파일 종류에 따라 하나만 살아 있다 — `.stp`를 고르면 `Material RGB` 칸이 비고(CAD 면에는 삼각형 색이 없다), `.obj`는 부품이 하나라 `Part`가 `(all)`로 고정된다.
+
+### Candidates — 점을 어떻게 뿌리나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Sampler` | Surface FPS (mesh) | 어디에 점을 뿌리나. 두 가지 |
+| `FOV overlap (%)` | — | 이웃 촬영이 겹치는 비율. 간격 = FOV × (1 − overlap) |
+
+| Sampler | 특징 | overlap 권장 |
+| --- | --- | --- |
+| `Surface FPS (mesh)` | 삼각형 메시 위에 균등하게 뿌린다. `.obj`든 `.stp`든 된다. 프레임 모형이 없어 겹침으로 커버리지를 만든다 | **50%** |
+| `CAD faces (STEP)` | **`Mesh source`가 `.stp`일 때만.** 면마다 FOV 격자를 깔고 트리밍 경계 안쪽만 남긴다. 법선이 해석적이라 테셀레이션 오차가 0. 프레임이 사각형이라 겹침 0으로도 타일링된다 | **≈10%** (오차 여유) |
 
 ---
 
-| 컨트롤 | 범위 | 무엇을 정하나 |
+### Selection — 뿌린 점 중 무엇을 쓰나
+
+| 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
-| `FOV overlap (%)` | — | 이웃한 촬영 영역이 겹치는 비율. **점의 개수와 간격**을 정한다. 표면 간격 = min(FOV) × (1 − overlap). 올리면 촘촘해지고 검사 시간이 늘어난다 |
+| `Mode` | 최소 집합 (greedy) | 아래 둘 중 하나 |
+| `Target coverage (%)` | 100 | greedy가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 더 보탤 것이 없을 때까지 |
+
+| Mode | 동작 |
+| --- | --- |
+| `샘플러 그대로` | 뽑은 점을 그대로 쓴다. 구멍이 남을 수 있다 — 진단용 |
+| `최소 집합 (greedy)` | 못 덮은 셀을 겨냥한 **구멍 후보**까지 풀에 넣고, 그 풀에서 커버리지를 채우는 최소 집합을 고른다. 샘플러 혼자로는 안 닫히던 곳까지 닫으면서 점 수는 오히려 준다. **CAD faces 전용** |
+
+### Verify — 덮였나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Coverage check` | 켬 | 면마다 매개변수 공간을 잘게 나눠 ‘덮임 / 덮을 수 없음 / 구멍’을 센다. Selection과 같은 판정을 쓰므로 두 숫자가 어긋나지 않는다. **CAD faces 전용**, 0.5초 내외 |
+
+### Generate viewpoints — 실행
+
+폴더 **밖**에 있는 버튼이다. 위의 Target · Candidates · Selection · Verify 네 단계를 한 번에 돌린다. 끝나면 바로 아래에 결과가 뜬다.
+
+**화면 · Generate 결과 줄 읽는 법**
+
+```
+Done · 54 vp · CAD faces · 구멍 후보 7개 · 후보 61개에서 선택
+
+커버리지 100.0% (312/312 cm²) · 접근 불가 25cm² 제외
+```
+
+| 항목 | 뜻 |
+| --- | --- |
+| `N vp` | 최종 viewpoint 개수 |
+| `구멍 후보 N개` | 격자가 못 덮은 셀을 겨냥해 추가된 후보 수 |
+| `후보 N개에서 선택` | greedy가 고르기 전 풀의 크기 |
+| `커버리지 %` | 검사 가능한 면적 중 덮인 비율. 분모는 **검사 가능한 면적**이다 — 아래를 향하거나 어떤 카메라로도 못 보는 곳은 뺐고, 뺀 면적은 `접근 불가 … 제외`로 **반드시 같이 보여준다** |
+| `구멍: 면12(78%, 4cm²)` | 90% 미만으로 덮인 면과 그 면적 (최대 3개). 어디가 비었는지 알려준다 |
+
+### Solver graph — Build graph
+
+점이 다 정해진 뒤 그 위에 **Delaunay 인접 그래프**를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다. 셋 다 점의 개수·위치는 바꾸지 않는다.
+
+| 컨트롤 | 범위 | 의미 |
+| --- | --- | --- |
 | `Max edge length (×)` | 1.0 – 5.0 | 간선 길이 상한. **주변 카메라 위치 간격의 배수**다 (표면 간격이 아니다) |
 | `Max normal angle (°)` | 15 – 180 | 두 점의 법선이 이보다 벌어지면 잇지 않는다. `90°`면 반대편 면이 차단된다 |
 | `Neighbor search (k)` | 3 – 30 | 삼각분할 후보로 볼 이웃 수. 거의 건드릴 일이 없다 |
+| `Build graph` | — | 그래프를 만든다. `Done · 329 edges · 2 component(s) · 간선 median/max 31/152 mm` 처럼 뜬다 |
 
-> 💡 **뒤의 셋이 그래프를 만든다**
->
-> `Max edge length` · `Max normal angle` · `Neighbor search` 셋이 **Delaunay 인접 그래프**를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다.
->
-> 네 값 모두 **슬라이더가 아니라 숫자 입력칸**이다. 고쳐도 `Generate`를 누르기 전까지는 화면이 바뀌지 않는다.
-
-#### 실행
-
-| 버튼 | 동작 |
-| --- | --- |
-| `Generate` | 위 설정으로 viewpoint를 만든다. 끝나면 바로 아래에 `Done · 132 vp · 329 edges · 2 component(s)` 처럼 결과가 뜬다 |
-| `Save h5` | 만든 결과를 파일로 저장한다. **누르지 않으면 남지 않는다** — 저장 전에는 `Saved viewpoints`가 `(generated · unsaved)`로 표시된다 |
+---
 
 > 📷 **PLATE 04 · 사진**
 >
-> `Viewpoints` 폴더를 펼친 확대 컷. `Saved viewpoints` → `Camera spec` → `Generate viewpoints` 순서와 노브 네 개, 그 아래 `Done ·` 상태 줄이 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.
+> `Viewpoints` 폴더를 펼친 확대 컷. `Camera spec` → `Target` → `Candidates` → `Selection` → `Verify` → `Generate viewpoints` → `Solver graph` → `Save h5` 순서가 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.
 
-### 결과 확인
-
----
+### 결과 확인 — Display
 
 | 토글 | 기본 | 보여주는 것 |
 | --- | --- | --- |
 | `Mesh` | 켬 | 물체 표면 |
+| `Material colors` | 끔 | 메시를 재질 색으로 그린다. `Material RGB`가 무엇을 고르는지 눈으로 확인된다 |
 | `Surface points` | 켬 | 메시 표면 위의 검사 지점 |
 | `Camera positions` | 켬 | 표면점 + 법선 × WD — **로봇 EE가 실제로 가는 곳** |
 | `Graph edges` | 켬 | 다음 단계의 순서 제약 그래프. **색이 연결 성분**을 나타낸다 |
+| `Coverage cells` | 끔 | 커버리지 셀을 상태별 색으로 — **초록** 덮임 · **빨강** 구멍 · **회색** 검사 불가. 상태 줄의 숫자가 “어디”인지 보여준다 (CAD faces + Coverage check일 때만) |
+| `Solver graph (hops)` | 2 | 다시 만들지 않고 **‘다음 단계가 실제로 볼 간선’**으로 관점만 바꾸는 슬라이더. 끌면 즉시 반영된다. **저장 내용은 바뀌지 않는다** |
 
----
-
-> 💡 **hops는 다음 단계와 맞춰 둔다**
+> ⚠️ **주의 · hops는 다음 단계와 맞춰 둔다**
 >
-> 파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 `--delaunay-expand-hops`와 **같은 값**으로 두면 화면과 다음 단계가 같은 그래프를 본다. 양쪽 기본은 `2`다.
+> 파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 `--delaunay-expand-hops`와 **같은 값**으로 두면 화면과 다음 단계가 같은 그래프를 본다. **지금 두 기본값이 다르다** — Studio는 `2`, Isaac Pipeline은 `4`. 한쪽을 맞춰 두고 보는 것이 안전하다.
 
 #### 진단 한 줄 읽기
 
@@ -238,17 +309,15 @@ uv run scripts/apps/viewpoint_studio.py
 | 항목 | 뜻 |
 | --- | --- |
 | `edges` | 저장될 간선 수 (1-hop) |
-| `components` | 그래프가 몇 조각인지. **2 이상이어도 대개 정상이다** — 조각 사이를 잇는 이동 구간이 생길 뿐이고, 실제로 쓰는 파일 다수가 2성분 이상이다 |
+| `components` | 그래프가 몇 조각인지. **2 이상이어도 대개 정상이다** — 조각 사이를 잇는 이동 구간이 생길 뿐이다 |
 | `isolated` | 간선이 하나도 없는 외톨이 점. 다음 단계가 제약 그래프에서 떨어뜨린다 |
 | `GLNS: N (h-hop)` | 현재 hops 설정에서 다음 단계가 실제로 푸는 간선 수 |
 
-> ⚠️ **주의 · No graph**
->
-> 진단 줄에 `⚠ No graph`가 뜨면 그 파일에 Delaunay 간선이 없다는 뜻이다. 경로 생성이 거부하므로 다시 만들어야 한다.
+---
 
 > 📷 **PLATE 05 · 사진**
 >
-> 같은 물체를 `Max normal angle`만 바꿔 두 번 생성한 비교 컷. 성분이 여러 조각으로 갈라진 경우와 하나로 이어진 경우를, 하단 진단 한 줄과 함께 나란히.
+> CAD faces로 생성한 결과에서 `Coverage cells`를 켠 뷰포트. 초록(덮임)·빨강(구멍)·회색(검사 불가) 셀이 면 위에 깔린 모습과, 같은 화면의 Generate 결과 줄(커버리지 % · 구멍 면 목록)을 함께.
 
 ### Viewpoint 저장
 
@@ -260,7 +329,7 @@ uv run scripts/apps/viewpoint_studio.py
 data/{물체}/viewpoint/{개수}/viewpoints.h5
 
 # 예
-data/cylinder_sample/viewpoint/132/viewpoints.h5
+data/cylinder_sample/viewpoint/54/viewpoints.h5
 ```
 
 이 파일 경로를 다음 단계인 Isaac Pipeline에 그대로 넣는다. 파일 안에는 각 지점의 위치·법선·카메라 위치와 함께 **카메라 스펙, 그래프 간선**이 들어 있다. 방문 순서는 들어 있지 않다.
@@ -269,10 +338,12 @@ data/cylinder_sample/viewpoint/132/viewpoints.h5
 
 1. `Object`에서 물체를 고른다.
 2. `Camera spec`에서 FOV와 working distance를 정한다.
-3. `Generate viewpoints`에서 overlap과 그래프 노브 3개를 조절한다.
-4. `Generate`로 만든다.
-5. `Display` 토글과 하단 진단 한 줄로 점 분포와 그래프를 확인한다.
-6. 마음에 들면 `Save h5`로 저장한다.
+3. `Target`에서 파일(`.obj`/`.stp`)과 검사 대상 면을 고른다.
+4. `Candidates`에서 Sampler와 overlap을 정한다 — CAD면 `CAD faces` + 10%, 메시면 `Surface FPS` + 50%.
+5. `Generate viewpoints`를 누르고, 결과 줄의 커버리지와 구멍을 본다. 부족하면 3·4로 돌아간다.
+6. `Build graph`로 그래프를 만들고, 진단 한 줄의 성분·외톨이 수를 본다.
+7. `Display` 토글로 점·카메라 위치·커버리지 셀을 확인한다.
+8. 마음에 들면 `Save h5`로 저장한다.
 
 ---
 
