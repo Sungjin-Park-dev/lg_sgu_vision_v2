@@ -97,7 +97,16 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
             'robot_ip': LaunchConfiguration('robot_ip'),
             'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
             'launch_rviz': 'false',
+            # 드라이버가 scaled 를 켜 둔 채 뜨지 않게 한다. 어느 컨트롤러를 켤지는 아래
+            # mode_gate 가 앱의 /looksgood/mode 를 보고 정한다 — 앱이 말하기 전엔 아무것도
+            # 실로봇을 못 움직인다.
+            'activate_joint_controller': 'false',
         }.items(),
+    )
+    mode_gate = ExecuteProcess(
+        cmd=['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mode_gate.py'),
+             '--default-mode', LaunchConfiguration('default_mode')],
+        output='screen',
     )
 
     # 2) move_group with cuMotion pipeline (real time).
@@ -198,7 +207,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
              'allow_nonzero_velocity_at_trajectory_end true && break; '
              'sleep 2; done'],
         output='screen')])
-    return [ur_control, delayed, allow_nonzero_vel]
+    return [ur_control, mode_gate, delayed, allow_nonzero_vel]
 
 
 def generate_launch_description():
@@ -214,6 +223,10 @@ def generate_launch_description():
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
         DeclareLaunchArgument('xrdf_path', default_value=CAMERA_XRDF),
+        DeclareLaunchArgument(
+            'default_mode', default_value='',
+            description='앱(isaac_pipeline)이 없을 때 mode_gate 가 쓸 모드(real/moveit 등). '
+                        '비우면 앱이 말하기 전까지 궤적 컨트롤러 전부 비활성(fail-safe).'),
         DeclareLaunchArgument(
             'use_cumotion', default_value='true',
             description='false = cuMotion 없이 OMPL 로만 계획한다. cuMotion 은 CUDA 13 '

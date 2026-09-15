@@ -62,7 +62,7 @@ SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
 CAMERA_XRDF = moveit_assets.SOURCE_XRDF
 KINEMATICS_URDF = '/tmp/ur20_camera_kinematics.urdf'
 ROS2_CONTROLLERS = os.path.join(MOVEIT_DIR, 'ur_config', 'ros2_controllers.yaml')
-RELAY_SCRIPT = os.path.join(MOVEIT_DIR, 'isaac_joint_command_relay.py')
+MODE_GATE_SCRIPT = os.path.join(MOVEIT_DIR, 'mode_gate.py')
 GATE_SCRIPT = os.path.join(MOVEIT_DIR, 'wait_for_joint_state_gate.py')
 
 # MoveIt's default controller for UR is scaled_joint_trajectory_controller
@@ -160,13 +160,14 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
         package='controller_manager', executable='spawner', output='screen',
         arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
     )
+    # 두 궤적 컨트롤러 모두 **비활성** 으로 올린다. 어느 쪽을 켤지는 mode_gate 가
+    # /looksgood/mode(앱이 발행)를 보고 정한다 — 앱이 말하기 전엔 아무것도 로봇을 못 움직인다.
+    # 앱 없이 MoveIt 만 쓰려면 default_mode:=sim/moveit 을 준다.
     scaled_jtc_spawner = Node(
         package='controller_manager', executable='spawner', output='screen',
-        arguments=[ACTIVE_CONTROLLER, '-c', '/controller_manager'],
+        arguments=[ACTIVE_CONTROLLER, '-c', '/controller_manager', '--inactive'],
     )
     # joint_trajectory_controller is the INSPECTION controller (Publish targets it).
-    # Loaded INACTIVE; the Isaac UI activates it (and deactivates scaled) when the
-    # pipeline mode is Inspection, so MoveIt (which uses scaled) is blocked then.
     inspection_jtc_spawner = Node(
         package='controller_manager', executable='spawner', output='screen',
         arguments=['joint_trajectory_controller', '-c', '/controller_manager', '--inactive'],
@@ -219,12 +220,13 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
         }.items(),
     )
 
-    # Relay: forward /isaac_joint_commands_raw -> /isaac_joint_commands only while a
-    # trajectory goal is active on EITHER controller (scaled = MoveIt, jtc =
-    # Inspection). No --status-topic → relay watches both by default. This keeps the
-    # robot still when idle (MoveIt reflects the robot) and moves it only on Execute.
-    isaac_joint_command_relay = ExecuteProcess(
-        cmd=['python3', RELAY_SCRIPT], output='screen',
+    # 모드 게이트: 앱이 발행하는 /looksgood/mode 를 받아 (1) 활성 컨트롤러를 모드에 맞춰
+    # 유지하고 (2) /isaac_joint_commands_raw -> /isaac_joint_commands 를 sim/moveit 이고
+    # goal 이 활성일 때만 흘린다(옛 릴레이 흡수). 모드가 안 들리면 fail-safe(둘 다 비활성).
+    mode_gate = ExecuteProcess(
+        cmd=['python3', MODE_GATE_SCRIPT,
+             '--default-mode', LaunchConfiguration('default_mode')],
+        output='screen',
     )
 
     # Gates: block startup until joint states are actually flowing.
@@ -255,7 +257,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     return [
         robot_state_publisher,
         world2robot_tf_node,
-        isaac_joint_command_relay,
+        mode_gate,
         isaac_joint_state_gate,
         start_control_after_isaac,
         activate_controller,
@@ -281,4 +283,8 @@ def generate_launch_description():
             description='Absolute path to the cuMotion XRDF for this robot.',
         ),
     ]
+    launch_args.append(DeclareLaunchArgument(
+        'default_mode', default_value='',
+        description="앱(isaac_pipeline)이 없을 때 mode_gate 가 쓸 모드 "
+                    "(sim/moveit 등). 비우면 앱이 말하기 전까지 궤적 컨트롤러 전부 비활성."))
     return LaunchDescription(launch_args + [OpaqueFunction(function=launch_setup)])

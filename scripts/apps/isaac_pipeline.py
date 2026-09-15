@@ -193,6 +193,8 @@ GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 # Trajectory controllers, gated by pipeline mode (only one active at a time):
 #   MoveIt (RViz move_group) → MOVEIT_CONTROLLER
 #   Inspection (publish_trajectory) → INSPECTION_CONTROLLER
+# 어느 것이 활성인지는 이 앱이 아니라 스택의 mode_gate.py 가 /looksgood/mode 를 보고 정한다.
+# 여기서는 Cancel 버튼의 goal 취소 대상 이름으로만 쓴다.
 MOVEIT_CONTROLLER = "scaled_joint_trajectory_controller"
 INSPECTION_CONTROLLER = "joint_trajectory_controller"
 
@@ -458,7 +460,7 @@ class SubprocessRunner:
         """마지막 실행이 사용자 Cancel 로 끝났는가 — 실패와 구분해 로그를 정직하게 쓰려고."""
         return self._cancelled
 
-    def start(self, cmd, cwd, on_line, on_exit):
+    def start(self, cmd, cwd, on_line, on_exit, stdin: bool = False):
         # Supersede any in-flight process instead of raising. A prior
         # fire-and-forget run (e.g. a quick `ros2 param set`) may not have been
         # drained by pump() yet — this happens at startup where apply_mode and
@@ -481,6 +483,7 @@ class SubprocessRunner:
         self._cancelled = False
         proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env,
+            stdin=(subprocess.PIPE if stdin else None),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
             # 자기 프로세스 그룹으로 띄운다 — Cancel 이 bash 뿐 아니라 그 자손(uv → python)
@@ -493,6 +496,18 @@ class SubprocessRunner:
         self._reader = threading.Thread(
             target=self._read_loop, args=(gen, proc), daemon=True)
         self._reader.start()
+
+    def write_line(self, text: str) -> bool:
+        """stdin 으로 한 줄(개행 포함). 파이프가 없거나 끊겼으면 False — 호출자가 다시 띄운다."""
+        proc = self._proc
+        if proc is None or proc.stdin is None or not self.running:
+            return False
+        try:
+            proc.stdin.write(text + "\n")
+            proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
 
     def _read_loop(self, gen, proc):
         try:
@@ -1028,20 +1043,17 @@ class PipelineWindow:
         self._gen_runner = SubprocessRunner()
         self._ik_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
-        self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
-        self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
+        self._ctrl_runner = SubprocessRunner()   # Cancel 버튼의 goal 취소 (ros2 service call)
         # Viewpoint Studio(브라우저 앱)는 이 앱과 독립적인 별개 프로그램이다 — 스테이지도
         # 다른 러너도 건드리지 않고, 오래 살아 있는 서버라 작업 러너와 섞을 수 없다.
         self._studio_runner = SubprocessRunner()
         self._studio_status_label = None
         self._studio_port = 8080
-        # ROS 쪽 게이트(활성 컨트롤러 · 릴레이 forward_enabled)를 주기적으로 되맞춘다.
-        # apply_mode/apply_pipeline_mode 의 한 번짜리 전환은 그 순간 스택이 없으면 헛발이고,
-        # 셸2 스택을 재시작하면 scaled-active 로 되돌아간다 — 그러면 Inspection 모드인데도
-        # RViz 가 실로봇을 움직일 수 있다. 상태를 "설정" 하지 않고 "유지" 해야 한다.
-        self._gate_runner = SubprocessRunner()
-        self._gate_accum_s = 0.0
-        self._ros_stack_seen = False
+        # 모드 발행기(mode_publisher.py) — 이 앱이 ROS 에 하는 유일한 일. 오래 사는 서브
+        # 프로세스라 작업 러너와 섞지 않는다. 스택의 mode_gate 가 이 발행을 보고 집행한다.
+        self._mode_pub_runner = SubprocessRunner()
+        self._mode_pub_retry_at = 0.0
+        self._mode_pub_warned = False
         # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
@@ -1249,57 +1261,37 @@ class PipelineWindow:
         self.apply_pipeline_mode("moveit" if idx == 1 else "inspection")
 
     def apply_pipeline_mode(self, mode: str):
-        """Pipeline mode = command source + UI lock. It does NOT toggle any graph —
-        the Run mode (sim/real) owns graph selection (see apply_mode). Both MoveIt
-        (RViz move_group) and Inspection (Execute panel) ultimately command the same
-        controller; pipeline mode only changes which tool the user drives with and
-        locks the other.
+        """Pipeline mode = 명령 주체. moveit → RViz 가 움직인다 / inspection → 이 앱이 움직인다.
 
-        moveit     → Inspection panels greyed/locked (use RViz to drive the robot).
-        inspection → Inspection panels active (Execute drives the current robot:
-                     Isaac in sim, real robot in real).
+        Run mode 와 함께 (run, pipeline) 한 쌍이 모드다. 모드가 바뀌면 하는 일은 두 가지뿐이고
+        **네 조합 모두 같다**:
+          1. Isaac 로봇 게이트 — /SimRobotGraph 의 관절 쓰는 노드 on/off (_apply_sim_graph_gates)
+          2. 모드 발행         — /looksgood/mode (_publish_mode). 스택의 mode_gate 가 받아
+                                 실로봇 쪽 컨트롤러 활성화와 Isaac 명령 릴레이를 집행한다.
+        앱은 컨트롤러도 ROS 파라미터도 직접 건드리지 않는다.
         """
         self._pipeline_mode = mode
         self._set_inspection_ui_enabled(mode != "moveit")
         if mode == "inspection":
             self._sync_mode_ui()  # restore Execute-button state after unlock
         self._sync_pipeline_ui()
-        # Activate exactly the controller for this mode so the OTHER source is
-        # blocked at the controller level: MoveIt → scaled_joint_trajectory_controller,
-        # Inspection → joint_trajectory_controller. In Inspection mode scaled is
-        # deactivated, so MoveIt Execute is rejected ("controller not active").
-        # (No-op in real mode if its stack uses the same controller names; best-effort
-        # if the ROS stack isn't up yet.)
-        if self._mode == "sim":
-            # 원칙: **구독은 항상, 관절에 쓰는 노드만 모드로 켜고 끈다.** 구독 노드가 매 프레임
-            # 돌면 메시지가 큐에 쌓일 수 없고, 쓰는 노드가 꺼져 있으면 그냥 버려진다.
-            # 그래프 통째로 껐다 켜면 꺼진 동안 쌓인 묵은 명령이 켜는 순간 한꺼번에 적용돼
-            # 로봇이 튀었다 — 그 문제가 구조적으로 사라진다(드레인·타이머 불필요).
-            hold_q = None
+
+        hold_q = None
+        if self._mode == "sim" and mode == "inspection":
             try:
                 hold_q = self._sim_executor.current_joints()
             except Exception:  # noqa: BLE001 — 부팅 직후엔 아직 physics view 가 없다
                 pass
-            # 다른 소스는 컨트롤러 레벨에서도 막는다(양방향) — RViz 가 "controller not
-            # active" 로 거부당해 사용자에게도 막힌 것이 보인다. 진행 중 goal 은 취소된다.
-            if mode == "moveit":
-                self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
-            else:
-                self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
-            self._real_graph.set_active(False)
-            self._apply_sim_graph_gates()
-            if mode == "inspection" and hold_q is not None:
-                # 쓰는 노드를 끈 순간의 자세를 PD 목표로 다시 써 둔다 — 드라이브에 다른
-                # 목표가 남아 있어도 제자리를 지킨다.
-                self._sim_executor.hold(hold_q)
-        elif mode == "moveit":
-            self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
-        else:
-            self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
+        self._apply_sim_graph_gates()
+        if hold_q is not None:
+            # 관절 쓰는 노드를 끈 순간의 자세를 PD 목표로 다시 써 둔다 — 드라이브에 다른
+            # 목표가 남아 있어도 제자리를 지킨다.
+            self._sim_executor.hold(hold_q)
+        self._publish_mode()
         self._append_log(
             f"[pipeline] -> {mode.upper()} :: "
-            + ("MoveIt active, Inspection locked" if mode == "moveit"
-               else "Inspection active, MoveIt blocked"))
+            + ("MoveIt drives, Inspection locked" if mode == "moveit"
+               else "Inspection drives, MoveIt blocked"))
 
     def _apply_sim_graph_gates(self):
         """/SimRobotGraph 의 노드 게이트 — 지금 (run mode, pipeline mode) 에서 정해진다.
@@ -1317,121 +1309,50 @@ class PipelineWindow:
         self._sim_graph.set_node_disabled("PublishJointState", not sim)
         self._sim_graph.set_node_disabled("PublishClock", not sim)
 
-    def _switch_controllers(self, activate: str, deactivate: str):
-        """Activate one trajectory controller and deactivate the other, cancelling any
-        lingering goal on BOTH around the switch (best-effort subprocess; the ROS
-        stack lives in the other shell).
+    # 모드 발행기 재시작 간격. ROS 환경이 없으면(순수 sim×inspection 작업) 매번 죽는데,
+    # 그때마다 로그를 채우면 안 된다.
+    MODE_PUB_RETRY_S = 15.0
 
-        Why cancel both: if a controller is deactivated mid-goal its action status
-        freezes at EXECUTING, and the relay (which forwards /isaac_joint_commands
-        only while a goal is active) then keeps forwarding the OTHER controller's
-        idle hold command — a state→command→robot→state feedback loop that makes the
-        robot shake. Cancelling the outgoing goal before the switch (its CANCELED
-        status reaches the relay while still active) and the incoming controller's
-        stale goal after the switch clears that, with no timers/deadlines."""
-        if self._ctrl_runner.running:
-            self._ctrl_runner.terminate()
+    def _mode_string(self) -> str:
+        return f"{self._mode}/{self._pipeline_mode}"
 
-        def cancel(ctrl: str) -> str:
-            return (f"timeout 2 ros2 service call /{ctrl}/follow_joint_trajectory"
-                    "/_action/cancel_goal action_msgs/srv/CancelGoal '{}' "
-                    "2>/dev/null || true")
+    def _publish_mode(self):
+        """/looksgood/mode 에 지금 모드를 계속 발행하게 한다 — 이 앱이 ROS 에 하는 유일한 일.
 
-        shell_cmd = (
-            "source /opt/ros/jazzy/setup.bash && "
-            f"{cancel(deactivate)} ; "
-            f"ros2 control switch_controllers --activate {activate} --deactivate {deactivate} ; "
-            f"{cancel(activate)}"
-        )
-        self._append_log(f"[ctrl] switch: +{activate} -{deactivate} (cancel both)")
-        self._ctrl_runner.start(
-            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
-            on_line=self._append_log,
-            on_exit=lambda rc: self._append_log(f"[ctrl] switch exit={rc}"))
-
-    # 게이트 주기 [s]. 스택이 없으면 `ros2 control` 이 timeout 까지 매달리므로(rc=124)
-    # 너무 잦으면 헛도는 프로세스만 늘어난다. 스택이 뜨고 나서 최대 이만큼 안에 잡힌다.
-    ROS_GATE_PERIOD_S = 15.0
-    ROS_GATE_CMD_TIMEOUT_S = 5
-
-    def _wanted_ros_gate(self) -> tuple[str, str, bool]:
-        """(활성이어야 할 컨트롤러, 비활성이어야 할 컨트롤러, 릴레이 forward) — 지금 모드 기준.
-
-        apply_pipeline_mode / apply_mode 가 세우는 상태와 같은 표다. 둘이 어긋나면 게이트가
-        전환을 되돌리므로 반드시 같은 규칙을 봐야 한다.
+        발행기(mode_publisher.py)는 오래 사는 서브프로세스다: 살아 있으면 stdin 에 한 줄,
+        없으면 띄운다. 그것이 곧 "앱이 살아서 이 모드를 원한다" 는 신호라, 앱이 죽어 발행이
+        멈추면 스택의 mode_gate 가 fail-safe(궤적 컨트롤러 전부 비활성)로 간다.
         """
-        if self._pipeline_mode == "moveit":
-            act, deact = MOVEIT_CONTROLLER, INSPECTION_CONTROLLER
-        else:
-            act, deact = INSPECTION_CONTROLLER, MOVEIT_CONTROLLER
-        return act, deact, (self._mode == "sim")
-
-    def _ros_gate_tick(self, dt: float):
-        """ROS_GATE_PERIOD_S 마다 한 번, 원하는 게이트 상태와 실제가 다르면 되맞춘다.
-
-        스크립트는 **바뀐 것이 있을 때만** 한 줄을 찍는다 — 정상일 때 15초마다 로그가 쌓이면
-        진짜 전환 로그가 묻힌다. 스택이 없으면(list_controllers 실패) 조용히 끝난다.
-        _ctrl/_relay 러너가 도는 중(=방금 전환 명령을 보낸 직후)에는 건너뛴다: 그 결과를
-        기다리지 않고 다시 재면 이전 상태를 읽고 되돌려 버린다.
-        """
-        self._gate_accum_s += dt
-        if self._gate_accum_s < self.ROS_GATE_PERIOD_S:
+        mode = self._mode_string()
+        if self._mode_pub_runner.running and self._mode_pub_runner.write_line(mode):
             return
-        self._gate_accum_s = 0.0
-        if (self._gate_runner.running or self._ctrl_runner.running
-                or self._relay_runner.running):
-            return
-        act, deact, fwd = self._wanted_ros_gate()
-        T = self.ROS_GATE_CMD_TIMEOUT_S
-        fwd_s = "true" if fwd else "false"
-        script = (
-            "source /opt/ros/jazzy/setup.bash\n"
-            f"out=$(timeout {T} ros2 control list_controllers 2>/dev/null) || exit 0\n"
-            "echo GATE_STACK_UP\n"
-            # 'inactive' 도 active 로 끝나므로 앞의 공백까지 본다.
-            f"if ! grep -Eq '^{act}[[:space:]].*[[:space:]]active$' <<<\"$out\" "
-            f"|| grep -Eq '^{deact}[[:space:]].*[[:space:]]active$' <<<\"$out\"; then\n"
-            f"  timeout {T} ros2 control switch_controllers --activate {act} "
-            f"--deactivate {deact} >/dev/null 2>&1 "
-            f"&& echo '[gate] controllers re-asserted: +{act} -{deact}' "
-            "|| echo '[gate] controller switch FAILED (see shell 2)'\n"
-            "fi\n"
-            f"cur=$(timeout {T} ros2 param get /isaac_joint_command_relay forward_enabled "
-            "2>/dev/null | awk '{print $NF}')\n"
-            f"if [ -n \"$cur\" ] && [ \"$cur\" != \"{fwd_s}\" ]; then\n"
-            f"  timeout {T} ros2 param set /isaac_joint_command_relay forward_enabled {fwd_s} "
-            f">/dev/null 2>&1 && echo '[gate] relay forward_enabled re-asserted: {fwd_s}'\n"
-            "fi\n"
-        )
+        shell = ("source /opt/ros/jazzy/setup.bash && "
+                 f"exec python3 scripts/moveit/mode_publisher.py --mode {mode}")
 
         def on_line(line: str):
-            if line.strip() == "GATE_STACK_UP":
-                if not self._ros_stack_seen:
-                    self._ros_stack_seen = True
-                    self._append_log(
-                        f"[gate] ROS stack detected - keeping +{act} -{deact}, "
-                        f"relay forward={fwd_s} ({self._pipeline_mode}/{self._mode})")
-                return
-            self._append_log(line)
+            self._mode_pub_warned = False
+            self._append_log(f"[mode] {line}")
 
-        self._gate_runner.start(["bash", "-c", script], cwd=PROJECT_ROOT,
-                                on_line=on_line, on_exit=lambda rc: None)
+        def on_exit(rc: int):
+            if not self._mode_pub_warned and not self._mode_pub_runner.cancelled:
+                self._mode_pub_warned = True
+                self._append_log(
+                    f"[mode] publisher exited (rc={rc}) - no ROS env? MoveIt and the real "
+                    f"robot stay blocked until it runs; retrying every "
+                    f"{self.MODE_PUB_RETRY_S:.0f}s")
 
-    def _ensure_inspection_controller_cmd(self) -> str:
-        """Shell snippet that activates the inspection controller (jtc) and
-        deactivates MoveIt's (scaled), so a real publish always reaches an ACTIVE
-        controller.
+        self._mode_pub_retry_at = time.time() + self.MODE_PUB_RETRY_S
+        self._mode_pub_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
+                                    on_line=on_line, on_exit=on_exit, stdin=True)
 
-        Prepended to every real controller-publish because the one-shot switch in
-        apply_pipeline_mode/apply_mode can miss: a sim→real run-mode change does
-        NOT switch controllers, and restarting the shell-2 UR stack resets it to
-        scaled-active. Idempotent and best-effort ('|| true' keeps it non-fatal
-        when already in that state), so it is safe to run before every send."""
-        return (
-            f"ros2 control switch_controllers "
-            f"--activate {INSPECTION_CONTROLLER} --deactivate {MOVEIT_CONTROLLER} "
-            f"|| true"
-        )
+    def _mode_pub_tick(self, dt: float):
+        """발행기가 죽어 있으면 간격을 두고 다시 띄운다 — 스택이 나중에 떠도 모드는 계속 들려야 한다."""
+        if self._mode_pub_runner.running or time.time() < self._mode_pub_retry_at:
+            return
+        self._publish_mode()
+
+
+
 
     # Style overrides toggled with the lock so panels also *look* disabled
     # (this Isaac theme doesn't auto-grey on .enabled=False).
@@ -1527,56 +1448,32 @@ class PipelineWindow:
         self.apply_mode("sim" if idx == 0 else "real")
 
     def apply_mode(self, mode: str):
-        """Run mode = which robot drives the Isaac articulation:
+        """Run mode = 어느 로봇인가. sim → Isaac 이 로봇 / real → Isaac 은 실로봇의 거울.
 
-          sim  → Isaac IS the robot: /SimRobotGraph drives from /isaac_joint_commands
-                 and publishes /isaac_joint_states + /clock; /RealRobotGraph mirror OFF.
-          real → Isaac MIRRORS the real robot: /RealRobotGraph ON (drive from real
-                 /joint_states + cameras); /SimRobotGraph's driving + publishing nodes
-                 OFF (so it neither moves Isaac nor feeds the twin loop).
+          sim  → /SimRobotGraph 가 (moveit 이면) /isaac_joint_commands 로 Isaac 을 움직이고
+                 /isaac_joint_states·/clock 을 낸다. /RealRobotGraph 거울은 OFF.
+          real → /RealRobotGraph 가 실 /joint_states 로 Isaac 을 움직인다(거울).
+                 /SimRobotGraph 는 구독만 하고 쓰지도 발행하지도 않는다.
 
-        Cross-mode replay is stopped at the SOURCE: the relay (셸2) is the only thing
-        that feeds /isaac_joint_commands, so the app sets its `forward_enabled`
-        parameter — true in sim, false in real. In real mode the relay discards
-        commands, so a MoveIt Execute done in real mode never reaches Isaac and there
-        is nothing to replay when sim is re-entered (works even if the goal is still
-        active). No rebuild / cancel / timing needed.
-
-        REAL and MoveIt modes require the matching ROS stack; Inspection+SIM does not.
+        apply_pipeline_mode 와 같은 두 동작(Isaac 게이트 + 모드 발행)으로 끝난다. 실로봇 쪽
+        (컨트롤러·릴레이)은 스택의 mode_gate 가 발행된 모드를 보고 집행한다.
         """
         self._mode = mode
         if mode == "sim":
             self._real_graph.set_active(False)      # /RealRobotGraph mirror off
-            self._set_relay_forwarding(True)
             which = ("/SimRobotGraph drives (live /isaac_joint_commands)"
                      if self._pipeline_mode == "moveit"
                      else "in-process executor drives Isaac UR20 (ROS-free)")
         else:  # real
-            self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
             clear_artic_commands(self._real_graph_path)
             self._real_graph.set_active(True)       # /RealRobotGraph mirror on
             which = "/RealRobotGraph mirrors real /joint_states (twin)"
-        # /SimRobotGraph 는 껐다 켜지 않는다 — 구독은 늘 돌고, 쓰는 노드만 모드로 게이트한다
-        # (apply_pipeline_mode 의 원칙과 같다). 여기서도 같은 함수로 다시 계산한다.
         self._apply_sim_graph_gates()
         self._mode_applied = mode
         self._sync_mode_ui()
+        self._publish_mode()
         self._append_log(f"[run-mode] -> {mode.upper()} :: {which}")
 
-    def _set_relay_forwarding(self, on: bool):
-        """Tell the relay (셸2) whether to feed /isaac_joint_commands. This is the
-        mode gate: in real mode the relay discards commands so they never reach
-        Isaac (no buffering, no replay on sim re-entry). Best-effort subprocess."""
-        if self._relay_runner.running:
-            self._relay_runner.terminate()
-        val = "true" if on else "false"
-        cmd = ("source /opt/ros/jazzy/setup.bash && "
-               f"timeout 3 ros2 param set /isaac_joint_command_relay forward_enabled {val} "
-               "2>/dev/null || true")
-        self._append_log(f"[relay] forward_enabled -> {val}")
-        self._relay_runner.start(
-            ["bash", "-c", cmd], cwd=PROJECT_ROOT, on_line=self._append_log,
-            on_exit=lambda rc: self._append_log(f"[relay] param set exit={rc}"))
 
     def _sync_mode_ui(self):
         if self._mode_label is not None:
@@ -4785,11 +4682,10 @@ class PipelineWindow:
         if self._mode == "sim":
             return self._sim_executor.start(csv, on_done=on_done)
 
-        # REAL 은 ROS2 trajectory controller 경로. 보내기 전에 inspection 컨트롤러를
-        # 활성화한다(헬퍼 주석 참고 — run-mode 전환이 이 스위치를 놓칠 수 있다).
+        # REAL 은 ROS2 trajectory controller 경로. 어느 컨트롤러가 활성인지는 스택의
+        # mode_gate 가 발행된 모드(real/inspection)를 보고 이미 맞춰 두었다.
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
-            f"{self._ensure_inspection_controller_cmd()} && "
             f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
             f"--csv {csv!r} --target controller"
         )
@@ -4841,10 +4737,9 @@ class PipelineWindow:
         self._ik_runner.pump()
         self._pub_runner.pump()
         self._ctrl_runner.pump()
-        self._relay_runner.pump()
         self._studio_runner.pump()
-        self._gate_runner.pump()
-        self._ros_gate_tick(dt)
+        self._mode_pub_runner.pump()
+        self._mode_pub_tick(dt)
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
         try:
@@ -5035,6 +4930,9 @@ def main():
     # 남으면 다음 실행이 조용히 실패한다.
     if window._studio_runner.running:
         window._studio_runner.terminate()
+    # 발행이 멈추면 스택의 mode_gate 가 timeout 뒤 궤적 컨트롤러를 전부 내린다(fail-safe).
+    if window._mode_pub_runner.running:
+        window._mode_pub_runner.terminate()
     simulation_context.stop()
     simulation_app.close()
 

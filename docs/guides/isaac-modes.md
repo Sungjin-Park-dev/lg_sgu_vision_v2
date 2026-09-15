@@ -9,6 +9,29 @@ Isaac Pipeline은 로봇 대상과 명령 소스를 각각 선택한다.
 
 `--mode`와 `--pipeline-mode`는 시작값이며 UI에서 바꿀 수 있다. 실행 중에는 모드를 전환하지 않는다.
 
+## 모드는 어떻게 집행되나
+
+네 조합 모두 같은 두 동작이다. 앱은 컨트롤러나 ROS 파라미터를 직접 건드리지 않는다.
+
+| 로봇 | 게이트 | 규칙 |
+|---|---|---|
+| Isaac | `/SimRobotGraph`의 관절 쓰는 노드 | 구독은 항상, **쓰기는 `sim/moveit`일 때만** |
+| 실로봇 | 스택의 `mode_gate.py` | `/looksgood/mode`를 받아 활성 컨트롤러를 유지 (`moveit`→scaled, `inspection`→jtc) |
+
+앱은 `/looksgood/mode`에 `"<run>/<pipeline>"`을 2 Hz로 **계속** 발행한다(`mode_publisher.py`).
+스택이 늦게 뜨든 재시작되든 다음 주기에 맞는다. 발행이 **2초** 끊기면(앱 종료) 게이트는
+궤적 컨트롤러를 전부 내린다 — 앱이 말하기 전엔 누구도 로봇을 못 움직인다. 두 launch 모두
+컨트롤러를 비활성으로 올리는 이유다.
+
+앱 없이 MoveIt만 쓰려면 게이트에 기본 모드를 준다:
+
+```bash
+ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py default_mode:=sim/moveit
+ros2 launch scripts/moveit/ur20_real_moveit.launch.py       default_mode:=real/moveit
+```
+
+`/looksgood/gate_state`를 echo하면 게이트가 지금 무엇을 보고 무엇을 켰는지 나온다.
+
 ## Inspection × sim
 
 가장 안전한 기본 모드다. ROS 스택 없이 궤적 생성, preview와 Isaac 실행이 가능하다.
