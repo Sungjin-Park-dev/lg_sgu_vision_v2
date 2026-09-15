@@ -429,27 +429,48 @@ def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
     return chosen
 
 
-def get_solution_path(object_name: str, num_viewpoints: int) -> Path:
+def run_stamp() -> str:
+    """산출물 파일명에 붙이는 실행 시각 — ``YYYYMMDD_HHMMSS``.
+
+    IK 해·GLNS 해·궤적은 **덮어쓰지 않는다.** 같은 물체·viewpoint 수로 다시 돌려도 이전
+    결과가 남아야 비교하고 되돌릴 수 있다. 한 번의 생성(solve → verify)은 같은 스탬프를
+    나눠 가져 파일끼리 짝이 맞는다 — 호출자가 한 번 만들어 두 스크립트에 넘긴다.
+    """
+    import time
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def get_solution_path(object_name: str, num_viewpoints: int,
+                      stamp: str | None = None) -> Path:
     """GLNS 해 h5 — ``verify.py`` 의 입력이자 studio 시각화 소스.
 
     궤적 산출물과 같은 폴더에 둔다: 이 해로부터 궤적이 나오고, 둘의 수명이 같다.
 
-        data/{object}/trajectory/{N}/solution.h5
+        data/{object}/trajectory/{N}/solution.h5                    (stamp 없음 — 덮어씀)
+        data/{object}/trajectory/{N}/solution_20260916_143012.h5    (stamp 있음)
+
+    스탬프 없는 이름은 trajectory_studio 처럼 "물체당 해 하나" 를 mtime 으로 관리하는
+    호출자용이다. 이력을 남기려면 run_stamp() 를 넘긴다(Isaac Pipeline 이 그렇게 한다).
     """
-    return get_trajectory_path(object_name, num_viewpoints, "solution.h5")
+    name = f"solution_{stamp}.h5" if stamp else "solution.h5"
+    return get_trajectory_path(object_name, num_viewpoints, name)
 
 
 def get_trajectory_artifact_path(object_name: str, num_viewpoints: int,
-                                 role: str | None = None, suffix: str = ".csv") -> Path:
+                                 role: str | None = None, suffix: str = ".csv",
+                                 stamp: str | None = None) -> Path:
     """실행 궤적 산출물 경로.
 
-    명명 규칙은 ``{역할}[_{세부}]`` 이고 백엔드 토큰은 없다 — 생산자가 GLNS 하나뿐이다.
+    명명 규칙은 ``{역할}[_{세부}][_{스탬프}]`` 이고 백엔드 토큰은 없다 — 생산자가 GLNS
+    하나뿐이다.
 
         role=None                 → trajectory.csv        (스캔 궤적)
         role='home_to_start'      → trajectory_home_to_start.csv
-        role='end_to_home'        → trajectory_end_to_home.csv
+        role='tilt_vp0060', stamp → trajectory_tilt_vp0060_20260916_143012.csv
     """
     name = "trajectory" if not role else f"trajectory_{role}"
+    if stamp:
+        name = f"{name}_{stamp}"
     return get_trajectory_path(object_name, num_viewpoints, f"{name}{suffix}")
 
 

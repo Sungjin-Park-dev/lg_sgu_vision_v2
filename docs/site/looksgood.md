@@ -27,16 +27,18 @@ data/{물체}/mesh/source.obj                              ← 준비물
       ↓
 data/{물체}/viewpoint/{N}/viewpoints.h5           ← Viewpoint Studio
       ↓
-data/{물체}/ik/{N}/ik_*.h5                               ← Solve IK
+data/{물체}/ik/{N}/{옵션}_{시각}.h5                      ← Solve IK
       ↓
-data/{물체}/trajectory/{N}/solution.h5                   ← 방문 순서
+data/{물체}/trajectory/{N}/solution_{시각}.h5            ← 방문 순서
       ↓
-data/{물체}/trajectory/{N}/trajectory.csv (+ .npz)       ← 실행 경로
+data/{물체}/trajectory/{N}/trajectory_{시각}.csv (+ .npz) ← 실행 경로
       ↓
 Isaac 미리보기  또는  실제 로봇
 ```
 
 `{N}`은 그 물체의 viewpoint 개수다. 같은 물체라도 viewpoint 수가 다르면 다른 폴더에 저장되므로, 여러 설정을 나란히 두고 비교할 수 있다.
+
+`{시각}`은 만든 시각(`YYYYMMDD_HHMMSS`)이다. **IK 해·방문 순서·경로는 덮어쓰지 않는다** — 다시 만들면 새 파일이 생기고 이전 것은 그대로 남는다. 한 번의 생성에서 나온 `solution_…`과 `trajectory_…`는 같은 시각을 가져 짝이 보인다. IK 해는 옵션과 물체 배치가 같은 것 중 **가장 최근 파일**을 자동으로 재사용한다.
 
 > 📷 **PLATE 01 · 사진**
 >
@@ -751,10 +753,10 @@ CSV path: .../trajectory/74/trajectory.csv
 | --- | --- |
 | 물체 메시 | `data/{물체}/mesh/source.obj` |
 | Viewpoint | `data/{물체}/viewpoint/{N}/viewpoints.h5` |
-| IK 해 | `data/{물체}/ik/{N}/ik_*.h5` |
-| 방문 순서 | `data/{물체}/trajectory/{N}/solution.h5` |
-| 검사 경로 | `data/{물체}/trajectory/{N}/trajectory.csv` |
-| Tilt 경로 | `data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}.csv` |
+| IK 해 | `data/{물체}/ik/{N}/{옵션}_{시각}.h5` — 옵션은 `nominal`/`roll`/`tilt`/`rolltilt`(+`_nodedup`) |
+| 방문 순서 | `data/{물체}/trajectory/{N}/solution_{시각}.h5` |
+| 검사 경로 | `data/{물체}/trajectory/{N}/trajectory_{시각}.csv` |
+| Tilt 경로 | `data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}_{시각}.csv` |
 | 이동 경로 | `data/{물체}/trajectory/{N}/home_move_*.csv` |
 | 워크셀 정의 | `workcell/scenes/{이름}.yaml` |
 

@@ -5,8 +5,13 @@
 ```text
 mesh/                입력 자산 — source.obj, source.usd, material
 viewpoint/{N}/       viewpoints.h5
-trajectory/{N}/      solution.h5                       GLNS 해 (verify 의 입력)
-                     trajectory.csv | .npz             스캔 궤적 (실행용)
+ik/{N}/              {옵션}_{시각}.h5                  저장 IK 후보 (옵션·물체 pose 가 같은 최신 파일을 재사용)
+trajectory/{N}/      solution_{시각}.h5                GLNS 해 (verify 의 입력)
+                     trajectory_{시각}.csv | .npz      스캔 궤적 (실행용). 해와 같은 시각 = 짝
+
+`{시각}` 은 `YYYYMMDD_HHMMSS` 다. Isaac Pipeline 은 항상 스탬프를 붙여 **덮어쓰지 않는다**;
+`verify.py --tag` 없이 / `solve.py --output` 으로 고정 이름을 주면 옛 방식(덮어씀)이다 —
+trajectory_studio 가 그렇게 쓴다.
                      trajectory_home_to_start.csv|npz  HOME 브래킷 (옵션)
                      trajectory_end_to_home.csv|npz
                      home_move_{approach,return}.csv|npz

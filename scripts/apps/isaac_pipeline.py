@@ -708,6 +708,18 @@ class IsaacArticulationExecutor:
         self._on_done = None
         self._log("[execute] Isaac trajectory cancelled; holding last target")
 
+    def hold(self, q: np.ndarray):
+        """PD 목표를 q 로 다시 쓴다(텔레포트 없음). 그래프가 관절을 놓는 순간 드라이브에
+        남아 있던 목표가 무엇이든 제자리(q = 방금 읽은 현재 자세)를 지키게 한다."""
+        if self._running:
+            return
+        try:
+            if self._controller is None:
+                self._initialize()
+            self._apply_target(np.asarray(q, dtype=np.float64))
+        except Exception as exc:  # noqa: BLE001 — 방어용이라 실패가 전환을 막으면 안 된다
+            self._log(f"[execute] hold failed: {exc}")
+
 
 # =============================================================================
 # Preview player — applies CSV waypoints to the ghost via FK.
@@ -896,6 +908,19 @@ class GraphTickSwitch:
             pass
         return "noop"
 
+    def set_node_disabled(self, node_name: str, disabled: bool):
+        """그래프 안의 노드 하나만 끄고 켠다(OnPlaybackTick 이 아니라 예: ArticulationController).
+
+        그래프는 tick 하되 관절에는 쓰지 않는 상태를 만들 때 쓴다 — 구독 큐에 쌓인 묵은
+        명령을 흘려보내는 동안. 실패해도 죽지 않고 로그만 남긴다(best-effort).
+        """
+        import omni.graph.core as og
+        try:
+            node = og.Controller.node(f"{self._graph_path}/{node_name}")
+            node.set_disabled(bool(disabled))
+        except Exception as e:  # noqa: BLE001
+            self._log(f"[graph] {node_name} disable={disabled} failed: {e}")
+
     def set_active(self, active: bool):
         """active=False → graph stops driving joints; active=True → resume."""
         if self._mode is None:
@@ -1010,6 +1035,13 @@ class PipelineWindow:
         self._studio_runner = SubprocessRunner()
         self._studio_status_label = None
         self._studio_port = 8080
+        # ROS 쪽 게이트(활성 컨트롤러 · 릴레이 forward_enabled)를 주기적으로 되맞춘다.
+        # apply_mode/apply_pipeline_mode 의 한 번짜리 전환은 그 순간 스택이 없으면 헛발이고,
+        # 셸2 스택을 재시작하면 scaled-active 로 되돌아간다 — 그러면 Inspection 모드인데도
+        # RViz 가 실로봇을 움직일 수 있다. 상태를 "설정" 하지 않고 "유지" 해야 한다.
+        self._gate_runner = SubprocessRunner()
+        self._gate_accum_s = 0.0
+        self._ros_stack_seen = False
         # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
@@ -1242,13 +1274,39 @@ class PipelineWindow:
             # Inspection SIM executes directly through SingleArticulation and must
             # not require ROS or allow /SimRobotGraph to overwrite PD targets.
             # (그래서 sim × inspection 에서는 두 그래프 모두 꺼진다.)
-            self._sim_graph.set_active(mode == "moveit")
+            #
+            # 전환 자체가 로봇을 움직이면 안 된다. 움직일 수 있는 길은 전부 "묵은 명령"이다:
+            #  (a) 릴레이는 goal 이 활성인 동안 /isaac_joint_commands 를 흘린다. 예전엔
+            #      sim×inspection 에서 scaled 컨트롤러를 끄지 않아 RViz Execute 가 그대로
+            #      통과했고, 그 명령이 **꺼진** 그래프의 구독 큐에 쌓였다가 MoveIt 으로
+            #      돌아오는 순간 한꺼번에 재생됐다. → 양방향 모두 컨트롤러를 전환한다
+            #      (다른 소스를 컨트롤러 레벨에서 막고, 진행 중 goal 도 취소한다).
+            #  (b) 그래도 큐에 남은 것이 있을 수 있다(전환 순간에 흐르던 것). 그래프를 켤 때
+            #      ArticulationController 노드를 잠깐 꺼 둔 채 tick 시켜 큐를 비운 뒤 켠다.
+            #      구독 노드의 execOut 은 **새 메시지가 왔을 때만** 울리므로, 비운 뒤에는
+            #      진짜 새 명령만 적용된다.
+            #  (c) 그래프를 끌 때는 방금 읽은 현재 자세를 PD 목표로 다시 써 둔다 — 드라이브에
+            #      다른 목표가 남아 있어도 제자리를 지킨다.
+            hold_q = None
+            try:
+                hold_q = self._sim_executor.current_joints()
+            except Exception:  # noqa: BLE001 — 부팅 직후엔 아직 physics view 가 없다
+                pass
+            if mode == "moveit":
+                self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
+            else:
+                self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
+            clear_artic_commands(self._sim_graph_path)
             self._real_graph.set_active(False)
             if mode == "moveit":
-                # Relay forwarding is owned by apply_mode (stays True throughout sim);
-                # re-asserting it here is redundant and, at startup, double-starts the
-                # relay runner before the UI loop has drained the first run.
-                self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
+                self._sim_graph.set_node_disabled("ArticulationController", True)
+                self._sim_graph.set_active(True)
+                self._sim_graph_arm_at = time.time() + self.SIM_GRAPH_DRAIN_S
+            else:
+                self._sim_graph_arm_at = None
+                self._sim_graph.set_active(False)
+                if hold_q is not None:
+                    self._sim_executor.hold(hold_q)
         elif mode == "moveit":
             self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
         else:
@@ -1257,6 +1315,20 @@ class PipelineWindow:
             f"[pipeline] -> {mode.upper()} :: "
             + ("MoveIt active, Inspection locked" if mode == "moveit"
                else "Inspection active, MoveIt blocked"))
+
+    # sim 에서 MoveIt 그래프를 켤 때 구독 큐를 비우는 시간. 큐 깊이 10 이라 몇 프레임이면
+    # 되지만, 전환 직후 아직 흐르던 명령(취소 전파 ~1s)까지 흘려보내려면 이만큼은 둔다.
+    SIM_GRAPH_DRAIN_S = 1.5
+
+    def _arm_sim_graph_if_due(self):
+        """드레인 시간이 지나면 ArticulationController 노드를 다시 켠다 — 그때부터 MoveIt 이 움직인다."""
+        due = getattr(self, "_sim_graph_arm_at", None)
+        if due is None or time.time() < due:
+            return
+        self._sim_graph_arm_at = None
+        self._sim_graph.set_node_disabled("ArticulationController", False)
+        self._append_log("[pipeline] MoveIt graph armed - stale command queue drained, "
+                         "new RViz commands now drive the robot")
 
     def _switch_controllers(self, activate: str, deactivate: str):
         """Activate one trajectory controller and deactivate the other, cancelling any
@@ -1289,6 +1361,74 @@ class PipelineWindow:
             ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
             on_line=self._append_log,
             on_exit=lambda rc: self._append_log(f"[ctrl] switch exit={rc}"))
+
+    # 게이트 주기 [s]. 스택이 없으면 `ros2 control` 이 timeout 까지 매달리므로(rc=124)
+    # 너무 잦으면 헛도는 프로세스만 늘어난다. 스택이 뜨고 나서 최대 이만큼 안에 잡힌다.
+    ROS_GATE_PERIOD_S = 15.0
+    ROS_GATE_CMD_TIMEOUT_S = 5
+
+    def _wanted_ros_gate(self) -> tuple[str, str, bool]:
+        """(활성이어야 할 컨트롤러, 비활성이어야 할 컨트롤러, 릴레이 forward) — 지금 모드 기준.
+
+        apply_pipeline_mode / apply_mode 가 세우는 상태와 같은 표다. 둘이 어긋나면 게이트가
+        전환을 되돌리므로 반드시 같은 규칙을 봐야 한다.
+        """
+        if self._pipeline_mode == "moveit":
+            act, deact = MOVEIT_CONTROLLER, INSPECTION_CONTROLLER
+        else:
+            act, deact = INSPECTION_CONTROLLER, MOVEIT_CONTROLLER
+        return act, deact, (self._mode == "sim")
+
+    def _ros_gate_tick(self, dt: float):
+        """ROS_GATE_PERIOD_S 마다 한 번, 원하는 게이트 상태와 실제가 다르면 되맞춘다.
+
+        스크립트는 **바뀐 것이 있을 때만** 한 줄을 찍는다 — 정상일 때 15초마다 로그가 쌓이면
+        진짜 전환 로그가 묻힌다. 스택이 없으면(list_controllers 실패) 조용히 끝난다.
+        _ctrl/_relay 러너가 도는 중(=방금 전환 명령을 보낸 직후)에는 건너뛴다: 그 결과를
+        기다리지 않고 다시 재면 이전 상태를 읽고 되돌려 버린다.
+        """
+        self._gate_accum_s += dt
+        if self._gate_accum_s < self.ROS_GATE_PERIOD_S:
+            return
+        self._gate_accum_s = 0.0
+        if (self._gate_runner.running or self._ctrl_runner.running
+                or self._relay_runner.running):
+            return
+        act, deact, fwd = self._wanted_ros_gate()
+        T = self.ROS_GATE_CMD_TIMEOUT_S
+        fwd_s = "true" if fwd else "false"
+        script = (
+            "source /opt/ros/jazzy/setup.bash\n"
+            f"out=$(timeout {T} ros2 control list_controllers 2>/dev/null) || exit 0\n"
+            "echo GATE_STACK_UP\n"
+            # 'inactive' 도 active 로 끝나므로 앞의 공백까지 본다.
+            f"if ! grep -Eq '^{act}[[:space:]].*[[:space:]]active$' <<<\"$out\" "
+            f"|| grep -Eq '^{deact}[[:space:]].*[[:space:]]active$' <<<\"$out\"; then\n"
+            f"  timeout {T} ros2 control switch_controllers --activate {act} "
+            f"--deactivate {deact} >/dev/null 2>&1 "
+            f"&& echo '[gate] controllers re-asserted: +{act} -{deact}' "
+            "|| echo '[gate] controller switch FAILED (see shell 2)'\n"
+            "fi\n"
+            f"cur=$(timeout {T} ros2 param get /isaac_joint_command_relay forward_enabled "
+            "2>/dev/null | awk '{print $NF}')\n"
+            f"if [ -n \"$cur\" ] && [ \"$cur\" != \"{fwd_s}\" ]; then\n"
+            f"  timeout {T} ros2 param set /isaac_joint_command_relay forward_enabled {fwd_s} "
+            f">/dev/null 2>&1 && echo '[gate] relay forward_enabled re-asserted: {fwd_s}'\n"
+            "fi\n"
+        )
+
+        def on_line(line: str):
+            if line.strip() == "GATE_STACK_UP":
+                if not self._ros_stack_seen:
+                    self._ros_stack_seen = True
+                    self._append_log(
+                        f"[gate] ROS stack detected - keeping +{act} -{deact}, "
+                        f"relay forward={fwd_s} ({self._pipeline_mode}/{self._mode})")
+                return
+            self._append_log(line)
+
+        self._gate_runner.start(["bash", "-c", script], cwd=PROJECT_ROOT,
+                                on_line=on_line, on_exit=lambda rc: None)
 
     def _ensure_inspection_controller_cmd(self) -> str:
         """Shell snippet that activates the inspection controller (jtc) and
@@ -3663,9 +3803,11 @@ class PipelineWindow:
                    f" --max-candidates-per-viewpoint {max_candidates}")
         from common import config as _config
 
-        # 해와 궤적은 한 폴더에 산다. 이름에 앱 이름을 넣지 않는다 — 어느 앱이 만들었든
-        # 같은 물체/viewpoint 수면 같은 해다(재solve 는 덮어쓰기).
-        det_h5 = str(_config.get_solution_path(obj, n_vp))
+        # 해와 궤적은 한 폴더에 살고 **같은 스탬프**를 나눠 갖는다 — 덮어쓰지 않는다.
+        # solution_<stamp>.h5 와 trajectory_<stamp>.csv 가 짝이라 어느 해에서 나온 궤적인지
+        # 이름만으로 보인다(npz meta 의 source_solution 도 같은 말을 한다).
+        stamp = _config.run_stamp()
+        det_h5 = str(_config.get_solution_path(obj, n_vp, stamp=stamp))
         trajectory_dir = str(Path(det_h5).parent)
         # 현재 자세를 넘겨 **이어붙인 궤적의 관절값 표현만** 그 기준으로 다시 고르게 한다
         # (verify 의 align_path_to_start). 방문 순서·방향·waypoint 수는 안 바뀐다 — 2π 만큼
@@ -3688,7 +3830,7 @@ class PipelineWindow:
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
-            f"--no-home-bracket --output-dir {trajectory_dir!r}{start_arg} "
+            f"--no-home-bracket --output-dir {trajectory_dir!r} --tag {stamp}{start_arg} "
             # 속도는 solve 가 아니라 verify 가 CSV 에 굽는다 — 여기에만 붙인다.
             f"{self._timing_cli_args()}"
         )
@@ -4331,13 +4473,14 @@ class PipelineWindow:
                 "Hide Tilt Fan" if self._tilt_fan_on else "Show Tilt Fan")
 
     def _tilt_output_path(self, obj: str, n_vp, index: int) -> Path:
-        """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙(trajectory_{역할}.csv)."""
+        """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙 + 실행 스탬프(덮어쓰기 없음)."""
         from common import config as _config
 
         role = f"tilt_vp{index:04d}"
+        stamp = _config.run_stamp()
         if n_vp is not None:
-            return _config.get_trajectory_artifact_path(obj, n_vp, role=role)
-        return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}.csv"
+            return _config.get_trajectory_artifact_path(obj, n_vp, role=role, stamp=stamp)
+        return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}_{stamp}.csv"
 
     def _on_generate_tilt(self):
         """스캔 궤적의 한 행을 중심으로 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
@@ -4715,6 +4858,9 @@ class PipelineWindow:
         self._ctrl_runner.pump()
         self._relay_runner.pump()
         self._studio_runner.pump()
+        self._gate_runner.pump()
+        self._ros_gate_tick(dt)
+        self._arm_sim_graph_if_due()
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
         try:

@@ -218,10 +218,12 @@ def main() -> None:
     )
     print(f"IK_REACHABILITY_JSON {output_path}")
 
+    # 덮어쓰지 않는다 — 스탬프를 붙여 새 파일로. solve.py 는 설정이 맞는 최신 파일을 찾는다.
     save_path = (
         Path(args.save_ik) if args.save_ik
         else ik_solutions_path(h5_path, roll_augment=args.roll_augment,
-                               tilt_augment=args.tilt_augment, dedup=args.dedup)
+                               tilt_augment=args.tilt_augment, dedup=args.dedup,
+                               stamp=config.run_stamp())
     )
     n_saved = save_ik_solutions(
         save_path, representatives, metadata, settings,

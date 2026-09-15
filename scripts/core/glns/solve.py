@@ -35,8 +35,8 @@ from core.glns.candidates import (  # noqa: E402
 )
 from core.glns.ik_store import (  # noqa: E402
     build_settings,
+    find_ik_solutions,
     ik_solutions_path,
-    load_ik_solutions,
     save_ik_solutions,
 )
 from core.glns.problem import (  # noqa: E402
@@ -225,11 +225,12 @@ def _run_glns(
 
 
 def _default_output(object_name: str, count: int) -> Path:
-    """물체·viewpoint 수당 해는 하나다 — 재solve 하면 덮어쓴다.
+    """``--output`` 이 없을 때의 해 경로 — 스탬프를 붙여 **덮어쓰지 않는다**.
 
-    옛 궤적 npz 는 mtime 비교로 자동 무효화되므로(trajectory_studio) 이력을 남길 필요가 없다.
+    같은 물체·viewpoint 수로 다시 풀어도 이전 해가 남아야 비교·복구가 된다. 해 하나를
+    mtime 으로 관리하는 호출자(trajectory_studio)는 --output 으로 고정 이름을 직접 준다.
     """
-    return config.get_solution_path(object_name, count)
+    return config.get_solution_path(object_name, count, stamp=config.run_stamp())
 
 
 def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) -> dict:
@@ -327,11 +328,16 @@ def main() -> int:
         num_seeds=args.num_seeds, ik_seed=args.ik_seed,
         lock_nominal_wrist3=lock_nominal_wrist3,
     )
+    # 저장은 항상 새 스탬프 파일로(덮어쓰기 없음). 재사용은 설정이 맞는 **가장 최근** 파일.
     ik_path = ik_solutions_path(source_path, roll_augment=args.roll_augment,
-                                tilt_augment=args.tilt_augment, dedup=args.dedup)
-    loaded = None if args.no_ik_reuse else load_ik_solutions(ik_path, ik_settings)
+                                tilt_augment=args.tilt_augment, dedup=args.dedup,
+                                stamp=config.run_stamp())
+    found = None if args.no_ik_reuse else find_ik_solutions(
+        source_path, roll_augment=args.roll_augment, tilt_augment=args.tilt_augment,
+        dedup=args.dedup, want_settings=ik_settings)
+    loaded, ik_path_used = (found if found is not None else (None, None))
     if loaded is not None and len(loaded[0]) != n_viewpoints:
-        print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path})")
+        print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path_used})")
         loaded = None
 
     if loaded is not None:
@@ -339,7 +345,7 @@ def main() -> int:
         removed_collision = 0
         total_loaded = int(sum(len(r) for r in representatives_raw))
         print(f"  Reusing saved IK ({total_loaded} candidates, object pose + settings "
-              f"match): {ik_path}")
+              f"match): {ik_path_used}")
     else:
         targets = _build_pose_variants(
             world_poses, source["wd_m"], roll_augment=args.roll_augment,

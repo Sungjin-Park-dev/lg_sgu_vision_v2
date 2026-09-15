@@ -39,17 +39,41 @@ def augmentation_suffix(*, roll_augment: bool, tilt_augment: bool, dedup: bool) 
 
 
 def ik_solutions_path(source_viewpoints, *, roll_augment: bool, tilt_augment: bool,
-                      dedup: bool) -> Path:
-    """저장 IK 경로 — ``data/{object}/ik/{N}/<옵션>.h5`` (mesh·viewpoint·trajectory 와 같은 층).
+                      dedup: bool, stamp: str | None = None) -> Path:
+    """저장 IK 경로 — ``data/{object}/ik/{N}/<옵션>[_<스탬프>].h5``.
 
-    소스 ``data/{object}/viewpoint/{N}/viewpoints_*.h5`` 에서 object 루트와 N 을 딴다.
+    소스 ``data/{object}/viewpoint/{N}/viewpoints*.h5`` 에서 object 루트와 N 을 딴다.
+    ``stamp`` 를 주면 덮어쓰지 않는다 — 같은 옵션으로 다시 풀어도 이전 해가 남는다.
+    읽는 쪽은 find_ik_solutions() 로 **설정이 맞는 가장 최근 파일**을 고른다.
     """
     src = Path(source_viewpoints)
     n_dir = src.parent                       # data/{object}/viewpoint/{N}
     object_root = n_dir.parent.parent        # data/{object}
     suffix = augmentation_suffix(roll_augment=roll_augment, tilt_augment=tilt_augment,
                                  dedup=dedup)
-    return object_root / "ik" / n_dir.name / f"{suffix}.h5"
+    name = f"{suffix}_{stamp}.h5" if stamp else f"{suffix}.h5"
+    return object_root / "ik" / n_dir.name / name
+
+
+def find_ik_solutions(source_viewpoints, *, roll_augment: bool, tilt_augment: bool,
+                      dedup: bool, want_settings: dict):
+    """설정이 맞는 저장 IK 중 **가장 최근** 것 → ((representatives, metadata), path) 또는 None.
+
+    후보는 ``<옵션>_*.h5``(스탬프본)와 ``<옵션>.h5``(스탬프 이전 파일) 전부이고 mtime 내림차순
+    으로 본다. 설정이 다른 파일(물체 pose 가 바뀐 옛 해 등)은 load_ik_solutions 가 None 을
+    돌려주므로 건너뛴다 — 최신이라고 무조건 쓰지 않는다.
+    """
+    base = ik_solutions_path(source_viewpoints, roll_augment=roll_augment,
+                             tilt_augment=tilt_augment, dedup=dedup)
+    stem = base.stem
+    candidates = list(base.parent.glob(f"{stem}_*.h5")) + ([base] if base.exists() else [])
+    candidates = [c for c in candidates if not c.name.endswith(".tmp")]
+    candidates.sort(key=lambda c: c.stat().st_mtime_ns, reverse=True)
+    for path in candidates:
+        loaded = load_ik_solutions(path, want_settings)
+        if loaded is not None:
+            return loaded, path
+    return None
 
 
 def build_settings(*, object_position, object_quat_wxyz, working_distance_m,

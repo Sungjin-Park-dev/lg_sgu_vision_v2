@@ -124,6 +124,10 @@ def _parse_args() -> argparse.Namespace:
                         default="both",
                         help="with --home-transitions-only, plan both legs or only "
                              "HOME→start / end→HOME (default: both)")
+    parser.add_argument("--tag", type=str, default=None,
+                        help="산출물 이름 접미사 — trajectory_<tag>.csv/.npz 로 쓴다. 보통 해 파일과 "
+                             "같은 실행 스탬프(YYYYMMDD_HHMMSS)를 넘겨 덮어쓰지 않게 한다. "
+                             "없으면 trajectory.csv (덮어씀)")
     PT.add_timing_cli_arguments(parser)
     args = parser.parse_args()
     if not args.result.exists():
@@ -362,9 +366,12 @@ def main() -> int:
     world_config = PT.build_collision_world(object_name)
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 
+    # 스캔 산출물 이름 — --tag 가 있으면 trajectory_<tag>, 없으면 trajectory (덮어씀).
+    joined_stem = f"trajectory_{args.tag}" if args.tag else "trajectory"
+
     scan_joints = None
     if args.home_transitions_only:
-        scan_npz = out_dir / "trajectory.npz"
+        scan_npz = out_dir / f"{joined_stem}.npz"
         if not scan_npz.exists():
             print(f"HOME TRANSITIONS FAILED: scan trajectory not found: {scan_npz}")
             return 2
@@ -508,8 +515,8 @@ def main() -> int:
         print("JOIN COMPONENTS -> single continuous trajectory")
         print("-" * 64)
         if args.require_full_coverage and missing_total:
-            (out_dir / "trajectory.csv").unlink(missing_ok=True)
-            (out_dir / "trajectory.npz").unlink(missing_ok=True)
+            (out_dir / f"{joined_stem}.csv").unlink(missing_ok=True)
+            (out_dir / f"{joined_stem}.npz").unlink(missing_ok=True)
             print(f"  FAIL - --require-full-coverage: {missing_total} viewpoint(s) "
                   f"missing from joined ({covered_total}/{expected_total}); not written.")
             print("=" * 64)
@@ -518,7 +525,7 @@ def main() -> int:
             print("  no collision-free component to join - joined not written.")
             print("=" * 64)
         else:
-            joined_csv = out_dir / "trajectory.csv"
+            joined_csv = out_dir / f"{joined_stem}.csv"
             # 파일명이 더 이상 생성 조건을 담지 않으므로 npz sidecar 에 남긴다
             # (예전 DP 가 trajectory_dp_ee_s0010_… 로 인코딩하던 정보의 자리).
             joined_meta = {
