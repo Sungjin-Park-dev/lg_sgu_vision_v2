@@ -28,8 +28,10 @@ from launch.actions import (
     ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_context import LaunchContext
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -197,7 +199,19 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
 
     planner_actions = [cumotion] if use_cumotion else [scene_pub]
     # Delay move_group/RViz/planner so the driver's controllers are up first.
-    delayed = TimerAction(period=6.0, actions=[move_group, rviz, *planner_actions])
+    # move_group/RViz 는 /joint_states 가 **실제로 흐른 뒤**에 띄운다 — sim launch 와 같은
+    # 게이트다. 예전의 고정 6s 타이머는 드라이버가 늦으면 RViz 가 '현재 상태 없음' 인 채로
+    # 초기화돼 Query Goal 로봇이 0 자세에 굳어 있었다(mock 이 0 에서 시작하던 때는 안 보였고,
+    # 준비 자세에서 시작하게 되면서 드러났다).
+    joint_state_gate = ExecuteProcess(
+        cmd=['python3', os.path.join(MOVEIT_DIR, 'wait_for_joint_state_gate.py'),
+             '--topic', '/joint_states', '--timeout', '60.0'],
+        output='screen',
+    )
+    start_moveit_after_states = RegisterEventHandler(OnProcessExit(
+        target_action=joint_state_gate,
+        on_exit=[move_group, rviz, *planner_actions],
+    ))
 
     # cuMotion trajectories end with a tiny non-zero velocity; UR's scaled (and
     # plain) joint_trajectory_controller reject a goal whose last point has nonzero
@@ -214,7 +228,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
              'allow_nonzero_velocity_at_trajectory_end true && break; '
              'sleep 2; done'],
         output='screen')])
-    return [ur_control, mode_gate, delayed, allow_nonzero_vel]
+    return [ur_control, mode_gate, joint_state_gate, start_moveit_after_states, allow_nonzero_vel]
 
 
 def generate_launch_description():
