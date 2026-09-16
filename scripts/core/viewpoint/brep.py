@@ -593,6 +593,76 @@ def sample_step_aligned(step_path, reference_mesh, fov_w_mm: float, fov_h_mm: fl
 
 
 # ============================================================================
+# 가림 판정용 B-rep 교차기
+# ============================================================================
+
+
+class BrepOccluder:
+    """CAD 곡면에 **직접** 광선을 쏘는 가림체 — 삼각형 근사 없이.
+
+    기본 경로는 테셀레이션한 삼각형(trimesh)에 쏜다. 가림은 '막혔나 아닌가' 이진 판정이라
+    삼각형 해상도에 둔감해서 대개 그것으로 충분하다(측정: square_structure 를 0.02/0.1/2.0mm
+    로 테셀레이션해도 결과 동일). 다만 얇은 벽·좁은 틈처럼 **테셀레이션이 위상을 바꿀 수 있는**
+    형상에서는 근사가 답을 바꿀 수 있어, 그때 이 교차기로 갈아탄다.
+
+    ``visibility._blocked`` 이 ``blocked_rays`` 를 찾아 호출한다(덕 타이핑) — 그래서 이 객체를
+    기존 occluder 자리에 그대로 넣으면 된다.
+
+    좌표계: 파이프라인은 **미터·정렬 좌표**, B-rep 은 **CAD mm 원좌표**다. 광선을 받을 때마다
+    여기서 되돌린다 — 변환을 밖에 두면 호출자마다 빠뜨린다.
+    """
+
+    def __init__(self, step_path, transform, part_name: Optional[str] = None,
+                 tol: float = 1e-6):
+        from OCP.BRep import BRep_Builder
+        from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
+        from OCP.TopoDS import TopoDS_Compound
+
+        faces, _o = read_faces(step_path, part_name)
+        compound = TopoDS_Compound()
+        builder = BRep_Builder()
+        builder.MakeCompound(compound)
+        for face in faces:
+            builder.Add(compound, face)
+        self._inter = IntCurvesFace_ShapeIntersector()
+        self._inter.Load(compound, float(tol))
+        self.n_faces = len(faces)
+        # CAD(mm) → 파이프라인(m) 의 역변환. 방향은 회전만 되돌린다.
+        transform = np.asarray(transform, dtype=np.float64)
+        self._rot_inv = transform[:3, :3].T
+        self._offset = transform[:3, 3]
+
+    def blocked_rays(self, origins, directions, lengths, tolerance_m: float):
+        """목표점보다 **앞에서** 무언가에 맞으면 True. ``visibility._blocked`` 의 짝."""
+        from OCP.gp import gp_Dir, gp_Lin, gp_Pnt
+
+        origins = np.asarray(origins, dtype=np.float64).reshape(-1, 3)
+        directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
+        lengths = np.asarray(lengths, dtype=np.float64).reshape(-1)
+        if not len(origins):
+            return np.zeros(0, dtype=bool)
+
+        org_mm = (self._rot_inv @ (origins - self._offset).T).T * 1000.0
+        dir_cad = (self._rot_inv @ directions.T).T
+        # 목표점 **직전**까지만 본다 — 맞으면 그 자체로 가려진 것이라 거리 비교가 필요 없고,
+        # 구간을 자르는 만큼 교차기가 일을 덜 한다.
+        reach_mm = lengths * 1000.0 - tolerance_m * 1000.0
+
+        out = np.zeros(len(origins), dtype=bool)
+        for i in range(len(origins)):
+            if reach_mm[i] <= 0.0:
+                continue
+            norm = float(np.linalg.norm(dir_cad[i]))
+            if norm < 1e-12:
+                continue
+            d = dir_cad[i] / norm
+            line = gp_Lin(gp_Pnt(*org_mm[i]), gp_Dir(*d))
+            self._inter.PerformNearest(line, 0.0, float(reach_mm[i]))
+            out[i] = self._inter.NbPnt() > 0
+        return out
+
+
+# ============================================================================
 # 커버리지 검증
 # ============================================================================
 

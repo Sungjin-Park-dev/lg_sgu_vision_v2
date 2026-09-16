@@ -145,6 +145,10 @@ def _blocked(occluder, origins: np.ndarray, directions: np.ndarray,
     """광선이 목표점보다 **앞에서** 무언가에 맞으면 True. 한 번에 묶어 쏜다."""
     if occluder is None or len(origins) == 0:
         return np.zeros(len(origins), dtype=bool)
+    # B-rep 교차기면 곡면에 직접 쏜다(brep.BrepOccluder). 없으면 삼각형 메시 경로.
+    exact = getattr(occluder, "blocked_rays", None)
+    if exact is not None:
+        return np.asarray(exact(origins, directions, lengths, tolerance_m), dtype=bool)
     _tri, rays, locations = occluder.ray.intersects_id(
         ray_origins=origins, ray_directions=directions,
         return_locations=True, multiple_hits=False)
