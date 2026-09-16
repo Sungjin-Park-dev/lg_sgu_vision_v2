@@ -1846,6 +1846,11 @@ class PipelineWindow:
                 self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
                 self._fields["glns_dedup_rad"] = self._row(
                     "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
+                # 현재 base 관절값과 같은 2π 구간의 IK 해만 후보로 쓴다. 한 방향을 두 값
+                # (θ, θ±360°)으로 쓸 수 있는데 현재 구간 쪽만 남기면 어떤 자세도 잃지 않으면서
+                # 베이스가 헛도는 한 바퀴가 애초에 후보에 없다. 끄면 두 구간을 다 쓴다.
+                self._fields["glns_base_section"] = self._checkbox_row(
+                    "same base section as now", True)
                 self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
                 self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
                 with ui.HStack(height=28, spacing=6):
@@ -2228,6 +2233,14 @@ class PipelineWindow:
             toks += ["--dedup-rad", str(float(self._get_field("glns_dedup_rad", float)))]
         toks += ["--num-seeds", str(max(1, int(self._get_field("glns_num_seeds", int))))]
         toks += ["--ik-seed", str(IK_RANDOM_SEED)]
+        if self._get_field("glns_base_section", bool):
+            # 저장 IK 재사용 조건에는 안 들어간다(파일은 전체 해를 담고, 필터는 읽을 때 건다).
+            # NB: --base-section-ref=<v> (등호). 음수면 argparse 가 옵션으로 오인한다.
+            try:
+                base_now = float(self._sim_executor.current_joints()[0])
+                toks.append(f"--base-section-ref={base_now:.6f}")
+            except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 필터 없이 진행
+                self._append_log(f"[ik] no current joint state, base section not pinned: {exc}")
         return toks
 
     def _on_load_object(self):
@@ -3752,17 +3765,6 @@ class PipelineWindow:
         stamp = _config.run_stamp()
         det_h5 = str(_config.get_solution_path(obj, n_vp, stamp=stamp))
         trajectory_dir = str(Path(det_h5).parent)
-        # 현재 자세를 넘겨 **이어붙인 궤적의 관절값 표현만** 그 기준으로 다시 고르게 한다
-        # (verify 의 align_path_to_start). 방문 순서·방향·waypoint 수는 안 바뀐다 — 2π 만큼
-        # 헛도는 표현만 없앤다.
-        # NB: --start-joints=<v> (등호). 첫 값이 음수면 argparse 가 옵션으로 오인한다.
-        start_arg = ""
-        try:
-            current_q = self._sim_executor.current_joints()
-            start_arg = " --start-joints=" + repr(",".join(f"{v:.6f}" for v in current_q))
-        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 고정 없이 진행
-            self._append_log(
-                f"[generate] no current joint state, scan start not anchored: {exc}")
         pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
         quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
         shell = (
@@ -3773,7 +3775,7 @@ class PipelineWindow:
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
-            f"--no-home-bracket --output-dir {trajectory_dir!r} --tag {stamp}{start_arg} "
+            f"--no-home-bracket --output-dir {trajectory_dir!r} --tag {stamp} "
             # 속도는 solve 가 아니라 verify 가 CSV 에 굽는다 — 여기에만 붙인다.
             f"{self._timing_cli_args()}"
         )

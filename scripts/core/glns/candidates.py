@@ -54,6 +54,50 @@ def _joint_limits_and_periods(robot_cfg) -> tuple[np.ndarray, np.ndarray, np.nda
     return np.asarray(lower), np.asarray(upper), np.asarray(periods)
 
 
+def base_section_index(q_base, lower, period) -> int:
+    """base 관절값이 관절 범위의 몇 번째 2π 구간에 있는지 (0 = [lower, lower+2π), 1 = 다음).
+
+    UR 의 base 는 ±360° 라 같은 방향을 두 값(θ, θ±2π)으로 쓸 수 있고, 어느 쪽을 고르느냐가
+    "베이스를 얼마나 돌리느냐" 를 정한다. 그 두 값은 항상 서로 다른 구간에 떨어진다.
+    """
+    if period <= 0.0:
+        return 0
+    return int(np.floor((float(q_base) - float(lower)) / float(period)))
+
+
+def pin_base_section(representatives, metadata, ref_base_rad, robot_cfg):
+    """모든 IK 후보의 base 값을 **현재 base 가 속한 2π 구간의 등가**로 다시 표현한다.
+
+    → (reps, meta, 재표현 수, 버린 수). IK 해는 [-π, π] 로 정규화돼 있어 저장된 부호는 방향과
+    무관하다(현재 -198° 바로 옆 방향이 +177° 로 저장된다). 그래서 부호로 가르면 안 되고, 각
+    해의 두 표현(θ, θ±2π) 중 현재 구간에 드는 쪽을 고른다 — 모든 방향에 그런 표현이 정확히
+    하나 있으므로 자세를 잃지 않는다. 한계 클립 때문에 구간이 2π 보다 살짝 좁아 그 표현이
+    한계 밖이면(경계 부근 극소수) 버린다.
+
+    이렇게 하면 이후 "현재 자세에 맞춰 2π 재표현" 하는 단계가 필요 없다: 후보가 처음부터 한
+    구간 안에 있고, solve 는 base 를 비주기로 다뤄 그 구간을 벗어나지 않는다. base 가 주기
+    관절이 아니면(범위 < 4π) 그대로 돌려준다. 입력은 건드리지 않는다(캐시 파일은 정규화된
+    전체 해를 보존해야 로봇이 다른 구간에 있을 때도 재사용된다).
+    """
+    lower, upper, periods = _joint_limits_and_periods(robot_cfg)
+    if periods[0] <= 0.0:
+        return list(representatives), list(metadata), 0, 0
+    period = float(periods[0])
+    sec_lo = float(lower[0]) + base_section_index(ref_base_rad, lower[0], period) * period
+    out_reps, out_meta, moved, dropped = [], [], 0, 0
+    for reps, meta in zip(representatives, metadata):
+        reps = np.array(reps, dtype=np.float64).reshape(-1, 6)   # 사본
+        pinned = sec_lo + np.mod(reps[:, 0] - sec_lo, period)     # 구간 안 표현
+        keep = pinned <= float(upper[0]) + 1e-9
+        moved += int(np.sum(np.abs(pinned[keep] - reps[keep, 0]) > 1e-9))
+        dropped += int((~keep).sum())
+        reps[:, 0] = pinned
+        out_reps.append(reps[keep])
+        out_meta.append({k: (np.asarray(v)[keep] if len(v) == len(keep) else v)
+                         for k, v in meta.items()})
+    return out_reps, out_meta, moved, dropped
+
+
 def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg=30.0,
                          tilt_augment=False, tilt_angles_deg=(5.0, 10.0),
                          tilt_azimuths=8):

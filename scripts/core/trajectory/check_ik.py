@@ -39,7 +39,8 @@ from core.trajectory import (  # noqa: E402
     build_camera_poses,
     build_collision_world,
 )
-from core.glns.candidates import (  # noqa: E402
+from core.glns.candidates import (
+    pin_base_section,  # noqa: E402
     _build_pose_variants,
     _collision_filter_representatives,
     _joint_limits_and_periods,
@@ -85,6 +86,10 @@ def _parse_args() -> argparse.Namespace:
                         help="[--tilt-augment] tilt magnitudes (default: 5 10)")
     parser.add_argument("--tilt-azimuths", type=int, default=8,
                         help="[--tilt-augment] evenly spaced tilt azimuths (default: 8)")
+    # 첫 값이 음수일 수 있으니 호출자는 --base-section-ref=<v> (등호) 로 넘긴다.
+    parser.add_argument("--base-section-ref", type=float, default=None,
+                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 해의 base 를 이 값이 "
+                             "속한 2π 구간의 등가로 다시 표현해 센다(저장 파일은 정규화된 원본)")
     # Dedup — on by default, matching glns/solve.py.
     parser.add_argument("--no-dedup", dest="dedup", action="store_false",
                         help="keep all IK solutions instead of removing near-duplicates")
@@ -183,7 +188,16 @@ def main() -> None:
 
     print("[4/5] Collision filter...")
     removed = _collision_filter_representatives(representatives, robot_cfg, world_config, metadata)
-    success_counts = np.asarray([len(r) for r in representatives], dtype=np.int32)
+    # base 구간 고정은 **보는 눈**만 바꾼다: 도달성 집계는 재표현한 집합으로, 저장은 정규화된
+    # 원본으로. 저장 파일이 로봇의 현재 구간에 묶이면 로봇이 옮겨갈 때마다 IK 를 다시 풀어야 한다.
+    reps_view, base_moved, base_removed = representatives, 0, 0
+    if args.base_section_ref is not None:
+        reps_view, _meta_view, base_moved, base_removed = pin_base_section(
+            representatives, metadata, args.base_section_ref, robot_cfg)
+        print(f"  Base section pin (ref {np.rad2deg(args.base_section_ref):.1f} deg): "
+              f"re-expressed {base_moved} candidates into that 2pi section, "
+              f"dropped {base_removed} (no in-limit equivalent)")
+    success_counts = np.asarray([len(r) for r in reps_view], dtype=np.int32)
     reachable = success_counts > 0
     reachable_count = int(reachable.sum())
     total = int(success_counts.sum())
@@ -208,6 +222,10 @@ def main() -> None:
         "reachable": reachable.astype(bool).tolist(),
         "reachable_count": reachable_count,
         "total_ik_success": total,
+        "base_section_ref_rad": (None if args.base_section_ref is None
+                                 else float(args.base_section_ref)),
+        "base_section_moved": int(base_moved),
+        "base_section_removed": int(base_removed),
         "created_at": time.time(),
     }
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")

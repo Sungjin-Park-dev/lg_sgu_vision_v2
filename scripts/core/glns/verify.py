@@ -71,17 +71,6 @@ def _decode(value):
     return value
 
 
-def _parse_joints(text):
-    """"q0,...,q5" → (6,) ndarray. None/빈 문자열이면 None."""
-    if not text:
-        return None
-    values = [v for v in str(text).replace(",", " ").split() if v]
-    q = np.asarray([float(v) for v in values], dtype=np.float64)
-    if q.shape != (6,):
-        raise SystemExit(f"--start-joints needs 6 values, got {len(values)}")
-    return q
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Feed a GLNS-selected path through plan_trajectory's "
@@ -94,11 +83,6 @@ def _parse_args() -> argparse.Namespace:
     # 기본값은 h5 에 박제된 씬 스냅샷이다(재현). 이 플래그는 "다른 셀이면 어떻게 되나"를
     # 물어보는 실험용 override 라, 쓰면 경고를 찍는다.
     scene_config.add_cli_argument(parser)
-    # 첫 값이 음수면 argparse 가 옵션으로 오인한다 — 호출자는 --start-joints=<v> 형태로.
-    parser.add_argument("--start-joints", type=str, default=None,
-                        help='스캔 시작을 이 자세에 가까운 끝점으로 고정한다 "q0,...,q5" [rad]. '
-                             '보통 로봇의 현재 관절값. 성분 순서와 방향 선택에만 쓰이고 '
-                             'GTSP 해 자체는 바꾸지 않는다')
     parser.add_argument("--spacing", type=float, default=PT.DEFAULT_SPACING_M,
                         help=f"Scan resample spacing in meters (default: {PT.DEFAULT_SPACING_M})")
     parser.add_argument("--output-dir", type=Path, default=None,
@@ -167,18 +151,25 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
                   f"value on {mismatch} edge(s) - check the wrist_3 lock / threshold "
                   f"assumption. Proceeding with the recomputed value.")
 
-    # 작은 jump는 원래 joint 직선 보간 대상이다. 이 중 충돌하는 edge도 viewpoint를
-    # drop하기 전에 MotionGen fallback 대상으로 승격한다. reconfiguration edge와 합쳐
-    # 한 번에 batch planning하므로 planner warmup/호출 비용도 공유한다.
+    # 작은 jump 는 보간(스캔) 구간이다: viewpoint 사이를 Cartesian 직선(EE lerp + slerp)으로
+    # IK 추적한다 — 인접 edge 와 skip 재연결 후보 쌍 전부를 한 배치로. 추적이 안 되거나(IK
+    # 불능·관절 점프) 그 직선이 충돌하는 인접 edge 는 viewpoint 를 drop 하기 전에 MotionGen
+    # fallback(플래닝 구간)으로 승격한다. reconfiguration edge 와 합쳐 한 번에 batch planning.
     scan_edge_indices = np.where(~is_reconfig)[0]
-    collision_fallback_indices = PT.find_colliding_interpolation_edges(
-        selected, scan_edge_indices, robot_cfg, world_config,
-    )
+    scan_pairs = PT.candidate_scan_pairs(selected, reconfig_rad, PT.TRANSIT_FAIL_SKIP_MAX)
+    scan_paths, cart = PT.track_cartesian_scans(selected, scan_pairs, robot_cfg, world_config)
+    print(f"    Cartesian scan tracking: {cart['n_ok']}/{cart['n_pairs']} pairs straight "
+          f"({cart['n_samples']} IK samples, {cart['seconds']:.1f}s); "
+          f"ik-fail {cart['n_ik_fail']}, joint-jump {cart['n_jump_fail']}")
+    bad_adjacent = PT.colliding_scan_paths(
+        scan_paths, [(int(i), int(i) + 1) for i in scan_edge_indices], robot_cfg, world_config)
+    collision_fallback_indices = np.asarray(sorted(a for a, _b in bad_adjacent), dtype=np.int64)
     if len(collision_fallback_indices):
         labels = [f"{int(vp_order[i])}→{int(vp_order[i + 1])}"
                   for i in collision_fallback_indices]
-        print(f"    Scan interpolation collision: {len(collision_fallback_indices)} edge(s) "
-              f"-> MotionGen fallback [{', '.join(labels)}]")
+        print(f"    Cartesian scan not usable (untrackable or colliding): "
+              f"{len(collision_fallback_indices)} edge(s) -> MotionGen fallback "
+              f"[{', '.join(labels)}]")
 
     # --- Phase 4: reconfig + colliding scan edge transit 계획(충돌회피 motion) ---
     motion_indices = np.union1d(reconfig_indices, collision_fallback_indices).astype(np.int64)
@@ -203,6 +194,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
             selected, transit_segments, robot_cfg,
             mode=PT.RESAMPLE_MODE, spacing=spacing,
             reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
+            scan_paths=scan_paths,
         )
     except RuntimeError as exc:   # <2 safe-run: 모든 인접 전이가 이을 수 없는 reconfig
         return {"ok": False, "error": str(exc), "M": M, "reconfig_mismatch": mismatch}
@@ -552,7 +544,7 @@ def main() -> int:
                     reconfig_rad=reconfig_rad, enable_via_ladder=not args.no_via,
                     home_bracket=args.home_bracket, order_strategy=args.order,
                     out_csv=joined_csv, motion_planner=motion_planner,
-                    meta=joined_meta, start_q=_parse_joints(args.start_joints),
+                    meta=joined_meta,
                 )
             except SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} - cannot bridge (via-home included). joined not written.")

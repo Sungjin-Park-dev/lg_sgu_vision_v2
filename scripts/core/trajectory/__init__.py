@@ -8,7 +8,9 @@ from .periodic import (
     periodic_joint_delta,
     unwrap_joint_path,
 )
+from .cartesian import colliding_scan_paths, track_cartesian_scans
 from .motion import (
+    candidate_scan_pairs,
     build_reconfig_motion_planner,
     densify_for_collision_check,
     find_colliding_interpolation_edges,
@@ -33,6 +35,7 @@ from .settings import (
     apply_timing_cli,
     timing_values,
     TIMING_KNOBS,
+    TRANSIT_FAIL_SKIP_MAX,
     DEFAULT_SPACING_M,
     CANDIDATE_DEDUP_RAD,
     EE_ANGULAR_SPEED_DEG_S,

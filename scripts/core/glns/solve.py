@@ -32,6 +32,7 @@ from core.glns.candidates import (  # noqa: E402
     _collision_filter_representatives,
     _joint_limits_and_periods,
     _solve_pose_variant_candidates,
+    pin_base_section,
 )
 from core.glns.ik_store import (  # noqa: E402
     build_settings,
@@ -117,6 +118,11 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(dedup=True)
     parser.add_argument("--dedup-rad", type=float, default=PT.CANDIDATE_DEDUP_RAD,
                         help=f"[dedup] L∞ 관절 임계 rad (default: {PT.CANDIDATE_DEDUP_RAD})")
+    # 첫 값이 음수일 수 있으니 호출자는 --base-section-ref=<v> (등호) 로 넘긴다.
+    parser.add_argument("--base-section-ref", type=float, default=None,
+                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 후보의 base 를 이 값이 "
+                             "속한 2π 구간의 등가로 다시 표현하고, base 를 비주기 관절로 다뤄 그 "
+                             "구간 안에서만 푼다")
     parser.add_argument("--no-ik-reuse", action="store_true",
                         help="저장된 IK(ik_*.h5) 재사용을 끄고 항상 새로 계산한다")
     parser.add_argument("--max-candidates-per-viewpoint", type=int,
@@ -308,6 +314,14 @@ def main() -> int:
     world = PT.build_collision_world(args.object)
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
+    if args.base_section_ref is not None:
+        # base 구간을 현재 자세로 고정한다: 후보는 아래에서 그 구간의 등가로 다시 표현하고,
+        # 여기서 base 를 비주기로 바꿔 dedup·비용·unwrap 이 base 의 2π 등가를 아예 만들지
+        # 않게 한다 — 그래야 구간 안에서 "가까워 보이지만 실제로는 한 바퀴" 인 비용이 없다.
+        joint_periods = joint_periods.copy()
+        joint_periods[0] = 0.0
+        print(f"  Base section pinned to the one containing "
+              f"{np.rad2deg(args.base_section_ref):.1f} deg (base treated as non-periodic)")
     periodic_names = [
         name for name, period in zip(
             robot_cfg["robot_cfg"]["kinematics"]["cspace"]["joint_names"], joint_periods)
@@ -368,6 +382,11 @@ def main() -> int:
                               ik_settings, source_viewpoints=source_path,
                               object_name=args.object)
             print(f"  Saved IK for reuse -> {ik_path}")
+    if args.base_section_ref is not None:
+        representatives_raw, candidate_metadata_raw, base_moved, base_removed = pin_base_section(
+            representatives_raw, candidate_metadata_raw, args.base_section_ref, robot_cfg)
+        print(f"  Base section pin: re-expressed {base_moved} candidates into the current 2pi "
+              f"section, dropped {base_removed} (no in-limit equivalent)")
     candidate_counts_raw = np.asarray(
         [len(reps) for reps in representatives_raw], dtype=np.int32,
     )
@@ -642,6 +661,8 @@ def main() -> int:
         "joint_upper_rad": joint_upper.astype(float).tolist(),
         "joint_periods_rad": joint_periods.astype(float).tolist(),
         "joint_unwrapped": True,
+        "base_section_ref_rad": (None if args.base_section_ref is None
+                                 else float(args.base_section_ref)),
         "delaunay_expand_hops": int(args.delaunay_expand_hops),
         "graph_edge_count": int(len(graph_edges)),
         "glns_mode": args.glns_mode,
