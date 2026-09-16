@@ -134,7 +134,15 @@ class ModeGate(Node):
         if text == self._last_log:
             return
         self._last_log = text
-        getattr(self.get_logger(), level)(text)
+        # rclpy 는 로그 호출 지점(파일·줄)마다 심각도를 기억하고, 같은 줄에서 다른 심각도로
+        # 부르면 ValueError("Logger severity cannot be changed between calls") 로 죽는다.
+        # getattr 로 한 줄에서 분기하면 그게 된다 — 심각도마다 줄을 따로 둔다.
+        if level == "warning":
+            self.get_logger().warning(text)
+        elif level == "error":
+            self.get_logger().error(text)
+        else:
+            self.get_logger().info(text)
 
     def _reconcile(self) -> None:
         if not self._reconciling.acquire(blocking=False):

@@ -83,3 +83,18 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py
 ```
 
 실제 로봇 옵션은 [로봇 실행 워크플로](../workflows/execute-on-robot.md)의 안전 확인 후 적용한다. Run 모드를 바꾸면 대응하는 ROS 스택도 다시 시작한다.
+
+**로봇이 0 자세로 쭉 뻗은 채 RViz·Isaac 이 안 따라오면** — UR 드라이버 버전 문제다. NVIDIA
+isaac-ros 저장소가 `ros-jazzy-ur-*` 를 `99.2.0` 으로 내보내고, 핀이 없으면 apt 가 ros.org 의
+`3.8.0` 대신 그걸 고른다. 그 빌드는 Jazzy 의 `joint_trajectory_controller`/`realtime_tools` 와
+맞지 않아 `io_and_status_controller` 가 첫 update 에서 segfault 를 내고 `ros2_control_node` 가
+통째로 죽는다(`scaled_joint_trajectory_controller` 도 configure 에서 `map::at` 로 실패). mock 은
+준비 자세로 뜨지만 몇 ms 뒤 `/joint_states` 가 끊겨 화면은 0 자세로 남는다. 실로봇도 같은
+이유로 MoveIt 모드가 뜨지 못한다. real launch 는 이 경우 처방을 찍고 멈춘다. 처방
+(`docker/Dockerfile` 2b 절과 같다):
+
+```bash
+docker exec ros-jazzy bash -c "printf '%s\n' 'Package: ros-jazzy-ur-*' 'Pin: origin packages.ros.org' 'Pin-Priority: 1001' > /etc/apt/preferences.d/ros-org-ur.pref \
+  && apt-get update && apt-get install -y --allow-downgrades ros-jazzy-ur-robot-driver ros-jazzy-ur-controllers"
+docker exec ros-jazzy bash /workspace/docker/verify_env.sh   # "ur_robot_driver is 3.8.x" 가 OK 여야 한다
+```

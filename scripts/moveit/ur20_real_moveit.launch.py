@@ -91,6 +91,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         LaunchConfiguration('use_cumotion'))).lower() not in ('false', '0')
 
     # mock 하드웨어가 sim 과 같은 준비 자세(config.ROBOT_START_STATE)에서 시작하도록,
+    # 99.x(NVIDIA 빌드) 드라이버면 컨트롤러가 첫 update 에서 죽는다 — 처방과 함께 여기서 멈춘다.
+    moveit_assets.require_ros_org_ur_driver()
     # 드라이버 description 에 initial_positions 를 우리 값으로 넣는다(래퍼 xacro 참고).
     moveit_assets.prepare_initial_positions()
 

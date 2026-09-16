@@ -56,6 +56,35 @@ UR_JOINT_ORDER = _joint_limits.UR_JOINT_ORDER
 JOINT_LIMITS_YAML = str(_joint_limits.JOINT_LIMITS_YAML)
 
 
+def require_ros_org_ur_driver() -> str:
+    """UR 드라이버가 packages.ros.org 의 릴리스(3.x)인지 확인하고 버전을 돌려준다.
+
+    NVIDIA isaac-ros 저장소도 ros-jazzy-ur-* 를 99.2.0 으로 내보내고, 핀이 없으면 apt 가 그걸
+    고른다(99 > 3). 그 빌드는 Jazzy 의 joint_trajectory_controller / realtime_tools 와 맞지 않아
+    io_and_status_controller 가 첫 update 에서 segfault 를 내고 ros2_control_node 가 통째로
+    죽는다 — /joint_states 가 끊겨 RViz 와 Isaac 거울이 0 자세로 남는 것이 증상이다.
+    scaled_joint_trajectory_controller 도 configure(map::at)에서 실패한다. 죽을 스택을 띄우는
+    대신 여기서 처방과 함께 멈춘다(docker/Dockerfile 2b 절, docker/verify_env.sh 와 같은 판단).
+    """
+    from ament_index_python.packages import get_package_share_directory
+    pkg_xml = os.path.join(get_package_share_directory('ur_robot_driver'), 'package.xml')
+    with open(pkg_xml) as f:
+        m = re.search(r'<version>([^<]+)</version>', f.read())
+    version = m.group(1).strip() if m else 'unknown'
+    if version.startswith('99.'):
+        raise RuntimeError(
+            f'ur_robot_driver {version} is the NVIDIA isaac-ros build, not the ROS release. '
+            'It crashes ros2_control_node at startup (GPIOController::publishIO segfault, '
+            'scaled_joint_trajectory_controller map::at), so /joint_states never flows and the '
+            'robot stays at the zero pose. Pin the UR stack to packages.ros.org and downgrade:\n'
+            "  printf '%s\\n' 'Package: ros-jazzy-ur-*' 'Pin: origin packages.ros.org' "
+            "'Pin-Priority: 1001' > /etc/apt/preferences.d/ros-org-ur.pref\n"
+            '  apt-get update && apt-get install -y --allow-downgrades '
+            'ros-jazzy-ur-robot-driver ros-jazzy-ur-controllers\n'
+            'then re-run docker/verify_env.sh.')
+    return version
+
+
 def prepare_initial_positions(output_file: str = INITIAL_POSITIONS_FILE) -> str:
     """config.ROBOT_START_STATE → UR 드라이버의 initial_positions.yaml 형식.
 
