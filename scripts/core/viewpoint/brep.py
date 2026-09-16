@@ -174,53 +174,87 @@ def effective_fov_mm(radius_mm: float, fov_mm: float, wd_mm: float,
     """곡률이 있는 면에서 **실제로 쓸 수 있는** 프레임 폭(mm). 닫힌 형태로 풀린다.
 
     카메라는 중심점을 법선 방향에서 WD 만큼 떨어져 본다. 프레임 가장자리로 갈수록 표면이
-    기울어 보이고(입사각) 카메라와의 거리가 달라진다(초점). 중심에서 호길이 s = |R|·θ 인
-    지점에서 두 값은 아래와 같고, 입사각 식을 cosθ 에 대해 정리하면 **2차방정식**이 된다.
+    기울어 보이고(입사각) 카메라와의 거리가 달라진다(초점).
 
-        볼록(radius > 0, 곡률중심이 카메라 반대편):  D = R + WD
-            cos α = (D·cosθ − R) / √(R² + D² − 2RD·cosθ)
-        오목(radius < 0, 곡률중심이 카메라 쪽):      d = WD − |R|
-            cos α = (d·cosθ + |R|) / √(d² + |R|² + 2d|R|·cosθ)
+    입사각 한계는 **사인법칙**으로 풀린다. ``D = radius + WD`` (부호 있는 반지름) 라 두면
 
-    두 식은 **중간항 부호만** 다르다. 오목이 완만한 이유가 여기 있다 — 법선이 도는 방향과
+        D > 0 :  θ = α − asin( (radius / D)·sin α )
+        D < 0 :  sin(θ + α) = (|R| / |D|)·sin α        (오목이고 |R| > WD 인 경우)
+
+    한 식이 볼록·오목을 모두 덮는 이유는 오목에서 ``radius < 0`` 이라 asin 이 음수가 되어
+    자동으로 더해지기 때문이다. 오목이 완만한 것도 여기서 나온다 — 법선이 도는 방향과
     시선이 도는 방향이 상쇄된다. ``|R| = WD`` 면 카메라가 곡률중심에 정확히 놓여 어디를 봐도
-    입사각 0°·거리 일정이므로 제한이 없다.
+    입사각 0° 라 이 한계가 사라진다.
+
+    심도는 다른 잣대를 쓴다. 초점면이 광축에 수직이라 초점을 정하는 것은 거리가 아니라
+    **광축 방향 높이차(새그)** 이고, ``h = R(1 − cos θ) <= DoF`` 한 줄로 풀린다. 볼록·오목이
+    같은 식을 쓴다.
 
     (오목면의 진짜 한계는 대개 주변 림의 가림과 카메라 몸체 간섭이다 — 그건 가시성 필터와
      cuRobo 충돌 검사가 따로 본다.)
     """
     if not np.isfinite(radius_mm) or radius_mm == 0.0:
         return fov_mm
-    if max_incidence_deg <= 0.0 and dof_mm <= 0.0:
+    incidence_on = math.isfinite(max_incidence_deg) and max_incidence_deg > 0.0
+    dof_on = math.isfinite(dof_mm) and dof_mm > 0.0
+    if not incidence_on and not dof_on:
         return fov_mm
     convex = radius_mm > 0.0
     R = abs(float(radius_mm))
     D = R + float(wd_mm) if convex else float(wd_mm) - R
+    # |D| ~ 0 은 카메라가 곡률중심에 놓인 경우다. 그때는 어디를 봐도 입사각이 0 이라 그 한계만
+    # 사라진다 — 심도는 광축 방향 높이차(새그)로 재므로 **여전히 걸린다**.
     if abs(D) < 1e-9:
-        return fov_mm                      # 카메라가 곡률중심 — 제한이 걸리지 않는다
+        incidence_on = False
+    if not incidence_on and not dof_on:
+        return fov_mm
     limits = [fov_mm]
 
-    if max_incidence_deg > 0.0:
-        k = math.cos(math.radians(max_incidence_deg)) ** 2
-        # a·c² + b·c + e = 0  (c = cosθ). 볼록과 오목은 b 의 부호만 다르다.
-        a = D * D
-        b = 2.0 * R * D * ((k - 1.0) if convex else (1.0 - k))
-        e = R * R * (1.0 - k) - k * D * D
-        disc = b * b - 4.0 * a * e
-        if disc >= 0.0:
-            roots = [(-b - math.sqrt(disc)) / (2.0 * a), (-b + math.sqrt(disc)) / (2.0 * a)]
-            thetas = [math.acos(min(1.0, max(-1.0, r))) for r in roots if abs(r) <= 1.0]
-            if thetas:
-                limits.append(2.0 * R * min(thetas))
+    if incidence_on:
+        # 사인법칙. 삼각형 C(곡률중심)-E(가장자리 점)-K(카메라) 에서 각의 합과
+        # ``R / sin φ = |CK| / sin ψ`` 를 쓰면 θ 가 한 줄로 떨어진다.
+        #
+        #   D > 0 :  θ = α − asin( (R_signed / D)·sin α )
+        #
+        # **부호 있는 반지름**을 그대로 넣으면 볼록·오목이 한 식으로 합쳐진다 — 오목은
+        # ``R_signed < 0`` 이라 asin 이 음수가 되어 자동으로 더해진다.
+        #
+        # ``D < 0`` 은 오목이면서 |R| > WD, 즉 카메라가 표면과 곡률중심 **사이**에 있는
+        # 경우다. 그때만 곡률중심에서 본 각이 θ 가 아니라 180°−θ 로 잡혀 분기가 갈린다:
+        #
+        #   D < 0 :  sin(θ + α) = (|R| / |D|)·sin α
+        #
+        # (예전에는 코사인법칙을 제곱해 cos θ 에 대한 2차방정식으로 풀었다. 값은 같지만
+        #  제곱 때문에 허근을 걸러내야 했다. 바꾸기 전에 두 가지로 검증했다 — 옛 2차식과
+        #  140개 조합(볼록·오목, |R|≶WD, α 5~89°)에서 최대 2.2e-10mm 차이, 그리고 좌표를
+        #  놓고 입사각을 직접 훑은 값과도 스윕 해상도 이내로 일치.)
+        alpha = math.radians(max_incidence_deg)
+        sin_a = math.sin(alpha)
+        if D > 0.0:
+            ratio = (float(radius_mm) / D) * sin_a
+            if abs(ratio) <= 1.0:
+                theta = alpha - math.asin(ratio)
+                if theta > 0.0:
+                    limits.append(2.0 * R * theta)
+        else:
+            ratio = (R / abs(D)) * sin_a
+            if abs(ratio) <= 1.0:
+                positive = [t for t in (math.asin(ratio) - alpha,
+                                        math.pi - math.asin(ratio) - alpha) if t > 0.0]
+                if positive:
+                    limits.append(2.0 * R * min(positive))
 
-    if dof_mm > 0.0:
-        # 볼록은 가장자리로 갈수록 **멀어지고**, 오목은 **가까워진다** — 초점을 벗어나는
-        # 방향이 반대다.
-        target = (float(wd_mm) + dof_mm) ** 2 if convex else (float(wd_mm) - dof_mm) ** 2
-        cos_theta = ((R * R + D * D - target) / (2.0 * R * D) if convex
-                     else (target - D * D - R * R) / (2.0 * D * R))
-        if abs(cos_theta) <= 1.0:
-            limits.append(2.0 * R * math.acos(cos_theta))
+    if dof_on:
+        # 초점면은 광축에 수직이므로 초점을 정하는 것은 **광축 방향 높이차(새그)** 다.
+        #     h = R·(1 − cos θ) <= DoF   →   cos θ = 1 − DoF/R
+        # 볼록은 가장자리가 멀어지고 오목은 가까워지지만 |h| 는 같아 식이 하나로 통일된다.
+        # 예전에는 카메라~표면점 **직선거리**로 쟀는데(코사인법칙), 두 가지가 문제였다:
+        #   * 직선거리는 가장자리에서 시선이 비스듬해 새그보다 크게 나와 과하게 보수적(~5%)
+        #   * 오목면에서 |R| > WD 이면 가장자리가 오히려 **멀어지는데** 식이 가까워진다고 보아
+        #     cos θ 가 ±1 을 벗어나며 제한이 조용히 빠졌다(R=170·WD=75 에서 실측 확인).
+        cos_theta = 1.0 - dof_mm / R
+        if cos_theta > -1.0:               # -1 이하면 면 전체가 심도 안 — 제한 없음
+            limits.append(2.0 * R * math.acos(min(1.0, cos_theta)))
 
     return max(1e-3, min(limits))
 

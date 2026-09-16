@@ -15,8 +15,8 @@ viewpoint 3개" 를 후보로 봐서, 유효 FOV 가 1mm 도 안 되는 필렛 �
 판정 조건은 넷이고, 싼 것부터 본다:
 
   * **FOV**      — 표면점이 촬영 프레임 안인가 (viewpoint 의 표면점에서의 거리)
-  * **입사각**    — 표면이 너무 기울어 보이지 않는가 (0 = 제한 없음)
-  * **초점(DOF)** — 카메라에서의 거리가 심도 안인가 (0 = 제한 없음)
+  * **입사각**    — 표면이 너무 기울어 보이지 않는가 (inf = 제한 없음)
+  * **초점(DOF)** — 광축 방향 거리가 심도 안인가 (inf = 제한 없음)
   * **가림**      — 카메라와 표면점 사이에 다른 면이 없는가 (광선)
 
 카메라가 물리적으로 들어갈 자리가 있는지는 여기서 보지 않는다 — 그건 하류의 cuRobo 충돌
@@ -35,6 +35,11 @@ import numpy as np
 
 # 셀 하나가 시험해 볼 후보 viewpoint 수 상한(가까운 순).
 DEFAULT_CANDIDATE_CAP = 12
+
+
+def _is_limit(value) -> bool:
+    """실제로 걸리는 한계인가 — 유한한 양수만 참. inf/0/음수는 '제한 없음'."""
+    return bool(np.isfinite(value)) and float(value) > 0.0
 
 
 @dataclass(frozen=True)
@@ -81,15 +86,16 @@ class ViewFrames:
 
 @dataclass(frozen=True)
 class SensorSpec:
-    """판정에 필요한 센서 스펙. 0 은 '그 제한을 걸지 않음' 을 뜻한다.
+    """판정에 필요한 센서 스펙. ``inf`` 는 '그 제한을 걸지 않음' 을 뜻한다.
 
-    ``max_incidence_deg`` 와 ``depth_of_field_mm`` 이 0 이면 지금까지의 암묵적 가정
-    (프레임 안에서 표면이 아무리 기울어도, 거리가 얼마든 검사 가능)이 그대로 유지된다.
+    ``max_incidence_deg`` 와 ``depth_of_field_mm`` 이 ``config.NO_LIMIT``(=inf) 이면
+    그 한계를 걸지 않는다 — 프레임 안에서 표면이 아무리 기울어도, 거리가 얼마든 검사
+    가능하다는 뜻이다. **유한한 양수만** 실제 한계로 본다.
     """
 
     working_distance_mm: float
-    max_incidence_deg: float = 0.0
-    depth_of_field_mm: float = 0.0
+    max_incidence_deg: float = float("inf")
+    depth_of_field_mm: float = float("inf")
     occlusion_tolerance_mm: float = 1.0
 
     @property
@@ -101,8 +107,8 @@ class SensorSpec:
         """``ViewpointGenParams`` 에서 뽑아온다 — 스펙의 출처를 한 줄로 묶어 둔다."""
         return cls(
             working_distance_mm=float(params.working_distance_mm),
-            max_incidence_deg=float(params.max_incidence_deg or 0.0),
-            depth_of_field_mm=float(params.depth_of_field_mm or 0.0),
+            max_incidence_deg=float(params.max_incidence_deg),
+            depth_of_field_mm=float(params.depth_of_field_mm),
             occlusion_tolerance_mm=float(params.occlusion_tolerance_mm),
         )
 
@@ -196,14 +202,17 @@ def sees(view_positions, view_normals, targets, target_normals,
     unit = ray / np.maximum(length, 1e-12)[:, None]
 
     # ② 입사각 — 표면이 시선에 대해 얼마나 기울어 보이는가.
-    if spec.max_incidence_deg > 0.0 and ok.any():
+    if _is_limit(spec.max_incidence_deg) and ok.any():
         cos_incidence = np.einsum("ij,ij->i", -unit, target_normals)
         incidence = np.degrees(np.arccos(np.clip(cos_incidence, -1.0, 1.0)))
         ok &= incidence <= spec.max_incidence_deg
 
-    # ③ 초점 — 카메라에서의 거리가 심도 안인가.
-    if spec.depth_of_field_mm > 0.0 and ok.any():
-        ok &= np.abs(length * 1000.0 - spec.working_distance_mm) <= spec.depth_of_field_mm
+    # ③ 초점 — 초점면이 **광축에 수직**이라 초점을 정하는 것은 직선거리가 아니라 광축 방향
+    # 거리다. brep.effective_fov_mm 의 새그(h = R(1−cos θ)) 한계와 **같은 잣대**여야 간격을
+    # 정할 때와 덮였는지 셀 때가 어긋나지 않는다(직선거리는 가장자리에서 ~5% 더 엄격했다).
+    if _is_limit(spec.depth_of_field_mm) and ok.any():
+        axial = np.einsum("ij,ij->i", targets - cameras, -view_normals)
+        ok &= np.abs(axial * 1000.0 - spec.working_distance_mm) <= spec.depth_of_field_mm
 
     # ④ 가림 — 가장 비싸므로 마지막에, 살아남은 것만.
     if occluder is not None and ok.any():

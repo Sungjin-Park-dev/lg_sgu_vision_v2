@@ -348,6 +348,16 @@ def material_glb(mesh_path: Path, alpha: float = MATERIAL_ALPHA) -> bytes:
     return loaded.export(file_type="glb")
 
 
+def _is_finite_limit(value) -> bool:
+    """config 값이 실제 한계인가 — inf/0 이하는 '제한 없음'."""
+    return bool(np.isfinite(value)) and float(value) > 0.0
+
+
+def _limit_or(value, fallback: float) -> float:
+    """숫자 칸의 초기값 — 제한이 꺼져 있으면 그럴듯한 기본값을 보여 준다."""
+    return float(value) if _is_finite_limit(value) else float(fallback)
+
+
 def load_as_trimesh(path: Path) -> trimesh.Trimesh:
     loaded = trimesh.load(path, force="mesh")
     if isinstance(loaded, trimesh.Scene):
@@ -474,15 +484,28 @@ class Studio:
                 # 검사 품질 한계 두 개. 이 둘 + 면의 곡률이 '유효 FOV' 를 정한다 —
                 # 곡률이 급한 면은 프레임 가장자리가 기울고 멀어져 공칭 FOV 를 다 못 쓴다.
                 # 곡면 정의가 필요하므로 CAD faces 샘플러에서만 반영된다.
+                # 켜고 끄는 것을 **체크박스**로 뺀다. 예전에는 숫자 0 이 '제한 없음' 이었는데,
+                # 0 은 물리적으로 '가장 엄격'(입사각 0° 만 허용)으로 읽혀 뜻이 정반대였다.
+                # 숫자 칸은 이제 항상 '실제 한계값' 만 담는다 — 끄면 그 값이 무시된다.
+                self.cb_incidence = g.add_checkbox(
+                    "Limit incidence", initial_value=_is_finite_limit(
+                        config.CAMERA_MAX_INCIDENCE_DEG),
+                    hint="끄면 입사각 제한을 걸지 않는다 (config.NO_LIMIT 과 같다)")
                 self.nb_incidence = g.add_number(
-                    "Max incidence (°)", initial_value=float(config.CAMERA_MAX_INCIDENCE_DEG),
-                    min=0.0, max=89.0, step=5.0,
-                    hint="프레임 가장자리에서 표면이 기울어 보여도 되는 한계. "
-                         "0 = 제한 없음 (CAD faces 샘플러 전용)")
+                    "Max incidence (°)", initial_value=_limit_or(
+                        config.CAMERA_MAX_INCIDENCE_DEG, 45.0),
+                    min=1.0, max=89.0, step=5.0,
+                    hint="프레임 가장자리에서 표면이 기울어 보여도 되는 한계 "
+                         "(CAD faces 샘플러 전용)")
+                self.cb_dof = g.add_checkbox(
+                    "Limit depth of field", initial_value=_is_finite_limit(
+                        config.CAMERA_DEPTH_OF_FIELD_MM),
+                    hint="끄면 심도 제한을 걸지 않는다 (config.NO_LIMIT 과 같다)")
                 self.nb_dof = g.add_number(
-                    "Depth of field ± (mm)", initial_value=float(config.CAMERA_DEPTH_OF_FIELD_MM),
-                    min=0.0, max=100.0, step=1.0,
-                    hint="초점이 맞는 거리 범위. 0 = 제한 없음 (CAD faces 샘플러 전용)")
+                    "Depth of field ± (mm)", initial_value=_limit_or(
+                        config.CAMERA_DEPTH_OF_FIELD_MM, 10.0),
+                    min=0.1, max=100.0, step=1.0,
+                    hint="초점이 맞는 거리 범위 (CAD faces 샘플러 전용)")
 
             # 무엇을 검사하나 — 파일, 그 파일에서 고른 대상, 그리고 후보 적격성 필터.
             # 예전에는 Mesh/Faces 두 폴더였는데 경계가 실제와 달랐다: '어느 면을 검사할지'
@@ -923,8 +946,11 @@ class Studio:
             "selection_mode": SELECTION_LABELS.get(self.dd_selection.value,
                                                    select.SELECTION_NONE),
             "selection_target": float(self.nb_sel_target.value) / 100.0,
-            "max_incidence_deg": float(self.nb_incidence.value),
-            "dof_mm": float(self.nb_dof.value),
+            # 체크가 꺼져 있으면 NO_LIMIT — 숫자 칸의 값은 무시된다.
+            "max_incidence_deg": (float(self.nb_incidence.value)
+                                  if self.cb_incidence.value else config.NO_LIMIT),
+            "dof_mm": (float(self.nb_dof.value)
+                       if self.cb_dof.value else config.NO_LIMIT),
             "filter_bottom": bool(self.cb_filter_bottom.value),
             "bottom_angle": float(self.nb_bottom_angle.value),
             "filter_occluded": bool(self.cb_filter_occluded.value),
@@ -1282,7 +1308,8 @@ class Studio:
             # 적용된 값**을 남긴다(FPS 경로는 셀이 없어 선택을 돌리지 않는다).
             "selection_mode": surface.get("selection_mode", select.SELECTION_NONE),
             "candidate_count": int(surface.get("candidate_count", L["n"])),
-            # 유효 FOV 를 좁힌 검사 품질 한계 — 개수가 달라지는 이유가 된다(0 = 미사용).
+            # 유효 FOV 를 좁힌 검사 품질 한계 — 개수가 달라지는 이유가 된다
+            # (inf = 그 한계를 안 걸었다는 뜻. h5 attr 로 inf 가 그대로 왕복한다).
             "max_incidence_deg": p["max_incidence_deg"],
             "depth_of_field_mm": p["dof_mm"],
             "fillet_skip_mm": p["fillet_skip_mm"] if p["sampler"] == SAMPLER_BREP else 0.0,

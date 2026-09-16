@@ -119,7 +119,8 @@ class ViewpointGenParams:
     fov_width_mm: Optional[float] = None
     fov_height_mm: Optional[float] = None
     overlap_ratio: Optional[float] = None
-    # 검사 품질 한계 — 면의 곡률과 함께 '유효 FOV' 를 정한다(0 이면 제한 없음).
+    # 검사 품질 한계 — 면의 곡률과 함께 '유효 FOV' 를 정한다.
+    # None = config 기본값을 쓴다, config.NO_LIMIT(=inf) = 그 한계를 걸지 않는다.
     max_incidence_deg: Optional[float] = None
     depth_of_field_mm: Optional[float] = None
     filter_bottom: bool = True

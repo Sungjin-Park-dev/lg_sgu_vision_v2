@@ -21,6 +21,10 @@ DATA_ROOT = PROJECT_ROOT / "data"
 
 # 용어·기준점 표준: docs/reference/camera-geometry.md (단일 진실원)
 
+# 품질 한계 '제한 없음' 센티널. 유한한 양수만 실제 한계로 취급한다
+# (visibility.sees / brep.effective_fov_mm 의 게이트가 isfinite 로 판정).
+NO_LIMIT = float("inf")
+
 # FOV_footprint 가정 (mm). ⚠️ 실제 광학값 아님 — scene.py 의 "footprint 트릭"용 입력.
 #   (focalLength=frame_standoff, aperture=이 값 으로 넣어 작업거리에서 프러스텀이 이 크기를 덮게 함)
 #   실 센서(AR0820 8.08×4.55mm)와 다름. viewpoint col_spacing 계산에도 쓰임.
@@ -43,15 +47,18 @@ CAMERA_WORKING_DISTANCE_MM = 195.0
 # 카메라 뷰 유효 면적 (0.5 = 50% 중첩)
 CAMERA_OVERLAP_RATIO = 0.5
 
-# 검사 품질 한계 두 가지. 0 이면 제한 없음(지금까지의 동작).
+# 검사 품질 한계 두 가지. **NO_LIMIT(=inf) 이면 그 한계를 걸지 않는다.**
 #  - 입사각: 프레임 가장자리에서 표면이 얼마나 기울어 보여도 되는가. 조명·결함 종류가 정한다.
 #  - 심도(DOF): 초점이 맞는 거리 범위 ±mm. 렌즈 스펙에서 온다.
+# ⚠️ 예전 규약은 0 = 제한 없음 이었다. 0 은 물리적으로 '가장 엄격'(입사각 0° 만 허용,
+#    심도 0mm)으로 읽히는데 뜻은 정반대라 계속 오해를 샀다. 값의 뜻과 읽히는 뜻이 같도록
+#    inf 로 바꿨다 — 동작은 예전 0 과 완전히 같다.
 # 이 둘이 정해지면 **면의 곡률에서 유효 FOV 가 닫힌 형태로 계산된다**(core/viewpoint/brep.py
 # effective_fov_mm). 곡률이 큰 면일수록 프레임 가장자리가 기울고 멀어져서 공칭 FOV 를
 # 다 쓸 수 없다 — 예: R=23mm 원통은 입사각 45°·심도 ±5mm 에서 유효 FOV 29.4mm(공칭의 59%).
 # 곡면 정의가 있어야 계산되므로 CAD(STEP) 샘플러에서만 쓰인다.
-CAMERA_MAX_INCIDENCE_DEG = 0.0
-CAMERA_DEPTH_OF_FIELD_MM = 0.0
+CAMERA_MAX_INCIDENCE_DEG = NO_LIMIT
+CAMERA_DEPTH_OF_FIELD_MM = NO_LIMIT
 
 # Isaac Sim 렌더/퍼블리시 해상도 — **FOV 종횡비에서 유도**한다.
 # USD 카메라는 세로 화각을 렌더 해상도 비율에서 다시 계산한다(verticalAperture 는 사실상
