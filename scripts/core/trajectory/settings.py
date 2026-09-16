@@ -75,7 +75,7 @@ RESAMPLE_MODE = "ee"
 DEFAULT_SPACING_M = 0.01
 
 # ── 실행 속도 노브 ────────────────────────────────────────────────────────────
-# 아래 6개(+ 코너 2개)가 CSV 의 time 열을 정하고, **그 열이 곧 실행 속도다** — Isaac 고스트
+# 아래 값들이 CSV 의 time 열을 정하고, **그 열이 곧 실행 속도다** — Isaac 고스트
 # 재생도 실로봇 publish 도 이 열을 그대로 따른다. 값은 생성 시점에 궤적에 구워지므로 바꾸면
 # 다시 생성해야 한다(CSV 를 나중에 다시 시간매김하는 경로는 없다).
 #
@@ -85,7 +85,17 @@ DEFAULT_SPACING_M = 0.01
 EE_SPEED_MM_S = 10.0
 EE_ANGULAR_SPEED_DEG_S = 20.0
 MAX_JOINT_VEL_RAD_S = 0.3
+# 관절 가속도 상한 [rad/s^2] — 인접 구간 사이 속도 변화를 제한한다(시작·끝은 정지에서 출발·
+# 도착). 0 이면 끈다. 경로 위 속도 프로파일을 전진·후진 패스로 만드는 방식이라(timing.py)
+# 어느 축이든 가장 빨리 도는 관절 기준(L∞)으로 본다.
+MAX_JOINT_ACC_RAD_S2 = 1.0
 MIN_SEGMENT_DT_S = 0.05
+
+# UI 의 속도 배율 f 범위. 세 노브(EE 속도·관절 속도·관절 가속도)는 독립이 아니라 이 배율
+# 하나에 묶인다: 속도 = f × 기준, 가속도 = f² × 기준 — 궤적을 시간축으로 1/f 압축하면 정확히
+# 그렇게 되므로 물리적으로 정직한 결합이다. 기준(f=1)은 위 상수들이다.
+SPEED_FACTOR_MIN = 0.1
+SPEED_FACTOR_MAX = 3.0
 
 # reconfig transit(재배치)은 검사 스캔이 아니라 단순 repositioning이다. 스캔과 똑같이 EE
 # arc-length로 resample하고 EE 선속도(50mm/s)로 시간 매기면, base를 크게 돌릴 때 팔 끝이
@@ -94,8 +104,11 @@ MIN_SEGMENT_DT_S = 0.05
 # (EE 선속도/각속도/corner slowdown 무시).
 TRANSIT_RESAMPLE_SPACING_RAD = 0.05   # ~2.9°, transit resample 간격(가장 빨리 도는 joint 기준)
 
+# 코너 감속 휴리스틱 — 꺾이는 곳에서 관절 가속도가 튀는 것을 흉내 내던 값이다. 이제
+# MAX_JOINT_ACC_RAD_S2 가 꺾임을 직접 계산해 노드 속도를 제한하므로(timing.py 의 꺾임 캡)
+# 기본은 끈다(1.0). 가속도 제한을 0 으로 끄는 경우에만 되살릴 이유가 있다.
 CORNER_ANGLE_THRESHOLD_DEG = 30.0
-CORNER_MAX_SLOWDOWN = 2.5
+CORNER_MAX_SLOWDOWN = 1.0
 
 
 # =============================================================================
@@ -113,6 +126,8 @@ TIMING_KNOBS = (
      "스캔 구간 EE 각속도 [deg/s]. 0 이면 이 제한을 끈다"),
     ("--max-joint-vel-rad-s", "MAX_JOINT_VEL_RAD_S",
      "관절 속도 상한 [rad/s]. 스캔과 transit 양쪽에 걸린다 — transit 시간은 이 값만으로 정해진다"),
+    ("--max-joint-acc-rad-s2", "MAX_JOINT_ACC_RAD_S2",
+     "관절 가속도 상한 [rad/s^2]. 시작·끝은 정지에서 가감속한다. 0 이면 끈다"),
     ("--min-segment-dt-s", "MIN_SEGMENT_DT_S",
      "segment 최소 소요시간 [s]. 짧은 구간이 순간적으로 빨라지는 것을 막는 바닥값"),
     ("--corner-angle-threshold-deg", "CORNER_ANGLE_THRESHOLD_DEG",
@@ -166,7 +181,8 @@ def apply_timing_cli(args, *, verbose: bool = True) -> dict:
     if verbose:
         print(f"  Timing: EE {values['EE_SPEED_MM_S']:g} mm/s, "
               f"{values['EE_ANGULAR_SPEED_DEG_S']:g} deg/s, joint "
-              f"{values['MAX_JOINT_VEL_RAD_S']:g} rad/s, min dt "
+              f"{values['MAX_JOINT_VEL_RAD_S']:g} rad/s, acc "
+              f"{values['MAX_JOINT_ACC_RAD_S2']:g} rad/s2, min dt "
               f"{values['MIN_SEGMENT_DT_S']:g} s, corner "
               f">{values['CORNER_ANGLE_THRESHOLD_DEG']:g} deg x"
               f"{values['CORNER_MAX_SLOWDOWN']:g}")

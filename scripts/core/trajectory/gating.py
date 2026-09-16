@@ -55,6 +55,7 @@ def collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_co
             corner_angle_threshold_rad=np.deg2rad(settings.CORNER_ANGLE_THRESHOLD_DEG),
             corner_max_slowdown=settings.CORNER_MAX_SLOWDOWN,
             is_transit=final_is_transit,
+            max_joint_acc_rad_s2=settings.MAX_JOINT_ACC_RAD_S2,
         )
         total_time = float(time_stats["total_time"])
         transit_time = float(time_stats["transit_time"])

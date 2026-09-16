@@ -72,20 +72,19 @@ IK_RANDOM_SEED = 123
 # threshold for the Check-and-Save-IK / GLNS IK candidate stage).
 CANDIDATE_DEDUP_RAD = 0.08
 
-# 실행 속도 노브 — scripts/core/trajectory/settings.py::TIMING_KNOBS 의 UI 쪽 짝이다.
-# 이 값들이 CSV 의 time 열을 정하고, 두 실행기(고스트 재생 / 실로봇 publish)가 그 열을
-# 그대로 따른다. 생성 시점에 궤적에 구워지므로 바꾸면 다시 생성해야 반영된다.
-# 플래그와 기본값은 settings.py 와 같아야 한다 — 여기 값을 복사해 두는 이유는 IK_RANDOM_SEED
-# 와 같다(이 모듈은 Isaac 번들 파이썬에서 도는데 settings 를 import 하면 cuRobo 가 딸려온다).
-# (CLI 플래그, 필드 키, 라벨, 기본값)
-TIMING_FIELDS = (
-    ("--ee-speed-mm-s", "timing_ee_speed", "scan EE speed [mm/s]", 10.0),
-    ("--ee-angular-speed-deg-s", "timing_ee_angular", "scan EE angular [deg/s]", 20.0),
-    ("--max-joint-vel-rad-s", "timing_joint_vel", "max joint vel [rad/s]", 0.3),
-    ("--min-segment-dt-s", "timing_min_dt", "min segment dt [s]", 0.05),
-    ("--corner-angle-threshold-deg", "timing_corner_deg", "corner threshold [deg]", 30.0),
-    ("--corner-max-slowdown", "timing_corner_slow", "corner max slowdown [x]", 2.5),
-)
+# 실행 속도 — 세 값이 배율 f 하나에 묶인다 (settings.py 의 기준값과 같아야 한다; 값을 복사해
+# 두는 이유는 IK_RANDOM_SEED 와 같다 — settings 를 import 하면 cuRobo 가 딸려온다).
+#   EE 속도 = f × 10 mm/s,  관절 속도 = f × 0.3 rad/s,  관절 가속도 = f² × 1.0 rad/s²
+# 궤적을 시간축으로 1/f 압축하면 속도는 f 배, 가속도는 f² 배가 되므로 이 결합은 물리적으로
+# 정직하다. 슬라이더나 세 숫자 중 무엇을 만져도 f 가 정해지고 나머지가 따라온다.
+# 숨은 값: EE 각속도 = f × 20 deg/s (같이 스케일), 최소 구간시간·코너 감속은 기본값.
+SPEED_BASE = {
+    "ee_mm_s": 10.0,
+    "ee_angular_deg_s": 20.0,
+    "joint_vel_rad_s": 0.3,
+    "joint_acc_rad_s2": 1.0,
+}
+SPEED_FACTOR_MIN, SPEED_FACTOR_MAX = 0.1, 3.0
 
 # waypoint_kind 라벨 색 (omni.ui 0xAABBGGRR). Tilt 패널의 중심 행 라벨에 쓴다 —
 # 어떤 종류의 점을 중심으로 고르는지가 한눈에 보여야 한다.
@@ -1958,12 +1957,11 @@ class PipelineWindow:
                                                    clicked_fn=self._on_clear_tilt_fan))
 
     def _build_panel_speed(self):
-        """실행 속도 노브 — settings.py 의 타이밍 값을 그대로 CLI 로 넘긴다.
+        """실행 속도 — 슬라이더 하나와 숫자 셋, 전부 한 배율에 묶인다.
 
-        생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to Start·HOME)이
-        모두 같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로, 이 값을 바꾸면
-        **다시 생성해야** 로봇 속도가 바뀐다 — 이미 만든 CSV 를 다시 시간매김하는 경로는 없다.
-        그래서 Generate 패널 **위**에 둔다: 굽기 전에 정하는 값이다.
+        생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to Start·HOME)이 모두
+        같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로 **다시 생성해야** 로봇
+        속도가 바뀐다 — 그래서 Generate 패널 위다.
         """
         ui = self._ui
         frame = ui.CollapsableFrame("Motion Speed", height=0, collapsed=True)
@@ -1971,33 +1969,92 @@ class PipelineWindow:
         with frame:
             with ui.VStack(spacing=4):
                 ui.Label(
-                    "Sets the CSV time column - the speed both executors follow (ghost "
-                    "playback and the real robot). Baked in at generate time, so set "
-                    "these BEFORE generating; an existing CSV keeps its old timing. "
-                    "Also used by Plan to Start / Plan to HOME.",
+                    "One speed factor drives all three: speed x f, acceleration x f^2. Drag "
+                    "the slider or type any one number - the rest follow. Baked into the CSV "
+                    "at generate time (also used by Plan to Start / Plan to HOME).",
                     height=58, word_wrap=True)
-                for _flag, key, label, default in TIMING_FIELDS:
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("speed factor", width=200)
+                    self._speed_slider_model = ui.SimpleFloatModel(1.0)
+                    self._lock(ui.FloatSlider(self._speed_slider_model,
+                                              min=SPEED_FACTOR_MIN, max=SPEED_FACTOR_MAX))
+                    self._fields["speed_factor"] = self._num_field(1.0, width=70)
+                for key, label, base in (
+                        ("speed_ee", "scan EE speed [mm/s]", SPEED_BASE["ee_mm_s"]),
+                        ("speed_vj", "max joint vel [rad/s]", SPEED_BASE["joint_vel_rad_s"]),
+                        ("speed_aj", "max joint acc [rad/s^2]", SPEED_BASE["joint_acc_rad_s2"])):
                     with ui.HStack(height=22, spacing=6):
                         ui.Label(label, width=200)
                         # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
                         # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
-                        self._fields[key] = self._num_field(default, width=90)
+                        self._fields[key] = self._num_field(float(base), width=90)
                 ui.Label(
-                    "Scan segments obey all of EE speed, EE angular speed and joint "
-                    "velocity (slowest wins). Transit segments obey joint velocity only. "
-                    "0 disables that one limit.",
+                    f"factor range {SPEED_FACTOR_MIN:g} - {SPEED_FACTOR_MAX:g}. Start/stop and "
+                    "corners ramp within the acceleration limit; scan segments also obey EE "
+                    "speed, transit segments joint speed only.",
                     height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                # 결합: 어느 쪽이 바뀌든 배율 f 를 정하고 나머지에 쓴다. 재진입 가드로 순환을 막고,
+                # 방금 편집 중인 칸은 되쓰지 않는다 — 타자 도중 값을 덮어쓰면 입력이 깨진다.
+                self._speed_syncing = False
+                self._speed_slider_model.add_value_changed_fn(
+                    lambda _m: self._on_speed_changed("slider"))
+                for key in ("speed_factor", "speed_ee", "speed_vj", "speed_aj"):
+                    self._fields[key].add_value_changed_fn(
+                        lambda _m, k=key: self._on_speed_changed(k))
+
+    def _speed_factor_from(self, source: str) -> float:
+        """편집된 곳 하나에서 배율 f 를 역산한다 (가속도는 f² 이라 제곱근)."""
+        if source == "slider":
+            return float(self._speed_slider_model.get_value_as_float())
+        if source == "speed_factor":
+            return float(self._get_field("speed_factor", float))
+        if source == "speed_ee":
+            return float(self._get_field("speed_ee", float)) / SPEED_BASE["ee_mm_s"]
+        if source == "speed_vj":
+            return float(self._get_field("speed_vj", float)) / SPEED_BASE["joint_vel_rad_s"]
+        if source == "speed_aj":
+            aj = max(0.0, float(self._get_field("speed_aj", float)))
+            return (aj / SPEED_BASE["joint_acc_rad_s2"]) ** 0.5
+        raise ValueError(source)
+
+    def _on_speed_changed(self, source: str):
+        if self._speed_syncing:
+            return
+        self._speed_syncing = True
+        try:
+            f = self._speed_factor_from(source)
+            # 슬라이더는 자기 범위로 스스로 잘린다. 숫자 칸은 타자 중이라 잘라 되쓰지 않고
+            # 표시만 따라간다 — 실제 쓰는 값은 _timing_cli_args 가 범위로 자른다.
+            targets = {
+                "speed_factor": f,
+                "speed_ee": f * SPEED_BASE["ee_mm_s"],
+                "speed_vj": f * SPEED_BASE["joint_vel_rad_s"],
+                "speed_aj": f * f * SPEED_BASE["joint_acc_rad_s2"],
+            }
+            if source != "slider":
+                self._speed_slider_model.set_value(
+                    min(SPEED_FACTOR_MAX, max(SPEED_FACTOR_MIN, f)))
+            for key, value in targets.items():
+                if key != source:
+                    self._fields[key].set_value(float(value))
+        finally:
+            self._speed_syncing = False
+
+    def _speed_factor(self) -> float:
+        f = float(self._get_field("speed_factor", float))
+        return min(SPEED_FACTOR_MAX, max(SPEED_FACTOR_MIN, f))
 
     def _timing_cli_args(self) -> str:
-        """속도 노브 → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
+        """배율 f → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
 
-        음수는 settings.py 의 argparse type 이 rc=2 로 거절한다. 여기서 미리 막지 않는 것은
-        UI 가 조용히 값을 고쳐 놓으면 입력한 값과 실제 값이 달라지기 때문이다 — 거절은
-        로그에 남는 편이 낫다.
+        네 값(EE 선·각속도, 관절 속도, 관절 가속도)을 f 에서 만들어 넘긴다. 최소 구간시간과
+        코너 감속은 넘기지 않는다 — settings.py 기본값이 쓰인다.
         """
-        return " ".join(
-            f"{flag} {float(self._get_field(key, float)):g}"
-            for flag, key, _label, _default in TIMING_FIELDS)
+        f = self._speed_factor()
+        return (f"--ee-speed-mm-s {f * SPEED_BASE['ee_mm_s']:g} "
+                f"--ee-angular-speed-deg-s {f * SPEED_BASE['ee_angular_deg_s']:g} "
+                f"--max-joint-vel-rad-s {f * SPEED_BASE['joint_vel_rad_s']:g} "
+                f"--max-joint-acc-rad-s2 {f * f * SPEED_BASE['joint_acc_rad_s2']:g}")
 
     def _build_panel_preview(self):
         ui = self._ui
