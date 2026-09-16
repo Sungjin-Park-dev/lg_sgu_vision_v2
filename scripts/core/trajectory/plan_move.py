@@ -166,7 +166,8 @@ def main() -> int:
     d0 = float(np.max(np.abs(traj[0] - q_from)))
     d1 = float(np.max(np.abs(traj[-1] - q_to)))
     print(f"  endpoints: |traj[0]-from|={d0:.2e} rad, |traj[-1]-to|={d1:.2e} rad")
-    print(f"  waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s")
+    print(f"  waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s, "
+          f"joint vel/acc vs limit {gate['max_joint_vel_ratio']:.2f}/{gate['max_joint_acc_ratio']:.2f}")
     return 0
 
 

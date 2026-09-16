@@ -1,0 +1,51 @@
+# UR20 관절 한계 — MoveIt 과 Inspection 이 **같은 파일**을 읽는다.
+#
+#   move_group / RViz : launch 가 MoveItConfigsBuilder.joint_limits(file_path=여기) 로 넘긴다
+#                       → robot_description_planning 파라미터. MoveIt 의 시간매김(TOTG)이
+#                       "관절별 한계 × scaling factor" 로 궤적 시간을 정한다.
+#   core/trajectory   : common/joint_limits.py 가 읽어, 플래닝(transit) 구간을 같은 한계 ×
+#                       같은 의미의 scaling factor 로 시간매김한다(settings.JOINT_VELOCITY_SCALING,
+#                       JOINT_ACCELERATION_SCALING). 앱 Motion Speed 패널의 transit 배율 1.0 이
+#                       아래 default_* 다.
+#
+# 속도 한계  : UR20 사용자 매뉴얼 값 = ur_description/config/ur20/joint_limits.yaml (URDF 에도
+#              같은 값이 들어간다).
+# 가속도 한계: UR 은 공개하지 않는다 — ur_moveit_config 가 보수적으로 고른 5.0 rad/s² 를 따른다.
+# 단위는 rad/s, rad/s². launch_param_builder 가 `!degrees` 태그를 못 읽어 도(deg) 값은 주석으로만.
+#
+# default_*_scaling_factor: MotionPlanRequest 에 배율이 없을 때 move_group 이 쓰는 값. RViz
+# MotionPlanning 패널의 Velocity/Acceleration Scaling 슬라이더가 이것과 같은 수(0–1)이며 요청마다
+# 이 기본값을 덮는다.
+default_velocity_scaling_factor: 0.2
+default_acceleration_scaling_factor: 0.2
+joint_limits:
+  shoulder_pan_joint:
+    has_velocity_limits: true
+    max_velocity: 2.0943951024        # 120 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  shoulder_lift_joint:
+    has_velocity_limits: true
+    max_velocity: 2.0943951024        # 120 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  elbow_joint:
+    has_velocity_limits: true
+    max_velocity: 2.6179938780        # 150 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_1_joint:
+    has_velocity_limits: true
+    max_velocity: 3.6651914292        # 210 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_2_joint:
+    has_velocity_limits: true
+    max_velocity: 3.6651914292        # 210 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_3_joint:
+    has_velocity_limits: true
+    max_velocity: 3.6651914292        # 210 deg/s
+    has_acceleration_limits: true
+    max_acceleration: 5.0

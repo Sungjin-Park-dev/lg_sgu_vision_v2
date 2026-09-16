@@ -18,7 +18,7 @@ import numpy as np
 
 from . import settings
 from .motion import densify_for_collision_check
-from .robot import batch_collision_check, compute_fk
+from .robot import batch_collision_check, compute_fk, robot_joint_names
 from .storage import save_trajectory_csv
 from .timing import compute_trajectory_times
 
@@ -43,22 +43,25 @@ def collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_co
     _, n_collisions = batch_collision_check(collision_traj, robot_cfg, world_config)
     collision_free = n_collisions == 0
 
-    total_time = transit_time = float("nan")
+    total_time = transit_time = vel_ratio = acc_ratio = float("nan")
     if collision_free:
         ee_positions, ee_quaternions = compute_fk(final_traj, robot_cfg)
+        # 관절 한계는 MoveIt 과 같은 파일에서, 궤적의 열 순서(cuRobo joint_names)로 맞춰 읽는다.
+        limits = settings.joint_limits().ordered(robot_joint_names(robot_cfg))
         traj_times, time_stats = compute_trajectory_times(
-            final_traj, ee_positions, ee_quaternions,
+            final_traj, ee_positions, ee_quaternions, final_is_transit,
             ee_speed_m_s=settings.EE_SPEED_MM_S / 1000.0,
             ee_angular_speed_rad_s=np.deg2rad(settings.EE_ANGULAR_SPEED_DEG_S),
-            max_joint_vel_rad_s=settings.MAX_JOINT_VEL_RAD_S,
+            joint_max_velocity=limits.max_velocity,
+            joint_max_acceleration=limits.max_acceleration,
+            joint_velocity_scaling=settings.JOINT_VELOCITY_SCALING,
+            joint_acceleration_scaling=settings.JOINT_ACCELERATION_SCALING,
             min_segment_dt=settings.MIN_SEGMENT_DT_S,
-            corner_angle_threshold_rad=np.deg2rad(settings.CORNER_ANGLE_THRESHOLD_DEG),
-            corner_max_slowdown=settings.CORNER_MAX_SLOWDOWN,
-            is_transit=final_is_transit,
-            max_joint_acc_rad_s2=settings.MAX_JOINT_ACC_RAD_S2,
         )
         total_time = float(time_stats["total_time"])
         transit_time = float(time_stats["transit_time"])
+        vel_ratio = float(time_stats["max_joint_vel_ratio"])
+        acc_ratio = float(time_stats["max_joint_acc_ratio"])
         if out_csv is not None:
             save_trajectory_csv(
                 final_traj, ee_positions, ee_quaternions, str(out_csv), times=traj_times,
@@ -86,6 +89,10 @@ def collision_gate_and_save(final_traj, final_is_transit, *, robot_cfg, world_co
         "collision_free": collision_free,
         "total_time": total_time,
         "transit_time": transit_time,
+        # 배율 적용 한계 대비 최대 비율(관절 속도는 플래닝 구간, 가속도는 전체). ≤ 1.0 이 정상 —
+        # 시간매김이 한계를 지켰는지 리포트에서 바로 읽으라고 내보낸다.
+        "max_joint_vel_ratio": vel_ratio,
+        "max_joint_acc_ratio": acc_ratio,
         "n_waypoints": len(final_traj),
         "csv": str(out_csv) if saved else None,
     }

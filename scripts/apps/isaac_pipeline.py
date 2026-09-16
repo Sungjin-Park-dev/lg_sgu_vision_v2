@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.isaac import scene as urctl  # noqa: E402
 from common import config as _cfg_module  # noqa: E402
 from common import scene_config  # noqa: E402
+from common import speed_model as _speed  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -72,19 +73,9 @@ IK_RANDOM_SEED = 123
 # threshold for the Check-and-Save-IK / GLNS IK candidate stage).
 CANDIDATE_DEDUP_RAD = 0.08
 
-# 실행 속도 — 세 값이 배율 f 하나에 묶인다 (settings.py 의 기준값과 같아야 한다; 값을 복사해
-# 두는 이유는 IK_RANDOM_SEED 와 같다 — settings 를 import 하면 cuRobo 가 딸려온다).
-#   EE 속도 = f × 10 mm/s,  관절 속도 = f × 0.3 rad/s,  관절 가속도 = f² × 1.0 rad/s²
-# 궤적을 시간축으로 1/f 압축하면 속도는 f 배, 가속도는 f² 배가 되므로 이 결합은 물리적으로
-# 정직하다. 슬라이더나 세 숫자 중 무엇을 만져도 f 가 정해지고 나머지가 따라온다.
-# 숨은 값: EE 각속도 = f × 20 deg/s (같이 스케일), 최소 구간시간·코너 감속은 기본값.
-SPEED_BASE = {
-    "ee_mm_s": 10.0,
-    "ee_angular_deg_s": 20.0,
-    "joint_vel_rad_s": 0.3,
-    "joint_acc_rad_s2": 1.0,
-}
-SPEED_FACTOR_MIN, SPEED_FACTOR_MAX = 0.1, 3.0
+# Motion Speed 의 결합 모델은 common/speed_model.py 에 있다(앱과 settings.py 기본값이 공유).
+# 배율 둘: 스캔 배율 → EE 선·각속도(보간 구간), 이동 배율 → 관절 속도·가속도 배율(플래닝
+# 구간; MoveIt 과 같은 joint_limits.yaml, 같은 scaling factor 의미). 여기서는 값을 적지 않는다.
 
 # waypoint_kind 라벨 색 (omni.ui 0xAABBGGRR). Tilt 패널의 중심 행 라벨에 쓴다 —
 # 어떤 종류의 점을 중심으로 고르는지가 한눈에 보여야 한다.
@@ -1957,104 +1948,117 @@ class PipelineWindow:
                                                    clicked_fn=self._on_clear_tilt_fan))
 
     def _build_panel_speed(self):
-        """실행 속도 — 슬라이더 하나와 숫자 셋, 전부 한 배율에 묶인다.
+        """실행 속도 — 배율 둘(스캔·이동), 각각 슬라이더 하나와 숫자 둘.
 
-        생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to Start·HOME)이 모두
-        같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로 **다시 생성해야** 로봇
-        속도가 바뀐다 — 그래서 Generate 패널 위다.
+        구간의 종류마다 다른 쌍이 시간을 정한다. 보간 구간(viewpoint 사이, tilt)은 EE 선·각속도,
+        플래닝 구간(transit, Plan to Start/HOME)은 관절 속도·가속도 배율 — MoveIt 과 같은
+        joint_limits.yaml 에 같은 뜻의 scaling factor 를 곱한다(RViz 의 Velocity/Acceleration
+        Scaling 과 같은 수). 생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to
+        Start·HOME)이 모두 같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로
+        **다시 생성해야** 로봇 속도가 바뀐다 — 그래서 Generate 패널 위다.
         """
         ui = self._ui
         frame = ui.CollapsableFrame("Motion Speed", height=0, collapsed=True)
         self._inspection_frames.append(frame)
+        vs0, as0 = _speed.transit_base()
+        self._speed_sliders = {}
         with frame:
             with ui.VStack(spacing=4):
                 ui.Label(
-                    "One speed factor drives all three: speed x f, acceleration x f^2. Drag "
-                    "the slider or type any one number - the rest follow. Baked into the CSV "
-                    "at generate time (also used by Plan to Start / Plan to HOME).",
-                    height=58, word_wrap=True)
-                with ui.HStack(height=22, spacing=6):
-                    ui.Label("speed factor", width=200)
-                    self._speed_slider_model = ui.SimpleFloatModel(1.0)
-                    self._lock(ui.FloatSlider(self._speed_slider_model,
-                                              min=SPEED_FACTOR_MIN, max=SPEED_FACTOR_MAX))
-                    self._fields["speed_factor"] = self._num_field(1.0, width=70)
-                for key, label, base in (
-                        ("speed_ee", "scan EE speed [mm/s]", SPEED_BASE["ee_mm_s"]),
-                        ("speed_vj", "max joint vel [rad/s]", SPEED_BASE["joint_vel_rad_s"]),
-                        ("speed_aj", "max joint acc [rad/s^2]", SPEED_BASE["joint_acc_rad_s2"])):
+                    "Two speed factors, baked into the CSV at generate time. Scan factor: "
+                    "interpolated segments (between viewpoints, tilt) follow EE linear/angular "
+                    "speed. Transit factor: motion-planned segments follow joint velocity/"
+                    "acceleration scaling - the same joint_limits.yaml and the same 0-1 scaling "
+                    "numbers as MoveIt/RViz. Speed x f, acceleration x f^2; drag a slider or "
+                    "type any number and its group follows.",
+                    height=96, word_wrap=True)
+                # (그룹, 슬라이더 라벨, 범위, [(필드 키, 라벨, 기본값)])
+                groups = (
+                    ("scan", "scan factor (interpolated)",
+                     (_speed.SCAN_FACTOR_MIN, _speed.SCAN_FACTOR_MAX),
+                     (("scan_ee", "EE speed [mm/s]", _speed.SCAN_BASE["ee_mm_s"]),
+                      ("scan_ang", "EE angular [deg/s]", _speed.SCAN_BASE["ee_angular_deg_s"]))),
+                    ("transit", "transit factor (planned)",
+                     (_speed.TRANSIT_FACTOR_MIN, _speed.transit_factor_max()),
+                     (("transit_vs", "joint velocity scaling", vs0),
+                      ("transit_as", "joint acceleration scaling", as0))),
+                )
+                for group, label, (lo, hi), fields in groups:
                     with ui.HStack(height=22, spacing=6):
                         ui.Label(label, width=200)
-                        # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
-                        # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
-                        self._fields[key] = self._num_field(float(base), width=90)
+                        model = ui.SimpleFloatModel(1.0)
+                        self._speed_sliders[group] = model
+                        self._lock(ui.FloatSlider(model, min=lo, max=hi))
+                        self._fields[f"{group}_factor"] = self._num_field(1.0, width=70)
+                    with ui.HStack(height=22, spacing=6):
+                        ui.Spacer(width=24)
+                        for key, flabel, base in fields:
+                            ui.Label(flabel, width=160)
+                            # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
+                            # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
+                            self._fields[key] = self._num_field(float(base), width=80)
                 ui.Label(
-                    f"factor range {SPEED_FACTOR_MIN:g} - {SPEED_FACTOR_MAX:g}. Start/stop and "
-                    "corners ramp within the acceleration limit; scan segments also obey EE "
-                    "speed, transit segments joint speed only.",
+                    f"scan factor {_speed.SCAN_FACTOR_MIN:g} - {_speed.SCAN_FACTOR_MAX:g}; "
+                    f"transit factor {_speed.TRANSIT_FACTOR_MIN:g} - "
+                    f"{_speed.transit_factor_max():g} (both scalings stay <= 1.0 = robot limit). "
+                    "Start/stop, corners and scan/transit seams ramp within the acceleration limit.",
                     height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
-                # 결합: 어느 쪽이 바뀌든 배율 f 를 정하고 나머지에 쓴다. 재진입 가드로 순환을 막고,
-                # 방금 편집 중인 칸은 되쓰지 않는다 — 타자 도중 값을 덮어쓰면 입력이 깨진다.
+                # 결합: 그룹 안에서 어느 쪽이 바뀌든 그 그룹의 배율 f 를 정하고 나머지에 쓴다.
+                # 재진입 가드로 순환을 막고, 방금 편집 중인 칸은 되쓰지 않는다 — 타자 도중 값을
+                # 덮어쓰면 입력이 깨진다.
                 self._speed_syncing = False
-                self._speed_slider_model.add_value_changed_fn(
-                    lambda _m: self._on_speed_changed("slider"))
-                for key in ("speed_factor", "speed_ee", "speed_vj", "speed_aj"):
-                    self._fields[key].add_value_changed_fn(
-                        lambda _m, k=key: self._on_speed_changed(k))
+                for group, _label, _range, fields in groups:
+                    self._speed_sliders[group].add_value_changed_fn(
+                        lambda _m, g=group: self._on_speed_changed(g, "slider"))
+                    for key in (f"{group}_factor", *(k for k, _l, _b in fields)):
+                        self._fields[key].add_value_changed_fn(
+                            lambda _m, g=group, k=key: self._on_speed_changed(g, k))
 
-    def _speed_factor_from(self, source: str) -> float:
-        """편집된 곳 하나에서 배율 f 를 역산한다 (가속도는 f² 이라 제곱근)."""
+    # 그룹별 (필드 키 → speed_model 의 값 이름). 배율 ↔ 숫자 환산은 전부 speed_model 이 한다.
+    _SPEED_FIELDS = {
+        "scan": {"scan_ee": "ee_mm_s", "scan_ang": "ee_angular_deg_s"},
+        "transit": {"transit_vs": "velocity_scaling", "transit_as": "acceleration_scaling"},
+    }
+
+    def _speed_factor_from(self, group: str, source: str) -> float:
+        """편집된 곳 하나에서 그 그룹의 배율 f 를 역산한다."""
         if source == "slider":
-            return float(self._speed_slider_model.get_value_as_float())
-        if source == "speed_factor":
-            return float(self._get_field("speed_factor", float))
-        if source == "speed_ee":
-            return float(self._get_field("speed_ee", float)) / SPEED_BASE["ee_mm_s"]
-        if source == "speed_vj":
-            return float(self._get_field("speed_vj", float)) / SPEED_BASE["joint_vel_rad_s"]
-        if source == "speed_aj":
-            aj = max(0.0, float(self._get_field("speed_aj", float)))
-            return (aj / SPEED_BASE["joint_acc_rad_s2"]) ** 0.5
-        raise ValueError(source)
+            return float(self._speed_sliders[group].get_value_as_float())
+        if source == f"{group}_factor":
+            return float(self._get_field(source, float))
+        name = self._SPEED_FIELDS[group][source]
+        value = float(self._get_field(source, float))
+        return (_speed.scan_factor_from(name, value) if group == "scan"
+                else _speed.transit_factor_from(name, value))
 
-    def _on_speed_changed(self, source: str):
+    def _on_speed_changed(self, group: str, source: str):
         if self._speed_syncing:
             return
         self._speed_syncing = True
         try:
-            f = self._speed_factor_from(source)
+            f = self._speed_factor_from(group, source)
+            values = _speed.scan_values(f) if group == "scan" else _speed.transit_values(f)
+            targets = {f"{group}_factor": f}
+            targets.update({key: values[name] for key, name in self._SPEED_FIELDS[group].items()})
             # 슬라이더는 자기 범위로 스스로 잘린다. 숫자 칸은 타자 중이라 잘라 되쓰지 않고
             # 표시만 따라간다 — 실제 쓰는 값은 _timing_cli_args 가 범위로 자른다.
-            targets = {
-                "speed_factor": f,
-                "speed_ee": f * SPEED_BASE["ee_mm_s"],
-                "speed_vj": f * SPEED_BASE["joint_vel_rad_s"],
-                "speed_aj": f * f * SPEED_BASE["joint_acc_rad_s2"],
-            }
             if source != "slider":
-                self._speed_slider_model.set_value(
-                    min(SPEED_FACTOR_MAX, max(SPEED_FACTOR_MIN, f)))
+                clamp = _speed.clamp_scan if group == "scan" else _speed.clamp_transit
+                self._speed_sliders[group].set_value(clamp(f))
             for key, value in targets.items():
                 if key != source:
                     self._fields[key].set_value(float(value))
         finally:
             self._speed_syncing = False
 
-    def _speed_factor(self) -> float:
-        f = float(self._get_field("speed_factor", float))
-        return min(SPEED_FACTOR_MAX, max(SPEED_FACTOR_MIN, f))
-
     def _timing_cli_args(self) -> str:
-        """배율 f → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
+        """두 배율 → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
 
-        네 값(EE 선·각속도, 관절 속도, 관절 가속도)을 f 에서 만들어 넘긴다. 최소 구간시간과
-        코너 감속은 넘기지 않는다 — settings.py 기본값이 쓰인다.
+        넷(EE 선·각속도, 관절 속도·가속도 배율)을 배율에서 만들어 넘긴다. 최소 구간시간은
+        넘기지 않는다 — settings.py 기본값이 쓰인다.
         """
-        f = self._speed_factor()
-        return (f"--ee-speed-mm-s {f * SPEED_BASE['ee_mm_s']:g} "
-                f"--ee-angular-speed-deg-s {f * SPEED_BASE['ee_angular_deg_s']:g} "
-                f"--max-joint-vel-rad-s {f * SPEED_BASE['joint_vel_rad_s']:g} "
-                f"--max-joint-acc-rad-s2 {f * f * SPEED_BASE['joint_acc_rad_s2']:g}")
+        return _speed.cli_args(float(self._get_field("scan_factor", float)),
+                               float(self._get_field("transit_factor", float)))
 
     def _build_panel_preview(self):
         ui = self._ui

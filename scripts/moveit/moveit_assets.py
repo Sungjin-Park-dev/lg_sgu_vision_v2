@@ -25,8 +25,10 @@ WORLD_GEOMETRY_NAME = 'world_collision_model'
 
 
 def _load_module(path: str, name: str):
+    import sys
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module        # dataclass 등이 sys.modules 에서 모듈을 찾는다 — 먼저 등록
     spec.loader.exec_module(module)
     return module
 
@@ -45,8 +47,13 @@ def _collision_exclude_links() -> tuple:
 
 START_POSE_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_start_pose.urdf.xacro')
 INITIAL_POSITIONS_FILE = '/tmp/ur20_initial_positions.yaml'   # 래퍼 xacro 의 기본값과 같아야 한다
-UR_JOINT_ORDER = ('shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-                  'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint')
+# 관절 순서와 한계 파일은 Inspection 시간매김과 **같은 모듈**에서 온다(common/joint_limits.py).
+# MoveIt 이 이 파일을 robot_description_planning 으로 읽으면 RViz 의 velocity/acceleration
+# scaling 과 앱 Motion Speed 의 transit 배율이 같은 한계에 곱해진다.
+_joint_limits = _load_module(os.path.join(PROJECT_SCRIPTS, 'common', 'joint_limits.py'),
+                             'common_joint_limits')
+UR_JOINT_ORDER = _joint_limits.UR_JOINT_ORDER
+JOINT_LIMITS_YAML = str(_joint_limits.JOINT_LIMITS_YAML)
 
 
 def prepare_initial_positions(output_file: str = INITIAL_POSITIONS_FILE) -> str:

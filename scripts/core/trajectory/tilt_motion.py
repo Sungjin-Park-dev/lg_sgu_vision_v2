@@ -406,7 +406,8 @@ def main() -> int:
               "narrow the angles.)")
         return 2
 
-    print(f"  OK waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s")
+    print(f"  OK waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s, "
+          f"joint acc vs limit {gate['max_joint_acc_ratio']:.2f}")
     print("=" * 64)
     return 0
 

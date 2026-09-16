@@ -127,7 +127,9 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
         .planning_pipelines(pipelines=['ompl'])
-        .joint_limits(file_path='config/joint_limits.yaml')
+        # 관절 속도·가속도 한계는 Inspection 시간매김과 같은 파일 — RViz 의 scaling 과 앱의
+        # transit 배율이 같은 수에 곱해진다(파일 머리 주석 참고).
+        .joint_limits(file_path=moveit_assets.JOINT_LIMITS_YAML)
         .to_moveit_configs()
     )
     cumotion_cfg = os.path.join(

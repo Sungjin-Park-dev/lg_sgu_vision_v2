@@ -229,6 +229,11 @@ def build_collision_world(object_name: str):
     return Scene(cuboid=cuboids, mesh=meshes if meshes else None)
 
 
+def robot_joint_names(robot_cfg) -> tuple:
+    """궤적 배열의 열 순서 = cuRobo 가 쓰는 관절 이름 순서(로봇 yml 의 cspace.joint_names)."""
+    return tuple(_get_kinematics(robot_cfg).joint_names)
+
+
 def compute_fk(solutions, robot_cfg):
     """Compute FK for joint solutions. Returns (N,3) positions and (N,4) quats (x,y,z,w)."""
     kin = _get_kinematics(robot_cfg)            # run 당 1회만 빌드(재사용)

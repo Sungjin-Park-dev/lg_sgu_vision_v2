@@ -244,6 +244,7 @@ def _singleton_component(component):
         "n_collisions": 0, "collision_free": True,
         # 한 자세에 머무르는 구간이라 소요 시간이 없다. 충돌 검사는 joined 게이트가 한다.
         "total_time": 0.0, "transit_time": 0.0, "n_waypoints": 1,
+        "max_joint_vel_ratio": 0.0, "max_joint_acc_ratio": 0.0,
         "reconfig_mismatch": 0, "csv": None,
         "final_traj": selected,
         "final_is_transit": np.zeros(1, dtype=bool),   # scan point (transit 아님)
@@ -270,6 +271,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "n_collisions": 0,
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": 0,
+            "max_joint_vel_ratio": float("nan"), "max_joint_acc_ratio": float("nan"),
             "reconfig_mismatch": pr.get("reconfig_mismatch", 0), "csv": None,
             "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None, "error": pr["error"],
@@ -287,6 +289,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "collision_fallback_ok": pr["collision_fallback_ok"],
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": len(pr["final_traj"]),
+            "max_joint_vel_ratio": float("nan"), "max_joint_acc_ratio": float("nan"),
             "reconfig_mismatch": pr["reconfig_mismatch"], "csv": None,
             "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None,
@@ -450,7 +453,9 @@ def main() -> int:
                          f"original idx: {res['dropped']}")
         time_note = (f", time={res['total_time']:.1f}s "
                      f"(scan={res['total_time'] - res['transit_time']:.1f}s, "
-                     f"transit={res['transit_time']:.1f}s)") if res["collision_free"] else ""
+                     f"transit={res['transit_time']:.1f}s; joint vel/acc vs limit "
+                     f"{res['max_joint_vel_ratio']:.2f}/{res['max_joint_acc_ratio']:.2f})"
+                     ) if res["collision_free"] else ""
         fallback_note = (f", scan-collision fallback "
                          f"{res['collision_fallback_ok']}/{res['collision_fallback_req']}"
                          if res["collision_fallback_req"] else "")
@@ -563,7 +568,8 @@ def main() -> int:
                 print(f"  -> OK (collision-free), {g['n_waypoints']} waypoints, "
                       f"time={g['total_time']:.1f}s "
                       f"(scan={g['total_time'] - g['transit_time']:.1f}s, "
-                      f"transit={g['transit_time']:.1f}s)")
+                      f"transit={g['transit_time']:.1f}s; joint vel/acc vs limit "
+                      f"{g['max_joint_vel_ratio']:.2f}/{g['max_joint_acc_ratio']:.2f})")
                 print(f"  CSV: {g['csv']}")
                 print("=" * 64)
             else:
