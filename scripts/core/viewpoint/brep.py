@@ -369,6 +369,35 @@ def _axis_positions(speed_at, t0: float, t1: float, fov_mm: float, overlap: floa
     return np.interp(targets, arc, ts), length
 
 
+# 경계 밖 격자점을 면 안쪽으로 당길 때 주변을 몇 칸으로 훑을지(한 변). 홀수면 중앙이
+# 원래 자리와 겹쳐 무의미하므로 짝수를 쓴다.
+SNAP_PROBES = 8
+
+
+def _snap_inside(u, v, u0, u1, v0, v1, us, vs, classifier, o, inside_states):
+    """경계 밖 (u,v) 를 면 안쪽 가장 가까운 유효 좌표로 당긴다. 없으면 None.
+
+    탐색 범위는 그 격자칸의 이웃 간격 한 칸이다 — 더 멀리 가면 원래 프레임이 덮으려던
+    자리를 벗어나 다른 곳을 찍게 된다. 매개변수 공간 거리로 고르므로 근사지만, 한 칸
+    안에서는 환산비가 크게 변하지 않아 충분하다.
+    """
+    du = (max(us) - min(us)) / max(len(us) - 1, 1) if len(us) > 1 else (u1 - u0)
+    dv = (max(vs) - min(vs)) / max(len(vs) - 1, 1) if len(vs) > 1 else (v1 - v0)
+    best, best_d2 = None, None
+    for i in range(SNAP_PROBES):
+        for j in range(SNAP_PROBES):
+            cu = u + du * (-1.0 + 2.0 * (i + 0.5) / SNAP_PROBES)
+            cv = v + dv * (-1.0 + 2.0 * (j + 0.5) / SNAP_PROBES)
+            if not (u0 <= cu <= u1 and v0 <= cv <= v1):
+                continue
+            if classifier.Perform(o["gp_Pnt2d"](float(cu), float(cv))) not in inside_states:
+                continue
+            d2 = ((cu - u) / max(du, 1e-12)) ** 2 + ((cv - v) / max(dv, 1e-12)) ** 2
+            if best_d2 is None or d2 < best_d2:
+                best, best_d2 = (cu, cv), d2
+    return best
+
+
 def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
                 min_area_cm2: float = DEFAULT_MIN_FACE_AREA_CM2,
                 working_distance_mm: float = 195.0,
@@ -416,7 +445,8 @@ def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
     sign = -1.0 if face.Orientation() == o["TopAbs_REVERSED"] else 1.0
     inside_states = (o["TopAbs_IN"], o["TopAbs_ON"])
     points, normals, frames_u, frames_v = [], [], [], []
-    n_u, len_u, grid_cells = 0, 0.0, 0
+    taken = []                      # 이미 쓴 (u,v) — 스냅이 겹치는 것을 막는다
+    n_u, len_u, grid_cells, n_snapped = 0, 0.0, 0, 0
     for v in vs:
         # 이 행의 프레임이 v 로 덮는 매개변수 구간. 폭은 **가장 느린** 곳 기준이라야
         # 띠를 좁게 잡지 않는다(속도가 작을수록 같은 mm 가 더 넓은 Δv 다).
@@ -430,9 +460,27 @@ def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
         n_u = max(n_u, len(us))
         grid_cells += len(us)
         for u in us:
-            if classifier.Perform(o["gp_Pnt2d"](float(u), float(v))) not in inside_states:
-                continue
-            local = o["GeomLProp_SLProps"](surface, float(u), float(v), 1, 1e-7)
+            # 스냅이 좌표를 옮길 수 있으므로 **행 루프 변수 v 를 덮어쓰지 않는다** —
+            # 덮어쓰면 그 행의 남은 열이 전부 옮겨진 v 로 계산돼 멀쩡한 격자점까지 어긋난다.
+            pu, pv = u, v
+            if classifier.Perform(o["gp_Pnt2d"](float(pu), float(pv))) not in inside_states:
+                # 격자 중심이 트리밍 경계 **밖**이다. 그래도 그 프레임이 덮으려던 자리에는
+                # 실제 면이 있는 경우가 대부분이라(실측: 버려진 점의 79~100% 가 반경
+                # 25mm 안에 면을 가진다), 그냥 버리면 그 자리가 구멍으로 남는다.
+                # 그렇다고 이 (u,v) 를 그대로 쓸 수는 없다 — 거기엔 표면이 없어서 법선도
+                # 곡률도 실재하지 않는다(곡면 식을 연장한 가상의 점이다).
+                # 그래서 **앵커만 면 안쪽으로 당겨 붙인다**: 주변을 훑어 가장 가까운
+                # 유효 (u,v) 를 찾고 그 점으로 대신 찍는다. 프레임 방향·크기는 그대로다.
+                snapped = _snap_inside(pu, pv, u0, u1, v0, v1, us, vs,
+                                       classifier, o, inside_states)
+                if snapped is None:
+                    continue
+                pu, pv = snapped
+                if any(abs(pu - tu) < 1e-12 and abs(pv - tv) < 1e-12 for tu, tv in taken):
+                    continue            # 여러 칸이 같은 자리로 수렴 — 한 번만 쓴다
+                n_snapped += 1
+            taken.append((pu, pv))
+            local = o["GeomLProp_SLProps"](surface, float(pu), float(pv), 1, 1e-7)
             if not local.IsNormalDefined():
                 continue
             point, normal = local.Value(), local.Normal()
@@ -454,7 +502,7 @@ def sample_face(face, o, fov_w_mm: float, fov_h_mm: float, overlap: float,
             frames_u.append(axis_u.tolist())
             frames_v.append((axis_v / norm_v).tolist())
     info.update(grid=(n_u, len(vs)), size_mm=(len_u, len_v), kept=len(points),
-                dropped=grid_cells - len(points))
+                snapped=n_snapped, dropped=grid_cells - len(points))
     extras = {
         "frame_u": np.asarray(frames_u, dtype=np.float64).reshape(-1, 3),
         "frame_v": np.asarray(frames_v, dtype=np.float64).reshape(-1, 3),
@@ -514,7 +562,9 @@ def sample_step(step_path, fov_w_mm: float, fov_h_mm: float, overlap: float,
         dropped = sum(i.get("dropped", 0) for i in infos)
         print(f"  CAD faces: {len(faces)} (sampled {sampled}, fillet-skipped {fillets}, "
               f"tiny {len(infos) - sampled - fillets})")
-        print(f"  Grid points: {len(points)} kept, {dropped} outside trimming boundary")
+        snapped = sum(i.get("snapped", 0) for i in infos)
+        print(f"  Grid points: {len(points)} kept ({snapped} snapped inside from the "
+              f"trimming boundary), {dropped} dropped")
         nominal = (fov_w_mm, fov_h_mm)
         narrowed = [i for i in infos
                     if any(e < n - 1e-6 for e, n in
