@@ -181,7 +181,8 @@ def _blender_stage(cfg: dict) -> None:
 
     if cfg.get("preview_dir"):
         for i, s in enumerate(cfg["scratches"]):
-            _render_preview(s, Path(cfg["preview_dir"]) / f"{cfg['object']}_scratch{i}.png")
+            _render_preview(s, Path(cfg["preview_dir"]) / f"{cfg['object']}_scratch{i}.png",
+                            cfg.get("preview_size") or (900, 900))
 
 
 def _cut_decal_boundaries(obj, scratches: list, bmesh, np) -> None:
@@ -451,7 +452,7 @@ def _project_patch(obj, patch: list, s: dict, slot: int, np) -> None:
           f"p95={np.percentile(r, 95):.3f}")
 
 
-def _render_preview(s: dict, out: Path) -> None:
+def _render_preview(s: dict, out: Path, size=(900, 900)) -> None:
     """One raking-light Cycles frame, so the groove can be eyeballed offline.
 
     Head-on light hides a groove entirely -- the shading cue is the shadowed
@@ -489,7 +490,11 @@ def _render_preview(s: dict, out: Path) -> None:
     # Frame the decal window, not the whole part.  A 50mm lens on Blender's
     # 36mm sensor sees ~40 deg, so the window fills the frame at ~1.4x its
     # width; 2x leaves a little context around it.
-    cam.location = centre + n * max(2.0 * s["span_m"], 0.03)
+    # Blender fits the sensor to the longer side, so a wide frame sees *less*
+    # vertically -- pull back by the aspect so a scratch running up the frame
+    # still fits, and the extra width becomes context around it.
+    reach = max(2.0 * s["span_m"], 0.03) * max(1.0, size[0] / max(size[1], 1))
+    cam.location = centre + n * reach
     _track(cam)
     scene.camera = cam
 
@@ -515,7 +520,7 @@ def _render_preview(s: dict, out: Path) -> None:
     # square_structure's own material is nearly black, and a groove read by its
     # shadow disappears entirely at that exposure.
     scene.view_settings.exposure = 2.0
-    scene.render.resolution_x = scene.render.resolution_y = 900
+    scene.render.resolution_x, scene.render.resolution_y = int(size[0]), int(size[1])
     out.parent.mkdir(parents=True, exist_ok=True)
     scene.render.filepath = str(out)
     bpy.ops.render.render(write_still=True)
@@ -860,6 +865,8 @@ def main() -> None:
     p.add_argument("--roughness", type=float, default=0.5)
     p.add_argument("--preview-dir", type=Path,
                    help="Also render one raking-light preview PNG per scratch")
+    p.add_argument("--preview-size", default="900x900", metavar="WxH",
+                   help="Preview resolution, e.g. 1600x800 (default 900x900)")
     p.add_argument("--force", action="store_true",
                    help="Refresh source_prev.usd from the current source.usd")
     p.add_argument("--blender", type=Path,
@@ -918,6 +925,7 @@ def main() -> None:
         "smooth_deg": args.smooth_deg, "roughness": args.roughness,
         "scratches": scratches,
         "preview_dir": str(args.preview_dir) if args.preview_dir else None,
+        "preview_size": [int(v) for v in str(args.preview_size).lower().split("x")],
     }
     proc = subprocess.run(
         [str(args.blender), "-b", "--factory-startup", "--python", str(Path(__file__).resolve()),
