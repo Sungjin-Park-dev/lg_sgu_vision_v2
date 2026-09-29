@@ -649,11 +649,13 @@ class Studio:
             # 표면 간격이 아니라 **카메라 위치** 간격에 곱해지고, 카메라는 WD 만큼
             # 떨어져 곡면에서 부챗살처럼 벌어진다(cylinder_sample: 표면 9.5mm vs
             # 카메라 31.1mm, 국소 최대 152mm). 생성 전에는 맞는 값을 낼 수 없다.
+            # 같은 이유로 상한이 5 면 모자란다: cylinder_sample 의 CAD 격자는 한 기둥 안
+            # 간격 ~25mm 에 옆 기둥까지 ~218mm 라 8 이상이어야 기둥끼리 이어진다.
             with g.add_folder("Solver graph"):
                 self.nb_distfactor = g.add_number(
                     "Max edge length (×)",
                     initial_value=DEFAULT_DELAUNAY_DISTANCE_FACTOR,
-                    min=1.0, max=5.0, step=0.1,
+                    min=1.0, max=12.0, step=0.1,
                     hint="간선 길이 상한 — 주변 카메라 위치 간격의 배수")
                 self.nb_maxangle = g.add_number(
                     "Max normal angle (°)",
