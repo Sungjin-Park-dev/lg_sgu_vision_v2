@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stamp a scratch decal onto a target object's source.usd as a normal map.
+"""Stamp scratch decals onto a target object's source.usd as normal maps.
 
 Visual-only: this rewrites ``data/{object}/mesh/source.usd`` (what Isaac's
 ``load_target_object`` references) and never touches ``source.obj``, so the
@@ -12,17 +12,29 @@ normal directions away and re-derives them from luminance -- we alpha-composite
 the decal straight onto a flat normal canvas.  No bake, no fidelity loss, and
 the whole thing runs headless in a couple of seconds.
 
-Runs in two stages.  The outer stage (this venv: numpy + PIL + pxr) measures
-the mesh, composites the texture and verifies the result; it re-execs itself
-inside ``blender -b`` for the mesh work, because bpy is not importable here and
-PIL is not importable there.
+**Local decals, not a global unwrap.**  A scratch is 20-40 mm on parts that are
+boxes, cylinders and freeform shells, so there is no one UV layout that suits
+every object.  Instead each scratch gets its own small patch of faces, its own
+texture and its own material, and the patch is mapped by projecting it along
+the scratch's normal.  The patch stops at sharp edges and where the surface
+turns away, so a decal never wraps around a corner.  Faces are free to extend
+past the texture (``sample`` has walls made of two huge triangles) because the
+texture clamps to its flat border.
+
+Runs in two stages.  The outer stage (this venv: numpy + PIL + trimesh + pxr)
+plans the placements, composites the textures and verifies the result; it
+re-execs itself inside ``blender -b`` for the mesh work, because bpy is not
+importable here and PIL is not importable there.
 
 Examples:
-    uv run scripts/setup/apply_scratch_normal.py \
-        --object cylinder_sample --scratch ff/Scratches/scratch_16.png
-    uv run scripts/setup/apply_scratch_normal.py \
-        --object cylinder_sample --scratch ff/Scratches/scratch_16.png \
-        --length-mm 40 --u 0.25 --strength 0.6 --preview /tmp/scratch.png
+    # three random scratches, reproducible from the seed
+    uv run scripts/setup/apply_scratch_normal.py --object sample --random 3 --seed 0
+    # one scratch at a chosen spot (object frame, mm), 30 deg in the tangent plane
+    uv run scripts/setup/apply_scratch_normal.py --object cylinder_sample \
+        --scratch ff/Scratches/scratch_16.png --at 23 0 40 --angle-deg 30 --length-mm 40
+    # replay exactly what a previous run recorded
+    uv run scripts/setup/apply_scratch_normal.py --object sample \
+        --spec data/sample/mesh/scratches.json
 """
 
 from __future__ import annotations
@@ -44,6 +56,24 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = PROJECT_ROOT / "data"
+SCRATCH_DIR = PROJECT_ROOT / "ff" / "Scratches"
+
+# The texture is a square window on the surface, this many scratch lengths wide.
+# The margin is what the decal's clamped border is made of, so it has to be wide
+# enough that a face reaching past the window only ever reads flat pixels.
+SPAN_FACTOR = 1.6
+# A random placement only demands smooth surface around the *scratch itself*,
+# not around the whole window.  Demanding the window (1.2 x length) rules out
+# small parts entirely -- on the 23mm-radius cylinder every spot is within that
+# distance of a rim.  The patch still stops at creases, so a window that runs
+# off an edge is simply clipped there.
+SMOOTH_RADIUS_FACTOR = 0.6
+# A decal lives on one side of the part.  Creases alone do not stop it: a
+# rounded edge is smooth all the way over, so on square_structure a patch rode
+# a fillet onto the neighbouring wall and grew to 2278 faces that no flattening
+# could hold (area ratio 0.17-6.4).  Turning away this far from the scratch's
+# own normal ends the patch.
+MAX_TILT_DEG = 70.0
 
 
 # ============================================================================
@@ -51,6 +81,19 @@ DATA_ROOT = PROJECT_ROOT / "data"
 # ============================================================================
 
 def blender_stage(cfg: dict) -> None:
+    """Blender keeps running (and exits 0) after a --python script raises, so
+    every failure in here has to become an explicit non-zero exit."""
+    try:
+        _blender_stage(cfg)
+    except Exception as exc:                        # noqa: BLE001 -- see docstring
+        import traceback
+
+        traceback.print_exc()
+        print(f"[scratch] FAILED: {exc}")
+        sys.exit(1)
+
+
+def _blender_stage(cfg: dict) -> None:
     import bmesh
     import numpy as np
 
@@ -90,11 +133,33 @@ def blender_stage(cfg: dict) -> None:
     obj.data.update()
     print(f"[scratch]   merge by distance: {before} -> {len(obj.data.vertices)} verts")
 
-    # Smooth the curved wall, keep the shoulders/edges sharp.
+    # Smooth the curved walls, keep the shoulders/edges sharp.
     bpy.ops.object.shade_smooth_by_angle(angle=math.radians(cfg["smooth_deg"]))
 
-    _author_cylindrical_uv(obj, cfg, np)
-    _build_material(obj, cfg)
+    _ensure_base_material(obj, cfg)
+    _cut_decal_boundaries(obj, cfg["scratches"], bmesh, np)
+    _author_box_uv(obj, np)     # background UV: unused by the shader, but never degenerate
+
+    claimed = {}
+    for i, s in enumerate(cfg["scratches"]):
+        patch = _grow_patch(obj, s, cfg["smooth_deg"], np)
+        # A face holds one UV, so it can serve one decal.  Where two patches
+        # meet, the first keeps the face and this one goes without it: the
+        # overlap is margin, and yielding a little margin beats refusing to
+        # place the scratch at all (three scratches cannot help but meet on a
+        # 46mm-wide cylinder).
+        clash = [f for f in patch if f in claimed]
+        if clash:
+            patch = [f for f in patch if f not in claimed]
+            print(f"[scratch]   {s['material']}: yielded {len(clash)} face(s) "
+                  f"to an earlier scratch")
+        if not patch:
+            raise RuntimeError(
+                f"scratch {i} has no faces left -- it lands on top of scratch "
+                f"{claimed[clash[0]]}")
+        claimed.update({f: i for f in patch})
+        slot = _build_scratch_material(obj, s, obj.data.polygons[patch[0]].material_index)
+        _project_patch(obj, patch, s, slot, np)
 
     usd_out = cfg["usd"]
     bpy.ops.wm.usd_export(
@@ -104,8 +169,8 @@ def blender_stage(cfg: dict) -> None:
         generate_preview_surface=True,
         export_uvmaps=True,
         export_normals=True,
-        export_textures_mode="KEEP",   # texture already lives next to the USD
-        relative_paths=True,           # -> ./textures/scratch_normal.png
+        export_textures_mode="KEEP",   # textures already live next to the USD
+        relative_paths=True,           # -> ./textures/scratch_0.png
         convert_orientation=False,     # keep Z-up
         convert_scene_units="METERS",
         meters_per_unit=1.0,
@@ -114,23 +179,68 @@ def blender_stage(cfg: dict) -> None:
     )
     print(f"[scratch]   exported {usd_out}")
 
-    if cfg.get("preview"):
-        _render_preview(obj, cfg)
+    if cfg.get("preview_dir"):
+        for i, s in enumerate(cfg["scratches"]):
+            _render_preview(s, Path(cfg["preview_dir"]) / f"{cfg['object']}_scratch{i}.png",
+                            cfg.get("preview_size") or (900, 900))
 
 
-def _author_cylindrical_uv(obj, cfg: dict, np) -> None:
-    """Write an isotropic cylindrical UV projection directly onto the loops.
+def _cut_decal_boundaries(obj, scratches: list, bmesh, np) -> None:
+    """Slice the mesh along each decal's four side planes.
 
-    ``bpy.ops.uv.cylinder_project`` needs a VIEW_3D context and is fragile
-    headless, so we compute the projection ourselves.  Both axes are divided by
-    the same ``m_per_uv`` so that one UV unit is the same number of millimetres
-    horizontally and vertically -- that is what keeps a square texture from
-    stretching across a 144.5 x 81 mm wall.
+    A UV layer holds one coordinate per loop, so a face can carry one decal and
+    no more.  These parts have faces big enough to reach two scratches at once
+    (square_structure's wall is one triangle that spans 235mm, which two
+    placements both landed on).  Cutting along the decal boundaries gives each
+    decal its own faces; everything outside is untouched geometry.
+    """
+    if not scratches:
+        return
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    before = len(bm.faces)
+    for s in scratches:
+        centre = np.asarray(s["center"], dtype=np.float64)
+        along = np.asarray(s["direction"], dtype=np.float64)
+        normal = np.asarray(s["normal"], dtype=np.float64)
+        across = np.cross(normal, along)
+        for axis, half in ((along, s["half_len_m"]), (across, s["half_wid_m"])):
+            for sign in (1.0, -1.0):
+                geom = list(bm.verts) + list(bm.edges) + list(bm.faces)
+                bmesh.ops.bisect_plane(
+                    bm, geom=geom, dist=1e-9,
+                    plane_co=(centre + axis * half * sign).tolist(),
+                    plane_no=axis.tolist(),
+                )
+    bmesh.ops.triangulate(bm, faces=bm.faces)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    print(f"[scratch]   cut decal boundaries: {before} -> {len(obj.data.polygons)} faces")
+
+
+def _ensure_base_material(obj, cfg: dict) -> None:
+    """Keep whatever the OBJ's .mtl gave us; only invent one if there is none."""
+    if obj.data.materials:
+        return
+    mat = bpy.data.materials.new(f"{cfg['object']}_base")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.9, 0.9, 0.9, 1.0)
+    bsdf.inputs["Roughness"].default_value = cfg["roughness"]
+    bsdf.inputs["Metallic"].default_value = 0.0
+    obj.data.materials.append(mat)
+
+
+def _author_box_uv(obj, np) -> None:
+    """A plain box projection for every loop, so no face carries a degenerate UV.
+
+    Only the scratch patches read a texture, so what this maps to does not
+    matter -- but a zero-area UV triangle makes tangent frames undefined, and
+    renderers differ on what they do with that.  A box projection is cheap and
+    always non-degenerate.
     """
     me = obj.data
-    m_per_uv = cfg["m_per_uv"]
-    u_span = cfg["circumference"] / m_per_uv   # fraction of U the wrap occupies
-
     nv = len(me.vertices)
     co = np.empty(nv * 3, np.float64)
     me.vertices.foreach_get("co", co)
@@ -141,181 +251,442 @@ def _author_cylindrical_uv(obj, cfg: dict, np) -> None:
     me.loops.foreach_get("vertex_index", lv)
     p = co[lv]
 
-    u = (np.arctan2(p[:, 1], p[:, 0]) / (2 * math.pi) + 0.5) * u_span
-    v = (p[:, 2] - cfg["z_min"]) / m_per_uv
-
     npoly = len(me.polygons)
+    pn = np.empty(npoly * 3, np.float64)
+    me.polygons.foreach_get("normal", pn)
+    pn = pn.reshape(npoly, 3)
     ltot = np.empty(npoly, np.int32)
     me.polygons.foreach_get("loop_total", ltot)
-    if np.all(ltot == 3) and nl == npoly * 3:
-        U = u.reshape(npoly, 3)
-        # A face straddling the +-pi seam spans nearly the whole U range; pull
-        # its low-side corners forward by one wrap so it stays a small quad in
-        # UV instead of wrapping the texture backwards across the face.
-        wrap = (U.max(1) - U.min(1)) > 0.5 * u_span
-        U[wrap] = np.where(U[wrap] < 0.5 * u_span, U[wrap] + u_span, U[wrap])
-        u = U.reshape(-1)
-        print(f"[scratch]   seam-fixed {int(wrap.sum())} faces")
-    else:
-        start = np.empty(npoly, np.int32)
-        me.polygons.foreach_get("loop_start", start)
-        fixed = 0
-        for s, t in zip(start, ltot):
-            sl = u[s:s + t]
-            if sl.max() - sl.min() > 0.5 * u_span:
-                u[s:s + t] = np.where(sl < 0.5 * u_span, sl + u_span, sl)
-                fixed += 1
-        print(f"[scratch]   seam-fixed {fixed} faces (ngon path)")
+    axis = np.repeat(np.abs(pn).argmax(1), ltot)     # dominant normal axis per loop
+
+    span = max(float(np.ptp(co, axis=0).max()), 1e-9)
+    uv = np.empty((nl, 2), np.float64)
+    for a, (iu, iv) in enumerate(((1, 2), (0, 2), (0, 1))):
+        m = axis == a
+        uv[m, 0] = p[m, iu] / span
+        uv[m, 1] = p[m, iv] / span
 
     layer = me.uv_layers.get("UVMap") or me.uv_layers.new(name="UVMap")
-    layer.data.foreach_set("uv", np.stack([u, v], 1).astype(np.float32).ravel())
+    layer.data.foreach_set("uv", uv.astype(np.float32).ravel())
     me.update()
-    print(f"[scratch]   UV: {nl} loops, u_span={u_span:.3f} v_max={v.max():.3f}")
 
 
-def _build_material(obj, cfg: dict) -> None:
-    """The simple, USD-safe chain: texture -> Normal Map -> Principled BSDF."""
-    mat = bpy.data.materials.new(cfg["material_name"])
-    mat.use_nodes = True
+def _tri_box_overlap(a, b, c, half, np) -> bool:
+    """Akenine-Moller separating-axis test: does a triangle touch a box at the origin?"""
+    for i in range(3):                              # the box's own three axes
+        lo = min(a[i], b[i], c[i])
+        hi = max(a[i], b[i], c[i])
+        if lo > half[i] or hi < -half[i]:
+            return False
+
+    n = np.cross(b - a, c - a)                      # the triangle's plane
+    if abs(float(n @ a)) > float(np.abs(n) @ half):
+        return False
+
+    for e in (b - a, c - b, a - c):                 # edge x box-axis cross products
+        for i in range(3):
+            axis = np.cross(e, np.eye(3)[i])
+            if not axis.any():
+                continue
+            proj = [float(axis @ v) for v in (a, b, c)]
+            if min(proj) > float(np.abs(axis) @ half) or max(proj) < -float(np.abs(axis) @ half):
+                return False
+    return True
+
+
+def _grow_patch(obj, s: dict, smooth_deg: float, np) -> list:
+    """Faces that carry one decal: a flood fill that refuses to cross a crease.
+
+    Growing by distance alone would let a patch wrap around a box corner, where
+    a flattening has to tear and the decal comes out smeared (measured: UV/3D
+    area ratio spread 0.80-1.70 across an edge, versus 1.00-1.02 within a face).
+
+    The region is the scratch's own box, not the square texture window.  A
+    scratch is long and thin (a 29mm one is 2.4mm wide), and everything outside
+    it is flat margin that no face needs to sample.  Taking the whole window
+    made the patch swallow the entire cylinder wall -- 4551 faces wrapped into a
+    ring, which a conformal unwrap cannot flatten (area ratio 0.62-2.26).
+    """
+    me = obj.data
+    centre = np.asarray(s["center"], dtype=np.float64)
+    along = np.asarray(s["direction"], dtype=np.float64)
+    normal = np.asarray(s["normal"], dtype=np.float64)
+    across = np.cross(normal, along)
+    half_len, half_wid = s["half_len_m"], s["half_wid_m"]
+    limit = math.radians(smooth_deg)
+
+    # Work in the scratch's own frame, where the region is an axis-aligned box.
+    basis = np.stack([along, across, normal])
+    half = np.array([half_len, half_wid, half_len])
+    local = {}
+    for p in me.polygons:
+        pts = np.asarray([me.vertices[i].co[:] for i in p.vertices], dtype=np.float64)
+        local[p.index] = (pts - centre) @ basis.T
+
+    def near(fi):
+        # Overlap, not "has a vertex inside".  STEP tessellates this cylinder
+        # wall into triangles that run its full 81mm height, so a vertex test
+        # rejects every face a 5mm-wide band actually crosses -- which left one
+        # scratch sitting on a single face.
+        pts = local[fi]
+        return any(_tri_box_overlap(pts[0], pts[k], pts[k + 1], half, np)
+                   for k in range(1, len(pts) - 1))
+
+    # The seed is the face the centre actually sits on.  Nearest-centroid picks
+    # the wrong one where faces are huge (sample's walls are two triangles).
+    tiny = np.full(3, 1e-4)
+    seed = next((p.index for p in me.polygons
+                 if any(_tri_box_overlap(local[p.index][0], local[p.index][k],
+                                         local[p.index][k + 1], tiny, np)
+                        for k in range(1, len(local[p.index]) - 1))), None)
+    if seed is None:
+        seed = min(range(len(me.polygons)),
+                   key=lambda i: float(np.linalg.norm(local[i], axis=1).min()))
+
+    # edge -> the faces on it, so a flood fill can test the dihedral angle
+    edge_faces = {}
+    for p in me.polygons:
+        for e in p.edge_keys:
+            edge_faces.setdefault(e, []).append(p.index)
+
+    face_normal = {p.index: np.asarray(p.normal[:], dtype=np.float64) for p in me.polygons}
+    patch, stack = {seed}, [seed]
+    while stack:
+        fi = stack.pop()
+        for e in me.polygons[fi].edge_keys:
+            for fj in edge_faces.get(e, ()):
+                if fj in patch or not near(fj):
+                    continue
+                cos = float(np.clip(face_normal[fi] @ face_normal[fj], -1.0, 1.0))
+                if math.acos(cos) > limit:
+                    continue                    # a crease: the decal stops here
+                if float(face_normal[fj] @ normal) < math.cos(math.radians(MAX_TILT_DEG)):
+                    continue                    # turned too far off the decal's own plane
+                patch.add(fj)
+                stack.append(fj)
+    return sorted(patch)
+
+
+def _build_scratch_material(obj, s: dict, base_slot: int) -> int:
+    """The simple, USD-safe chain: texture -> Normal Map -> Principled BSDF.
+
+    Built as a copy of the material the patch already wore, so the only thing
+    that changes on those faces is the normal map.  A patch can swallow a whole
+    wall triangle, and a fresh grey material there would show up as a repaint.
+    """
+    base = obj.data.materials[base_slot] if obj.data.materials else None
+    mat = base.copy() if base else bpy.data.materials.new(s["material"])
+    mat.name = s["material"]
+    if not mat.use_nodes:
+        mat.use_nodes = True
     nt = mat.node_tree
-    bsdf = nt.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = (*cfg["base_color"], 1.0)
-    bsdf.inputs["Roughness"].default_value = cfg["roughness"]
-    bsdf.inputs["Metallic"].default_value = 0.0
+    bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None
+                   ) or nt.nodes.new("ShaderNodeOutputMaterial")
+        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+        bsdf.inputs["Base Color"].default_value = (*s["base_color"], 1.0)
+        bsdf.inputs["Roughness"].default_value = s["roughness"]
+        bsdf.inputs["Metallic"].default_value = 0.0
 
-    img = bpy.data.images.load(cfg["texture"])
+    img = bpy.data.images.load(s["texture"])
     img.colorspace_settings.name = "Non-Color"   # sRGB here would skew normals
     tex = nt.nodes.new("ShaderNodeTexImage")
     tex.image = img
+    # A patch face may reach past the decal window; EXTEND repeats the flat
+    # border instead of tiling the scratch across the rest of the wall.
+    tex.extension = "EXTEND"
     tex.location = (-600, 0)
     nmap = nt.nodes.new("ShaderNodeNormalMap")
     nmap.location = (-300, 0)
     nt.links.new(tex.outputs["Color"], nmap.inputs["Color"])
     nt.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
 
-    obj.data.materials.clear()
     obj.data.materials.append(mat)
+    return len(obj.data.materials) - 1
 
 
-def _render_preview(obj, cfg: dict) -> None:
+def _project_patch(obj, patch: list, s: dict, slot: int, np) -> None:
+    """Put the decal window on the patch by projecting along the scratch normal.
+
+    A conformal unwrap was the obvious tool and the wrong one.  These meshes mix
+    a 240mm wall triangle with 2mm rim slivers, and LSCM flattens that pair into
+    UV areas 15x apart -- the decal came out smeared.  Projection has no such
+    failure: it is exact on a flat face, it degrades gently and predictably on a
+    curved one (foreshortening by cos of the tilt, ~6% at the ends of a 30mm
+    scratch on this 23mm-radius cylinder), and a face reaching far outside the
+    window simply lands outside [0,1], where the clamped texture is flat.
+    """
+    me = obj.data
+    centre = np.asarray(s["center"], dtype=np.float64)
+    along = np.asarray(s["direction"], dtype=np.float64)
+    normal = np.asarray(s["normal"], dtype=np.float64)
+    across = np.cross(normal, along)
+    span = s["span_m"]
+
+    layer = me.uv_layers.active
+    ratios = []
+    for fi in patch:
+        p = me.polygons[fi]
+        p.material_index = slot
+        pts = [np.asarray(me.vertices[i].co[:], dtype=np.float64) for i in p.vertices]
+        uvs = []
+        for point, li in zip(pts, p.loop_indices):
+            d = point - centre
+            uv = (float(d @ along) / span + 0.5, float(d @ across) / span + 0.5)
+            layer.data[li].uv = uv
+            uvs.append(np.asarray(uv))
+        for k in range(1, len(pts) - 1):
+            t3 = 0.5 * np.linalg.norm(np.cross(pts[k] - pts[0], pts[k + 1] - pts[0]))
+            tuv = 0.5 * abs(np.cross(uvs[k] - uvs[0], uvs[k + 1] - uvs[0]))
+            if t3 > 1e-14:
+                ratios.append(tuv * span ** 2 / t3)
+    me.update()
+
+    # The ratio is the foreshortening the projection costs: 1.0 where the
+    # surface is parallel to the decal plane, cos(tilt) where it turns away.
+    r = np.asarray(ratios)
+    print(f"[scratch]   {s['material']}: {len(patch)} faces, "
+          f"area ratio median={np.median(r):.3f} p5={np.percentile(r, 5):.3f} "
+          f"p95={np.percentile(r, 95):.3f}")
+
+
+def _render_preview(s: dict, out: Path, size=(900, 900)) -> None:
     """One raking-light Cycles frame, so the groove can be eyeballed offline.
 
     Head-on light hides a groove entirely -- the shading cue is the shadowed
-    wall, so the key light has to come in from the side.
+    wall, so the key light has to come in from the side, and across the
+    scratch rather than along it.
     """
     import mathutils
 
     scene = bpy.context.scene
-    theta = (cfg["u"] / (cfg["circumference"] / cfg["m_per_uv"]) - 0.5) * 2 * math.pi
-    z = cfg["z_min"] + cfg["v"] * cfg["m_per_uv"]
-    target_at = mathutils.Vector((cfg["r_outer"] * math.cos(theta),
-                                  cfg["r_outer"] * math.sin(theta), z))
+    centre = mathutils.Vector(s["center"])
+    n = mathutils.Vector(s["normal"]).normalized()
+    along = mathutils.Vector(s["direction"]).normalized()
+    across = n.cross(along).normalized()
 
-    aim = bpy.data.objects.new("aim", None)
-    scene.collection.objects.link(aim)
-    aim.location = target_at
+    for ob in list(scene.objects):
+        if ob.type in {"CAMERA", "LIGHT", "EMPTY"}:
+            bpy.data.objects.remove(ob, do_unlink=True)
 
-    def _aim(ob, az_off, elev, radius=None):
-        """Point `ob` at the scratch; a radius of None means a directional sun."""
-        a = theta + math.radians(az_off)
-        if radius is not None:
-            ob.location = (target_at.x + radius * math.cos(a) * math.cos(math.radians(elev)),
-                           target_at.y + radius * math.sin(a) * math.cos(math.radians(elev)),
-                           z + radius * math.sin(math.radians(elev)))
-        else:
-            ob.location = (target_at.x + math.cos(a), target_at.y + math.sin(a),
-                           z + math.tan(math.radians(elev)))
-        c = ob.constraints.new("TRACK_TO")
-        c.target, c.track_axis, c.up_axis = aim, "TRACK_NEGATIVE_Z", "UP_Y"
+    def _track(ob):
+        """Point -Z at the scratch by setting the rotation outright.
+
+        A TRACK_TO constraint is the usual way and it does nothing here: in
+        background mode the constraint never evaluates, so every camera kept
+        staring down -Z and all but the top-facing scratches rendered black.
+        """
+        ob.rotation_euler = (centre - ob.location).to_track_quat("-Z", "Y").to_euler()
 
     cam_data = bpy.data.cameras.new("cam")
     cam_data.lens = 50
+    # These parts are centimetres across and the camera sits centimetres away,
+    # well inside Blender's default 0.1m near clip -- which renders black.
+    cam_data.clip_start, cam_data.clip_end = 1e-3, 100.0
     cam = bpy.data.objects.new("cam", cam_data)
     scene.collection.objects.link(cam)
-    _aim(cam, 0.0, 0.0, radius=0.13)
+    # Frame the decal window, not the whole part.  A 50mm lens on Blender's
+    # 36mm sensor sees ~40 deg, so the window fills the frame at ~1.4x its
+    # width; 2x leaves a little context around it.
+    # Blender fits the sensor to the longer side, so a wide frame sees *less*
+    # vertically -- pull back by the aspect so a scratch running up the frame
+    # still fits, and the extra width becomes context around it.
+    reach = max(2.0 * s["span_m"], 0.03) * max(1.0, size[0] / max(size[1], 1))
+    cam.location = centre + n * reach
+    _track(cam)
     scene.camera = cam
 
     # A sun's irradiance does not fall off with distance, so the exposure is
-    # predictable no matter how large the object is.  68 deg off the camera
-    # axis is what makes the groove readable -- head-on light hides it.
-    sun_data = bpy.data.lights.new("key", type="SUN")
-    sun_data.energy, sun_data.angle = 2.5, math.radians(3)
-    sun = bpy.data.objects.new("key", sun_data)
-    scene.collection.objects.link(sun)
-    _aim(sun, 68.0, 18.0)
+    # predictable no matter how large the object is.  Grazing across the
+    # scratch is what makes the groove readable.
+    key_data = bpy.data.lights.new("key", type="SUN")
+    key_data.energy, key_data.angle = 2.5, math.radians(3)
+    key = bpy.data.objects.new("key", key_data)
+    scene.collection.objects.link(key)
+    key.location = centre + across * 0.95 + n * 0.32
+    _track(key)
 
     fill_data = bpy.data.lights.new("fill", type="SUN")
     fill_data.energy = 0.35
     fill = bpy.data.objects.new("fill", fill_data)
     scene.collection.objects.link(fill)
-    _aim(fill, -55.0, 10.0)
+    fill.location = centre - across * 0.8 + n * 0.55
+    _track(fill)
 
     scene.render.engine = "CYCLES"        # CPU Cycles always works headless
     scene.cycles.samples = 48
-    scene.render.resolution_x = scene.render.resolution_y = 900
-    scene.render.filepath = cfg["preview"]
+    # square_structure's own material is nearly black, and a groove read by its
+    # shadow disappears entirely at that exposure.
+    scene.view_settings.exposure = 2.0
+    scene.render.resolution_x, scene.render.resolution_y = int(size[0]), int(size[1])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    scene.render.filepath = str(out)
     bpy.ops.render.render(write_still=True)
-    print(f"[scratch]   preview -> {cfg['preview']}")
+    print(f"[scratch]   preview -> {out}")
 
 
 # ============================================================================
-# stage 1 -- outer process (numpy + PIL + pxr)
+# stage 1 -- outer process (numpy + PIL + trimesh + pxr)
 # ============================================================================
 
-def measure_mesh(obj_path: Path) -> dict:
-    """Find the dominant outward-facing cylindrical wall of the source mesh."""
+def load_surface(object_name: str):
+    """The surface scratches may land on, and the full mesh they get stamped on.
+
+    ``sample`` is an assembly: source.obj carries the fixture too, and only
+    target.ply is the part under inspection.  A scratch belongs on the part.
+    """
+    import trimesh
+
+    mesh_dir = DATA_ROOT / object_name / "mesh"
+    full = trimesh.load(str(mesh_dir / "source.obj"), force="mesh")
+    target_path = next((mesh_dir / n for n in ("target.ply", "target.obj")
+                        if (mesh_dir / n).exists()), None)
+    target = trimesh.load(str(target_path), force="mesh") if target_path else full
+    target.merge_vertices()
+    return target, target_path
+
+
+def tangent_frame(normal, np):
+    """A deterministic pair of tangents, so --angle-deg means the same thing twice."""
+    ref = np.array([0.0, 0.0, 1.0])
+    if abs(float(normal @ ref)) > 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    t0 = np.cross(ref, normal)
+    t0 /= np.linalg.norm(t0)
+    return t0, np.cross(normal, t0)
+
+
+def _footprint_is_smooth(mesh, centre, basis, half, smooth_deg: float, np) -> bool:
+    """True if no crease runs through the scratch's own box.
+
+    A ball around the centre asks far too much: a scratch is thin, so a crease
+    10mm off to the side is irrelevant, and demanding a clear ball rejected 55%
+    of square_structure's surface.  The box is the scratch itself.
+    """
+    local = np.abs((mesh.vertices - centre) @ basis.T)
+    close = (local <= half).all(axis=1)
+    faces = np.flatnonzero(close[mesh.faces].any(axis=1))
+    if not len(faces):
+        return False
+    inside = np.zeros(len(mesh.faces), bool)
+    inside[faces] = True
+    pair = mesh.face_adjacency
+    both = inside[pair[:, 0]] & inside[pair[:, 1]]
+    return not bool((mesh.face_adjacency_angles[both] > math.radians(smooth_deg)).any())
+
+
+def plan_scratches(object_name: str, args) -> list:
+    """Where the scratches go: from --spec, from --at, or sampled at random."""
     import numpy as np
+    import trimesh
 
-    verts, faces = [], []
-    with obj_path.open() as fh:
-        for line in fh:
-            if line.startswith("v "):
-                verts.append(line.split()[1:4])
-            elif line.startswith("f "):
-                faces.append([t.split("/")[0] for t in line.split()[1:4]])
-    v = np.asarray(verts, dtype=np.float64)
-    f = np.asarray(faces, dtype=np.int64) - 1
+    if args.spec:
+        spec = json.loads(Path(args.spec).read_text())
+        return [dict(s) for s in spec["scratches"]]
 
-    tri = v[f]
-    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    area = np.linalg.norm(n, axis=1) / 2
-    nn = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
-    centre = tri.mean(1)
-    radius = np.linalg.norm(centre[:, :2], axis=1)
+    target, target_path = load_surface(object_name)
+    lengths = args.length_mm if len(args.length_mm) == 2 else args.length_mm * 2
+    lo, hi = float(min(lengths)), float(max(lengths))
 
-    # lateral (not a cap) and facing away from the axis (not a bore wall)
-    lateral = (np.abs(nn[:, 2]) < 0.3) & (
-        (centre[:, 0] * nn[:, 0] + centre[:, 1] * nn[:, 1]) > 0
-    )
-    if not lateral.any():
-        raise SystemExit(f"{obj_path}: no outward-facing lateral surface found")
+    if args.at is not None:
+        point = np.asarray(args.at, dtype=np.float64) / 1000.0
+        closest, _, face = trimesh.proximity.closest_point(target, [point])
+        centre, normal = closest[0], target.face_normals[face[0]]
+        t0, t1 = tangent_frame(normal, np)
+        a = math.radians(args.angle_deg)
+        return [_placement(args.scratch, centre, normal,
+                           math.cos(a) * t0 + math.sin(a) * t1, lo, args.strength, np)]
 
-    # the radius band holding the most area is the outer wall
-    hist, edges = np.histogram(radius[lateral], bins=64, weights=area[lateral])
-    b = int(hist.argmax())
-    band = lateral & (radius >= edges[b]) & (radius <= edges[b + 1])
-    r_outer = float(np.average(radius[band], weights=area[band]))
+    if not SCRATCH_DIR.is_dir():
+        sys.exit(f"scratch library not found: {SCRATCH_DIR}")
+    library = sorted(SCRATCH_DIR.glob("*.png"))
+    if not library:
+        sys.exit(f"no scratch PNGs under {SCRATCH_DIR}")
 
-    circumference = 2 * math.pi * r_outer
-    z_min, z_max = float(v[:, 2].min()), float(v[:, 2].max())
-    m_per_uv = max(circumference, z_max - z_min)
+    rng = np.random.default_rng(args.seed)
+    print(f"[scratch] placing {args.random} scratch(es) on "
+          f"{(target_path or (DATA_ROOT / object_name / 'mesh' / 'source.obj')).name} "
+          f"({target.area * 1e4:.1f}cm2), seed={args.seed}")
+
+    placed, tries = [], 0
+    rejected = {"downward": 0, "crease": 0, "off the edge": 0, "too close": 0}
+    while len(placed) < args.random and tries < 4000:
+        tries += 1
+        points, faces = trimesh.sample.sample_surface(target, 1, seed=int(rng.integers(1 << 31)))
+        centre, normal = points[0], target.face_normals[faces[0]]
+        # Same rule as the viewpoint bottom filter: a downward face is not
+        # something the camera inspects, so do not put a defect there.
+        if float(normal[2]) < -math.cos(math.radians(80.0)):
+            rejected["downward"] += 1
+            continue
+        length = float(rng.uniform(lo, hi))
+        # Far enough apart that the scratches themselves do not overlap.  The
+        # decal *windows* may overlap -- they are mostly flat margin.
+        if any(np.linalg.norm(centre - np.asarray(p["center"]))
+               < 0.6 * (length + p["length_mm"]) / 1000.0 for p in placed):
+            rejected["too close"] += 1
+            continue
+        t0, t1 = tangent_frame(normal, np)
+        a = float(rng.uniform(0.0, 2 * math.pi))
+        direction = math.cos(a) * t0 + math.sin(a) * t1
+        half = np.array([length / 1000.0 * SMOOTH_RADIUS_FACTOR,
+                         max(length / 1000.0 * 0.06, 0.002),
+                         length / 1000.0 * SMOOTH_RADIUS_FACTOR])
+        if not _footprint_is_smooth(target, centre,
+                                    np.stack([direction, np.cross(normal, direction), normal]),
+                                    half, args.smooth_deg, np):
+            rejected["crease"] += 1
+            continue
+        # Both ends have to land on the part.  Without this a scratch sampled
+        # near a rim hangs half of itself off the edge into thin air.  The test
+        # is a ray inward from each end, not a distance to the surface: on a
+        # curved wall the tangent-plane end legitimately floats above it (5.6mm
+        # on this 23mm-radius cylinder), but it still has material beneath it.
+        ends = np.array([centre + direction * (length / 2000.0),
+                         centre - direction * (length / 2000.0)]) + normal * 1e-3
+        hit, ray_id = target.ray.intersects_location(
+            ends, np.repeat(-normal[None], 2, axis=0), multiple_hits=False)[:2]
+        if len(set(ray_id.tolist())) < 2 or (
+                np.linalg.norm(hit - ends[ray_id], axis=1) > length / 1000.0).any():
+            rejected["off the edge"] += 1
+            continue
+        png = library[int(rng.integers(len(library)))]
+        placed.append(_placement(png, centre, normal,
+                                 math.cos(a) * t0 + math.sin(a) * t1,
+                                 length, args.strength, np))
+    if len(placed) < args.random:
+        why = ", ".join(f"{k} {v}" for k, v in rejected.items())
+        sys.exit(f"only placed {len(placed)}/{args.random} scratches in {tries} tries "
+                 f"(rejected: {why}) -- try a shorter --length-mm")
+    return placed
+
+
+def _placement(png, centre, normal, direction, length_mm: float, strength: float, np) -> dict:
+    normal = np.asarray(normal, dtype=np.float64)
+    normal = normal / np.linalg.norm(normal)
+    direction = np.asarray(direction, dtype=np.float64)
+    direction = direction - normal * float(normal @ direction)     # keep it tangent
+    direction = direction / np.linalg.norm(direction)
     return {
-        "r_outer": r_outer,
-        "circumference": circumference,
-        "z_min": z_min,
-        "z_max": z_max,
-        "wall_z": (float(centre[band, 2].min()), float(centre[band, 2].max())),
-        "wall_area": float(area[band].sum()),
-        "m_per_uv": m_per_uv,
-        "bbox_min": v.min(0).tolist(),
-        "bbox_max": v.max(0).tolist(),
+        "png": str(Path(png)),
+        "center": [float(x) for x in centre],
+        "normal": [float(x) for x in normal],
+        "direction": [float(x) for x in direction],
+        "length_mm": float(length_mm),
+        "strength": float(strength),
     }
 
 
 def composite_normal_map(scratch: Path, out: Path, *, size: int,
-                         length_px: float, u: float, v: float,
-                         strength: float) -> tuple[int, int]:
-    """Alpha-composite an already-tangent-space scratch onto a flat canvas."""
+                         length_px: float, strength: float) -> tuple[int, int]:
+    """Alpha-composite an already-tangent-space scratch onto a flat canvas.
+
+    One scratch per texture, centred, long axis along +u.  The border stays
+    flat, which is what the clamped wrap reads for faces that reach past the
+    decal window.
+    """
     import numpy as np
     from PIL import Image
 
@@ -325,6 +696,8 @@ def composite_normal_map(scratch: Path, out: Path, *, size: int,
     if len(xs) == 0:
         raise SystemExit(f"{scratch}: fully transparent, nothing to stamp")
     src = src.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+    if src.height > src.width:      # the long axis is the scratch's own axis
+        src = src.transpose(Image.ROTATE_90)
 
     scale = length_px / max(src.width, src.height)
     dst = (max(1, round(src.width * scale)), max(1, round(src.height * scale)))
@@ -340,14 +713,15 @@ def composite_normal_map(scratch: Path, out: Path, *, size: int,
     layer = np.zeros((size, size, 3), np.float32)
     alpha = np.zeros((size, size, 1), np.float32)
     h, w = stamp.shape[:2]
-    y0 = int(round((1.0 - v) * size - h / 2))       # UV origin is bottom-left
-    x0 = int(round(u * size - w / 2))
+    y0 = int(round(size / 2 - h / 2))
+    x0 = int(round(size / 2 - w / 2))
     row = np.arange(y0, y0 + h)
-    col = np.arange(x0, x0 + w) % size              # U wraps around the cylinder
-    keep = (row >= 0) & (row < size)
-    idx = np.ix_(row[keep], col)
-    layer[idx] = sn[keep]
-    alpha[idx] = sa[keep]
+    col = np.arange(x0, x0 + w)
+    keep_r = (row >= 0) & (row < size)
+    keep_c = (col >= 0) & (col < size)
+    idx = np.ix_(row[keep_r], col[keep_c])
+    layer[idx] = sn[np.ix_(keep_r, keep_c)]
+    alpha[idx] = sa[np.ix_(keep_r, keep_c)]
 
     flat = np.zeros((size, size, 3), np.float32)
     flat[:, :, 2] = 1.0
@@ -360,7 +734,41 @@ def composite_normal_map(scratch: Path, out: Path, *, size: int,
     return dst
 
 
-def verify_usd(usd: Path, expect_bbox: tuple[list, list], reference: Path | None) -> None:
+def obj_bbox(obj_path: Path) -> tuple[list, list]:
+    """The OBJ's own bounds, read from the file the Blender stage imports."""
+    import numpy as np
+
+    verts = [line.split()[1:4] for line in obj_path.read_text().splitlines()
+             if line.startswith("v ")]
+    v = np.asarray(verts, dtype=np.float64)
+    return v.min(0).tolist(), v.max(0).tolist()
+
+
+def clamp_texture_wrap(usd: Path) -> int:
+    """Force wrapS/wrapT to clamp on every normal texture.
+
+    A patch face may reach past the decal window.  With the USD default (black
+    or repeat, depending on the renderer) that shows up as a tiled scratch or a
+    black wall; clamped, it reads the flat border and stays invisible.
+    """
+    from pxr import Sdf, Usd, UsdShade
+
+    stage = Usd.Stage.Open(str(usd))
+    n = 0
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Shader":
+            continue
+        shader = UsdShade.Shader(prim)
+        if shader.GetIdAttr().Get() != "UsdUVTexture":
+            continue
+        for key in ("wrapS", "wrapT"):
+            shader.CreateInput(key, Sdf.ValueTypeNames.Token).Set("clamp")
+        n += 1
+    stage.GetRootLayer().Save()
+    return n
+
+
+def verify_usd(usd: Path, expect_bbox: tuple[list, list], n_scratches: int) -> None:
     """Fail loudly on the failure modes that are invisible until Isaac loads."""
     from pxr import Gf, Usd, UsdGeom, UsdShade
 
@@ -383,42 +791,40 @@ def verify_usd(usd: Path, expect_bbox: tuple[list, list], reference: Path | None
     assert "primvars:st" in names, f"no UV primvar exported (got {names})"
     assert g.GetNormalsAttr().Get(), "no normals exported"
 
-    shaders = {p.GetPath().name: UsdShade.Shader(p)
-               for p in stage.Traverse() if p.GetTypeName() == "Shader"}
-    surf = next((s for s in shaders.values()
-                 if s.GetIdAttr().Get() == "UsdPreviewSurface"), None)
-    assert surf is not None, "no UsdPreviewSurface shader"
-    nrm = surf.GetInput("normal")
-    assert nrm and nrm.HasConnectedSource(), "BSDF normal input is not connected"
-    tex = UsdShade.Shader(nrm.GetConnectedSource()[0].GetPrim())
-    assert tex.GetIdAttr().Get() == "UsdUVTexture", "normal source is not a texture"
+    surfaces = [UsdShade.Shader(p) for p in stage.Traverse()
+                if p.GetTypeName() == "Shader"
+                and UsdShade.Shader(p).GetIdAttr().Get() == "UsdPreviewSurface"]
+    assert surfaces, "no UsdPreviewSurface shader"
 
-    cs = tex.GetInput("sourceColorSpace").Get()
-    assert cs == "raw", f"texture colorspace is {cs!r}, expected 'raw'"
-    for key, want in (("scale", (2, 2, 2, 2)), ("bias", (-1, -1, -1, -1))):
-        got = tex.GetInput(key).Get()
-        assert got and tuple(got) == want, f"texture {key}={got}, expected {want}"
+    textured = 0
+    for surf in surfaces:
+        nrm = surf.GetInput("normal")
+        if not (nrm and nrm.HasConnectedSource()):
+            continue                      # the base material carries no normal map
+        tex = UsdShade.Shader(nrm.GetConnectedSource()[0].GetPrim())
+        assert tex.GetIdAttr().Get() == "UsdUVTexture", "normal source is not a texture"
 
-    asset = tex.GetInput("file").Get()
-    assert asset and Path(asset.resolvedPath).exists(), (
-        f"texture path does not resolve: {asset}"
-    )
-    st = tex.GetInput("st")
-    assert st and st.HasConnectedSource(), "texture st input is not connected"
+        cs = tex.GetInput("sourceColorSpace").Get()
+        assert cs == "raw", f"texture colorspace is {cs!r}, expected 'raw'"
+        for key, want in (("scale", (2, 2, 2, 2)), ("bias", (-1, -1, -1, -1))):
+            got = tex.GetInput(key).Get()
+            assert got and tuple(got) == want, f"texture {key}={got}, expected {want}"
+        for key in ("wrapS", "wrapT"):
+            got = tex.GetInput(key).Get()
+            assert got == "clamp", f"texture {key}={got!r}, expected 'clamp'"
 
+        asset = tex.GetInput("file").Get()
+        assert asset and Path(asset.resolvedPath).exists(), (
+            f"texture path does not resolve: {asset}")
+        st = tex.GetInput("st")
+        assert st and st.HasConnectedSource(), "texture st input is not connected"
+        textured += 1
+
+    assert textured == n_scratches, (
+        f"{textured} materials carry a normal map, expected {n_scratches}")
     print(f"[scratch] verified {usd}")
     print(f"[scratch]   extent {tuple(ext[0])} .. {tuple(ext[1])}")
-    print(f"[scratch]   texture {asset.path}")
-
-    if reference and reference.exists():
-        ref = Usd.Stage.Open(str(reference))
-        ref_ids = sorted(UsdShade.Shader(p).GetIdAttr().Get()
-                         for p in ref.Traverse() if p.GetTypeName() == "Shader")
-        got_ids = sorted(s.GetIdAttr().Get() for s in shaders.values())
-        assert got_ids == ref_ids, (
-            f"shader network {got_ids} differs from precedent {reference.name} {ref_ids}"
-        )
-        print(f"[scratch]   shader network matches {reference.name}: {got_ids}")
+    print(f"[scratch]   {textured} scratch material(s), UV primvar and normals present")
 
 
 def stamp_provenance(usd: Path, params: dict) -> None:
@@ -435,76 +841,91 @@ def stamp_provenance(usd: Path, params: dict) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Stamp a scratch normal map onto data/{object}/mesh/source.usd")
+        description="Stamp scratch normal maps onto data/{object}/mesh/source.usd")
     p.add_argument("--object", required=True, help="Object name (e.g. cylinder_sample)")
-    p.add_argument("--scratch", required=True, type=Path,
-                   help="Scratch PNG (tangent-space normal map with alpha)")
-    p.add_argument("--length-mm", type=float, default=20.0,
-                   help="Scratch length along its long axis, in mm (default 20)")
-    p.add_argument("--u", type=float, default=0.5,
-                   help="Circumferential position, 0..1 (default 0.5)")
-    p.add_argument("--v", default="center",
-                   help="Height position 0..1, or 'center' of the wall (default)")
+    p.add_argument("--scratch", type=Path,
+                   help="Scratch PNG for --at (tangent-space normal map with alpha)")
+    p.add_argument("--random", type=int, metavar="N",
+                   help="Place N scratches at random on the inspected surface")
+    p.add_argument("--seed", type=int, default=0, help="Seed for --random (default 0)")
+    p.add_argument("--spec", type=Path,
+                   help="Replay a scratches.json written by an earlier run")
+    p.add_argument("--at", type=float, nargs=3, metavar=("X", "Y", "Z"),
+                   help="Place one scratch here (object frame, mm; snapped to the surface)")
+    p.add_argument("--angle-deg", type=float, default=0.0,
+                   help="Direction in the tangent plane for --at (default 0)")
+    p.add_argument("--length-mm", type=float, nargs="+", default=[20.0],
+                   help="Scratch length in mm; two values = a random range (default 20)")
     p.add_argument("--strength", type=float, default=1.0,
                    help="Groove depth, 1.0 = source normals unchanged (default 1.0)")
-    p.add_argument("--tex-size", type=int, default=2048)
-    p.add_argument("--smooth-deg", type=float, default=30.0)
+    p.add_argument("--tex-size", type=int, default=1024,
+                   help="Pixels per scratch texture (default 1024)")
+    p.add_argument("--smooth-deg", type=float, default=30.0,
+                   help="Above this dihedral angle an edge is a crease (default 30)")
     p.add_argument("--roughness", type=float, default=0.5)
-    p.add_argument("--preview", type=Path, help="Also render a raking-light preview PNG")
+    p.add_argument("--preview-dir", type=Path,
+                   help="Also render one raking-light preview PNG per scratch")
+    p.add_argument("--preview-size", default="900x900", metavar="WxH",
+                   help="Preview resolution, e.g. 1600x800 (default 900x900)")
     p.add_argument("--force", action="store_true",
                    help="Refresh source_prev.usd from the current source.usd")
     p.add_argument("--blender", type=Path,
                    default=Path(shutil.which("blender") or "/usr/local/bin/blender"))
     args = p.parse_args()
 
+    if sum(x is not None for x in (args.random, args.at, args.spec)) != 1:
+        sys.exit("pick exactly one of --random N, --at X Y Z, --spec FILE")
+    if args.at is not None and not args.scratch:
+        sys.exit("--at needs --scratch PNG")
+    if args.scratch and not args.scratch.exists():
+        sys.exit(f"scratch PNG not found: {args.scratch}")
+
     mesh_dir = DATA_ROOT / args.object / "mesh"
     obj_path = mesh_dir / "source.obj"
     usd_path = mesh_dir / "source.usd"
     prev_path = mesh_dir / "source_prev.usd"
-    tex_path = mesh_dir / "textures" / "scratch_normal.png"
+    spec_path = mesh_dir / "scratches.json"
 
     if not obj_path.exists():
         sys.exit(f"source.obj not found: {obj_path}")
-    if not args.scratch.exists():
-        sys.exit(f"scratch PNG not found: {args.scratch}")
     if not args.blender.exists():
         sys.exit(f"blender not found: {args.blender} (pass --blender)")
 
-    m = measure_mesh(obj_path)
-    m_per_uv = m["m_per_uv"]
-    if args.v == "center":
-        v = (sum(m["wall_z"]) / 2 - m["z_min"]) / m_per_uv
-    else:
-        v = float(args.v)
-    u = args.u % 1.0
-
-    print(f"[scratch] {args.object}: outer wall r={m['r_outer'] * 1000:.1f}mm "
-          f"circumference={m['circumference'] * 1000:.1f}mm "
-          f"height={(m['z_max'] - m['z_min']) * 1000:.1f}mm "
-          f"area={m['wall_area'] * 1e4:.1f}cm2")
-
-    length_px = args.length_mm / 1000.0 / m_per_uv * args.tex_size
-    dst = composite_normal_map(
-        args.scratch, tex_path, size=args.tex_size, length_px=length_px,
-        u=u, v=v, strength=args.strength,
-    )
-    print(f"[scratch] texture {tex_path.relative_to(PROJECT_ROOT)} "
-          f"({args.tex_size}^2, stamp {dst[0]}x{dst[1]}px for {args.length_mm}mm) "
-          f"at u={u:.3f} v={v:.3f} strength={args.strength}")
+    scratches = plan_scratches(args.object, args)
+    for i, s in enumerate(scratches):
+        missing = not Path(s["png"]).exists()
+        if missing:
+            sys.exit(f"scratch PNG not found: {s['png']}")
+        s["span_m"] = s["length_mm"] / 1000.0 * SPAN_FACTOR
+        s["texture"] = str(mesh_dir / "textures" / f"scratch_{i}.png")
+        s["material"] = f"{args.object}_scratch{i}"
+        s["base_color"] = [0.9, 0.9, 0.9]
+        s["roughness"] = args.roughness
+        dst = composite_normal_map(
+            Path(s["png"]), Path(s["texture"]), size=args.tex_size,
+            length_px=args.tex_size / SPAN_FACTOR, strength=s["strength"])
+        # How much surface the decal actually needs: the stamp's own box in
+        # metres, plus a margin.  The rest of the window is flat.
+        stamp_w = dst[0] / args.tex_size * s["span_m"]
+        stamp_h = dst[1] / args.tex_size * s["span_m"]
+        s["half_len_m"] = stamp_w * 0.5 * 1.25
+        s["half_wid_m"] = max(stamp_h * 0.5 * 1.5, stamp_w * 0.06)
+        c = s["center"]
+        print(f"[scratch] {i}: {Path(s['png']).name} {s['length_mm']:.0f}mm at "
+              f"({c[0] * 1000:.0f}, {c[1] * 1000:.0f}, {c[2] * 1000:.0f})mm "
+              f"-> {Path(s['texture']).name} ({args.tex_size}^2, stamp {dst[0]}x{dst[1]}px "
+              f"in a {s['span_m'] * 1000:.0f}mm window)")
 
     if usd_path.exists() and (args.force or not prev_path.exists()):
         shutil.copy2(usd_path, prev_path)
         print(f"[scratch] backed up -> {prev_path.relative_to(PROJECT_ROOT)}")
 
     cfg = {
-        "obj": str(obj_path), "usd": str(usd_path), "texture": str(tex_path),
-        "material_name": f"{args.object}_scratch",
-        "base_color": [0.9, 0.9, 0.9], "roughness": args.roughness,
-        "smooth_deg": args.smooth_deg,
-        "m_per_uv": m_per_uv, "circumference": m["circumference"],
-        "r_outer": m["r_outer"], "z_min": m["z_min"],
-        "u": u, "v": v,
-        "preview": str(args.preview) if args.preview else None,
+        "object": args.object, "obj": str(obj_path), "usd": str(usd_path),
+        "smooth_deg": args.smooth_deg, "roughness": args.roughness,
+        "scratches": scratches,
+        "preview_dir": str(args.preview_dir) if args.preview_dir else None,
+        "preview_size": [int(v) for v in str(args.preview_size).lower().split("x")],
     }
     proc = subprocess.run(
         [str(args.blender), "-b", "--factory-startup", "--python", str(Path(__file__).resolve()),
@@ -517,13 +938,22 @@ def main() -> None:
     if proc.returncode != 0:
         sys.exit(f"blender stage failed (rc={proc.returncode}):\n{proc.stdout[-4000:]}\n{proc.stderr[-2000:]}")
 
-    verify_usd(usd_path, (m["bbox_min"], m["bbox_max"]),
-               DATA_ROOT / "square_structure" / "mesh" / "source.usd")
-    stamp_provenance(usd_path, {
-        "scratch": args.scratch, "lengthMm": args.length_mm,
-        "u": round(u, 4), "v": round(v, 4), "strength": args.strength,
-        "texSize": args.tex_size,
-    })
+    n_clamped = clamp_texture_wrap(usd_path)
+    print(f"[scratch] wrap=clamp on {n_clamped} texture(s)")
+    verify_usd(usd_path, obj_bbox(obj_path), len(scratches))
+
+    # The ground truth of where the defects are -- and the input that replays
+    # this exact run with --spec.
+    record = {
+        "object": args.object,
+        "scratches": [{k: s[k] for k in
+                       ("png", "center", "normal", "direction", "length_mm", "strength")}
+                      for s in scratches],
+    }
+    spec_path.write_text(json.dumps(record, indent=2) + "\n")
+    print(f"[scratch] recorded -> {spec_path.relative_to(PROJECT_ROOT)}")
+    stamp_provenance(usd_path, {"spec": spec_path.name, "count": len(scratches),
+                                "texSize": args.tex_size})
     print(f"[scratch] done -> {usd_path.relative_to(PROJECT_ROOT)}")
 
 
