@@ -53,6 +53,13 @@ docker exec -it ros-jazzy bash -c \
    && cd /workspace && ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py'
 ```
 
+The container sets `ROS_DOMAIN_ID=30` (compose.yaml) so this stack does not see
+other ROS 2 nodes on the same host (host networking shares DDS domain 0 with every
+other user's stack; a foreign `/controller_manager` or `/robot_description` makes
+`ros2_control_node` die or the spawner talk to the wrong manager). A container
+created before that line exists does not have it — `export ROS_DOMAIN_ID=30` in
+**every** shell (the Isaac app shell too), or recreate the container.
+
 Run **only one** shell-2 stack at a time — a leftover stack keeps publishing
 `/robot_description` and the next `ros2_control_node` picks up the wrong hardware
 and segfaults. `Ctrl+C` the previous stack fully before starting another.

@@ -21,6 +21,13 @@ services:
     tty: true
     environment:
       DISPLAY: ${DISPLAY:-:1}
+      # host 네트워크라 같은 머신의 다른 ROS 2 노드(기본 도메인 0)가 전부 보인다. 남의
+      # /controller_manager·/robot_description·/joint_states 가 섞이면 spawner 가 엉뚱한
+      # 매니저와 얘기하고 ros2_control_node 가 남의 URDF 를 받아 죽는다(2026-09-30 실측:
+      # 다른 사용자의 humanoid 스택). 전용 도메인으로 격리한다 — 컨테이너의 모든 셸(앱·
+      # launch·CLI)이 이 값을 물려받아야 서로 보인다. 이 값 없이 만든 컨테이너면 셸마다
+      # `export ROS_DOMAIN_ID=30`.
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-30}
       NVIDIA_VISIBLE_DEVICES: all
       # `graphics` (in `all`) makes the NVIDIA Container Toolkit inject the
       # Vulkan ICD Isaac Sim's renderer needs. Without it Isaac dies with

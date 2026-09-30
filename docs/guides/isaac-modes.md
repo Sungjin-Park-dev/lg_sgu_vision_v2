@@ -71,6 +71,8 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
 **주의**
 - 셸1을 먼저 Play한 뒤 셸2를 실행한다. 순서가 바뀌면 `/isaac_joint_states`가 없어 컨트롤러가 gate에서 타임아웃된다(`Switch controller timed out`).
 - 셸2 스택은 한 번에 하나만 띄운다 — sim/real을 동시에 띄우면 `/robot_description` 충돌로 `ros2_control_node`가 segfault한다.
+- 앱도 한 번에 하나만. 두 개가 떠 있으면 `/looksgood/mode` 를 서로 다르게 발행해 게이트가 흔들린다(`pgrep -af isaac_pipeline` 로 확인).
+- **같은 머신의 다른 ROS 노드와 섞이지 않게** `ROS_DOMAIN_ID` 를 쓴다. 컨테이너는 host 네트워크라 도메인 0 에는 다른 사용자의 스택(다른 `/controller_manager`, `/robot_description`, `/joint_states`)이 그대로 보이고, 그러면 launch 가 남의 매니저와 얘기하거나 `ros2_control_node` 가 남의 URDF 를 받아 죽는다. `docker/compose.yaml` 이 `ROS_DOMAIN_ID=30` 을 컨테이너 환경에 넣으므로 새 컨테이너의 셸은 자동으로 격리된다. 그 전에 만든 컨테이너면 **앱 셸·launch 셸·확인 셸 모두**에서 `export ROS_DOMAIN_ID=30` 을 먼저 친다(Isaac 의 ROS 2 브리지도 이 변수를 읽는다). `ros2 node list` 에 모르는 노드가 보이면 격리가 안 된 것이다.
 
 ## Real 또는 mock
 

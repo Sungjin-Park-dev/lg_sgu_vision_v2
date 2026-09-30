@@ -174,7 +174,8 @@ docker exec -it ros-jazzy bash</pre>
 
 <div class="note">
   <span class="note__label">셸을 여러 개 쓴다</span>
-  <p>MoveIt으로 제어할 때는 터미널이 <strong>두 개</strong> 필요하다. 둘 다 위 <code>docker exec -it ros-jazzy bash</code>로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.</p>
+  <p>같은 컴퓨터에서 다른 사람의 ROS 프로그램이 돌고 있으면 서로 섞여서 로봇 스택이 안 뜬다. 컨테이너가 <code>ROS_DOMAIN_ID=30</code>으로 격리돼 있지만, 그 설정이 들어가기 전에 만든 컨테이너라면 여는 터미널마다 <code>export ROS_DOMAIN_ID=30</code>을 먼저 친다.</p>
+<p>MoveIt으로 제어할 때는 터미널이 <strong>두 개</strong> 필요하다. 둘 다 위 <code>docker exec -it ros-jazzy bash</code>로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.</p>
 </div>
 
 <h3>앱 실행 명령</h3>
