@@ -402,6 +402,15 @@ def get_viewpoint_path(object_name: str, num_viewpoints: int, filename: str = "v
     return DATA_ROOT / object_name / "viewpoint" / str(num_viewpoints) / filename
 
 
+def get_scan_dir(object_name: str, name: str = "default") -> Path:
+    """도면 없는 복원용 depth 스캔 폴더 — ``data/{object_name}/scan/{name}``.
+
+    스캔 계획·프레임·복원 메시가 함께 산다(core/reconstruction/storage.py 가 안의 규약을 소유).
+    다시 찍으면 나오는 산출물이라 gitignore 대상이다.
+    """
+    return DATA_ROOT / object_name / "scan" / name
+
+
 def resolve_viewpoint_path(object_name: str, num_viewpoints: int) -> Path:
     """읽을 viewpoints h5 를 고른다 — writer 가 방법 접미사를 붙이기 때문.
 

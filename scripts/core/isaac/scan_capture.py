@@ -7,12 +7,10 @@
 pose 의 시점이 어긋날 일이 없다.
 
 스캔 카메라는 ``camera_optical_frame`` 아래 별도 prim 이다(검사 카메라는 50mm 시야라
-스캔에 못 쓴다). 장착 위치·내부 파라미터는 plan.json 의 camera 블록(= sensor.ScanCameraSpec).
+스캔에 못 쓴다). 장착 위치·내부 파라미터는 계획의 camera(= sensor.ScanCameraSpec).
 
-출력: data/{object}/scan/{name}/frames/frame_###.npz
-    depth (H,W) float32 m — 광축 거리, 미적중 = inf
-    K (3,3), world_T_cam (4,4) OpenCV 광학 프레임(Isaac 이 렌더한 실제 자세)
-    q_cmd, q_meas (6,)
+출력: data/{object}/scan/{name}/frames/frame_###.npz — 키 규약은 reconstruction/storage.py
+(world_T_cam 은 Isaac 이 렌더한 실제 자세).
 
 Usage:
     uv run scripts/core/isaac/scan_capture.py --object cylinder_sample
@@ -36,6 +34,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 from common import config as _config  # noqa: E402
 from common import scene_config as _scene_config  # noqa: E402
 from core.isaac import scene as urscene  # noqa: E402
+from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.sensor import ScanCameraSpec  # noqa: E402
 
 JOINT_NAMES = [
@@ -130,12 +129,11 @@ def main():
     # app.close() 가 프로세스를 바로 끝내서, 파일로 리다이렉트된 stdout 의 블록 버퍼가 사라진다.
     sys.stdout.reconfigure(line_buffering=True)
     args = parse_args()
-    out = _config.DATA_ROOT / args.object / "scan" / args.name
-    plan = np.load(out / "plan.npz")
-    plan_meta = json.loads((out / "plan.json").read_text())
-    spec = ScanCameraSpec.from_dict(plan_meta["camera"])
-    q_plan = plan["q"][: args.limit] if args.limit else plan["q"]
-    T_plan = plan["world_T_cam"][: len(q_plan)]
+    out = storage.scan_dir(args.object, args.name)
+    plan = storage.load_plan(out)
+    spec = plan.camera
+    q_plan = plan.q[: args.limit] if args.limit else plan.q
+    T_plan = plan.world_T_cam[: len(q_plan)]
 
     _scene_config.apply_cli(args, _config)
     app = urscene.start_sim(headless=not args.gui, enable_ros_bridge=False)
@@ -166,10 +164,7 @@ def main():
     idx = np.array([art.get_dof_index(n) for n in JOINT_NAMES], dtype=np.int32)
     ctrl = art.get_articulation_controller()
 
-    frames_dir = out / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    for old in frames_dir.glob("frame_*.npz"):
-        old.unlink()
+    frames_dir = storage.clear_frames(out)
 
     K_isaac, prev_depth = None, None
     pose_err_mm, rot_err_deg, n_valid = [], [], []
@@ -187,8 +182,7 @@ def main():
         T = _pose_matrix(pos, quat)
         q_meas = np.asarray(art.get_joint_positions(joint_indices=idx), dtype=np.float64)
 
-        np.savez_compressed(frames_dir / f"frame_{i:03d}.npz", depth=depth, K=K_isaac,
-                            world_T_cam=T, q_cmd=q, q_meas=q_meas)
+        storage.save_frame(out, i, depth=depth, K=K_isaac, world_T_cam=T, q_cmd=q, q_meas=q_meas)
         dp = 1000.0 * float(np.linalg.norm(T[:3, 3] - T_plan[i][:3, 3]))
         cos = (np.trace(T_plan[i][:3, :3].T @ T[:3, :3]) - 1.0) / 2.0
         dr = float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))

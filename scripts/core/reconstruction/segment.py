@@ -1,4 +1,4 @@
-"""depth 픽셀마다 "물체인가" 를 판정한다 — 복원(reconstruct)과 뷰어(view_scan)가 같은 판정을 쓴다.
+"""depth 픽셀마다 "물체인가" 를 판정한다 — 복원(pipeline)과 뷰어(apps/scan_viewer)가 같은 판정을 쓴다.
 
 판정 순서(먼저 걸린 이유로 분류):
   INVALID   depth 가 없음(inf·NaN) 또는 센서 측정 범위 밖
@@ -15,22 +15,10 @@ import numpy as np
 
 from common import config, scene_config
 from common.math_utils import quaternion_to_rotation_matrix
+from core.reconstruction.sensor import pixel_world_points
 
 OBJECT, INVALID, OUTSIDE, OBSTACLE = 0, 1, 2, 3
 LABEL_NAMES = {OBJECT: "object", INVALID: "invalid", OUTSIDE: "outside ROI", OBSTACLE: "known obstacle"}
-
-
-def pixel_world_points(depth, K, world_T_cam, stride: int = 1):
-    """(H', W', 3) world 좌표 — stride 간격 픽셀만, 무효 depth 는 NaN."""
-    d = np.asarray(depth, dtype=np.float64)[::stride, ::stride]
-    h, w = d.shape
-    v, u = np.mgrid[0:h, 0:w]
-    u, v = u * stride, v * stride
-    x = (u - K[0, 2]) * d / K[0, 0]
-    y = (v - K[1, 2]) * d / K[1, 1]
-    pts = np.stack([x, y, d], axis=-1) @ world_T_cam[:3, :3].T + world_T_cam[:3, 3]
-    pts[~np.isfinite(d)] = np.nan
-    return pts
 
 
 def inside_obstacles(points: np.ndarray, margin_m: float) -> np.ndarray:

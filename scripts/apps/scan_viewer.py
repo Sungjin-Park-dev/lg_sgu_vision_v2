@@ -1,83 +1,43 @@
 #!/usr/bin/env python3
-"""캡처한 depth 프레임을 world 로 역투영해 보고, 정답 메시와의 거리로 좌표가 맞는지 잰다.
+"""스캔 뷰어 — 촬영한 depth 를 world 로 펼쳐 보고, 복원 메시·정답과 겹쳐 본다 (viser).
 
-점은 복원과 같은 판정(segment.classify_pixels)으로 나눠 그린다: 물체로 남긴 점(프레임별 색),
-씬 장애물이라 지운 점(빨강), ROI 밖이라 지운 점(회색). 물체 점이 정답 메시 표면에 얹히면
-(거리 ≈ 0) 내부 파라미터·카메라 pose·depth 규약과 지우기가 모두 맞다는 뜻이다. 정답 메시는
-시뮬레이션이라 있는 것이고, 실물에서는 이 검사를 못 한다.
+점은 복원과 같은 판정(core.reconstruction.segment)으로 나눠 그린다: 물체로 남긴 점(프레임별
+색), 씬 장애물이라 지운 점(빨강), ROI 밖이라 지운 점(회색). 물체 점이 정답 메시 표면에 얹히면
+(거리 ≈ 0) 내부 파라미터·카메라 pose·depth 규약과 지우기가 모두 맞다는 뜻이다 — 시작할 때
+프레임별 거리 표를 찍는다. 정답 메시는 시뮬레이션이라 있는 것이다(core.reconstruction.sim).
 
-reconstruct.py 를 돌렸으면 복원 메시(recon.ply)도 토글로 그린다.
-물체로 남긴 점을 합쳐 scan/{name}/merged.ply 로 남긴다(= TSDF 에 들어가는 점).
+reconstruct.py 를 돌렸으면 복원 메시(recon{_tag}.ply)도 토글로 그린다.
 
 Usage:
-    uv run scripts/core/reconstruction/view_scan.py --object cylinder_sample
-    uv run scripts/core/reconstruction/view_scan.py --object cylinder_sample --no-viser
+    uv run scripts/apps/scan_viewer.py --object cylinder_sample
+    uv run scripts/apps/scan_viewer.py --object curved_structure --tag n1_0.2_yes
+    uv run scripts/apps/scan_viewer.py --object cylinder_sample --no-viser   # 표만
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import colorsys
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config, scene_config  # noqa: E402
-from common.math_utils import quaternion_to_rotation_matrix  # noqa: E402
+from core.reconstruction import sim, storage  # noqa: E402
+from core.reconstruction.pipeline import FusionParams  # noqa: E402
 from core.reconstruction.segment import OBJECT, OBSTACLE, OUTSIDE, classify_pixels  # noqa: E402
-from core.reconstruction.sensor import ScanCameraSpec  # noqa: E402
 
 OBSTACLE_RGB = (230, 70, 70)       # 씬 장애물이라 지운 점
 OUTSIDE_RGB = (130, 130, 130)      # ROI 밖이라 지운 점
 
 
-def load_frames(scan: Path) -> list[dict]:
-    frames = []
-    for f in sorted((scan / "frames").glob("frame_*.npz")):
-        d = np.load(f)
-        frames.append({"name": f.stem, **{k: d[k] for k in d.files}})
-    if not frames:
-        sys.exit(f"no frames under {scan / 'frames'} — scan_capture.py 를 먼저 돌린다")
-    return frames
-
-
-def ground_truth_mesh(object_name: str):
-    import trimesh
-
-    mesh = trimesh.load(str(config.get_mesh_path(object_name, mesh_type="source")), force="mesh")
-    T = np.eye(4)
-    T[:3, :3] = quaternion_to_rotation_matrix(np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64))
-    T[:3, 3] = np.asarray(config.TARGET_OBJECT["position"], dtype=np.float64)
-    mesh.apply_transform(T)
-    return mesh
-
-
-def closest_on(mesh, query):
-    """정확한 최근접 거리(m)와 그 면의 법선 — Open3D RaycastingScene."""
-    import open3d as o3d
-
-    scene = o3d.t.geometry.RaycastingScene()
-    tm = o3d.t.geometry.TriangleMesh()
-    tm.vertex.positions = o3d.core.Tensor(np.asarray(mesh.vertices, dtype=np.float32))
-    tm.triangle.indices = o3d.core.Tensor(np.asarray(mesh.faces, dtype=np.int32))
-    scene.add_triangles(tm)
-    q = o3d.core.Tensor(np.asarray(query, dtype=np.float32))
-    res = scene.compute_closest_points(q)
-    nearest = res["points"].numpy().astype(np.float64)
-    prim = res["primitive_ids"].numpy()
-    dist = np.linalg.norm(nearest - query, axis=1)
-    return dist, np.asarray(mesh.face_normals)[prim]
-
-
 def frame_colors(n: int) -> np.ndarray:
-    import colorsys
-
     return np.array([[int(255 * c) for c in colorsys.hsv_to_rgb(i / max(n, 1), 0.75, 0.95)]
                      for i in range(n)], dtype=np.uint8)
 
@@ -87,9 +47,10 @@ def parse_args():
     p.add_argument("--object", required=True)
     scene_config.add_cli_argument(p)
     p.add_argument("--name", default="default")
+    p.add_argument("--tag", default="", help="recon_{tag}.ply 를 그린다")
     p.add_argument("--stride", type=int, default=2, help="depth 픽셀 간격 (점 수 조절)")
     p.add_argument("--roi-only", action="store_true", help="ROI 구 밖의 점은 그리지 않는다")
-    p.add_argument("--obstacle-margin-mm", type=float, default=1.5,
+    p.add_argument("--obstacle-margin-mm", type=float, default=FusionParams().obstacle_margin_mm,
                    help="reconstruct.py 와 같은 값이어야 같은 점이 지워진다")
     p.add_argument("--no-viser", action="store_true", help="표만 출력하고 끝낸다")
     p.add_argument("--host", default="0.0.0.0")
@@ -101,14 +62,11 @@ def main():
     args = parse_args()
     scene_config.apply_cli(args, config)
     config.apply_object_placement(args.object)
-    scan = config.DATA_ROOT / args.object / "scan" / args.name
-    plan = np.load(scan / "plan.npz")
-    spec = ScanCameraSpec.from_dict(json.loads((scan / "plan.json").read_text())["camera"])
-    roi_c, roi_r = plan["roi_center"], float(plan["roi_radius"])
-    frames = load_frames(scan)
-    gt = ground_truth_mesh(args.object)
-
-    import trimesh
+    scan = storage.scan_dir(args.object, args.name)
+    plan = storage.load_plan(scan)
+    spec, roi_c, roi_r = plan.camera, plan.roi_center, plan.roi_radius
+    frames = storage.load_frames(scan)
+    gt = sim.ground_truth_mesh(args.object)
 
     margin_m = args.obstacle_margin_mm / 1000.0
     print(f"{'frame':>10} {'object':>8} {'obstacle':>9} {'outside':>8} "
@@ -123,19 +81,16 @@ def main():
         obj = layers["object"][-1]
         sample = obj if len(obj) <= 20000 else obj[rng.choice(len(obj), 20000, replace=False)]
         if len(sample):
-            dist_mm = closest_on(gt, sample)[0] * 1000.0
+            dist_mm = sim.closest_on(gt, sample)[0] * 1000.0
             med, p95, p99 = (float(np.percentile(dist_mm, q)) for q in (50, 95, 99))
         else:
             med = p95 = p99 = float("nan")
         print(f"{fr['name']:>10} {len(obj):8d} {len(layers['obstacle'][-1]):9d} "
               f"{len(layers['outside'][-1]):8d} {med:7.3f} {p95:7.3f} {p99:7.3f}")
-
-    merged = np.concatenate(layers["object"])
-    trimesh.PointCloud(merged).export(str(scan / "merged.ply"))
-    print(f"merged {len(merged)} object points -> {(scan / 'merged.ply').relative_to(PROJECT_ROOT)}")
     if args.no_viser:
         return
 
+    import trimesh
     import viser
     from scipy.spatial.transform import Rotation
 
@@ -147,10 +102,9 @@ def main():
     server.scene.add_mesh_simple("/roi", vertices=(roi.vertices + roi_c).astype(np.float32),
                                  faces=roi.faces.astype(np.int32), color=(80, 160, 255),
                                  opacity=0.08)
-    recon_path = scan / "recon.ply"
+    recon = storage.load_recon(scan, args.tag)
     recon_handle = None
-    if recon_path.exists():
-        recon = trimesh.load(str(recon_path), force="mesh")
+    if recon is not None:
         recon_handle = server.scene.add_mesh_simple(
             "/reconstruction", vertices=recon.vertices.astype(np.float32),
             faces=recon.faces.astype(np.int32), color=(90, 200, 120), opacity=1.0)

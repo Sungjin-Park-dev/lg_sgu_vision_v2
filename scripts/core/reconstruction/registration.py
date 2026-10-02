@@ -1,10 +1,9 @@
-"""카메라 pose 오차 — 시뮬레이션용으로 섞고, ICP 다중 정렬로 바로잡는다.
+"""카메라 pose 를 ICP 다중 정렬로 바로잡는다 — ``refine_poses``.
 
 실물에서는 프레임마다 카메라 pose 를 로봇 FK + hand-eye 보정으로 얻는다. 거기엔 수백 µm ~ 수 mm
-오차가 섞인다. pose 가 틀리면 TSDF 가 같은 표면을 여러 겹으로 어긋나게 쌓는다.
-
-``perturb_poses``  참 pose 에 프레임별 무작위 강체 오차를 섞는다(시뮬레이션 전용).
-``refine_poses``   측정 pose 를 초기값으로 프레임 쌍별 ICP → 사전정보 붙은 포즈 그래프 최소제곱.
+오차가 섞인다. pose 가 틀리면 TSDF 가 같은 표면을 여러 겹으로 어긋나게 쌓는다. 측정 pose 를
+초기값으로 프레임 쌍별 ICP → 사전정보 붙은 포즈 그래프 최소제곱을 푼다. (오차를 일부러 섞는
+쪽은 시뮬레이션 전용이라 sim.perturb_poses 에 있다.)
 
 refine_poses 가 바로잡는 것은 **프레임끼리의 불일치**다. 모든 프레임에 똑같이 들어간 오차
 (예: hand-eye 보정의 고정 편차)는 프레임끼리 비교해서는 보이지 않는다 — 그건 복원 전체를
@@ -27,6 +26,9 @@ world 원점(로봇 베이스, 물체에서 ~0.8m)에서 강하게 얽히지 않
     미끄러지는 방향까지 안다고 주장하는데, 점-면 ICP 는 그 방향을 잡지 않는다.
   * 잘못 맞춰진 쌍이 섞인다. 간선 잔차에 Cauchy 가중(IRLS)을 걸어 큰 잔차의 간선을 눌러 둔다.
 
+Open3D ICP 는 멀티스레드라 같은 입력에서도 실행마다 결과가 µm 단위로 다르다(curved_structure
+1mm/0.2° 에서 프레임 간 오차 중앙값 0.2754 vs 0.2760mm).
+
 알려진 한계: 원기둥처럼 대칭인 물체는 대칭 방향(축 회전)의 정보가 "거의 0" 이지 0 은 아니라,
 ICP 가 그 방향으로 내놓는 헛값이 사전정보를 조금 이긴다(1mm/0.2° 오차에서 축 회전이 0.19° →
 0.88°). 대칭이라 모양은 안 변한다. 작은 고유값을 잘라 보았지만 curved_structure 가 오히려
@@ -43,49 +45,6 @@ from scipy.spatial.transform import Rotation
 from core.reconstruction.segment import OBJECT, classify_pixels
 
 
-def perturb_poses(poses: np.ndarray, trans_mm: float, rot_deg: float, seed: int = 0) -> np.ndarray:
-    """프레임마다 독립인 강체 오차를 섞은 pose. (N, 4, 4) → (N, 4, 4).
-
-    이동은 등방 가우시안으로, 축마다 σ = trans_mm/√3 이라 크기의 RMS 가 trans_mm 이다. 회전도
-    같은 식으로 rot_deg 가 RMS 각도다. 오차는 카메라 프레임에서 걸린다(카메라를 그 자리에서
-    살짝 밀고 돌린 것).
-    """
-    rng = np.random.default_rng(seed)
-    n = len(poses)
-    t = rng.normal(0.0, trans_mm / np.sqrt(3.0), size=(n, 3)) / 1000.0
-    r = rng.normal(0.0, np.radians(rot_deg) / np.sqrt(3.0), size=(n, 3))
-    E = np.tile(np.eye(4), (n, 1, 1))
-    E[:, :3, :3] = Rotation.from_rotvec(r).as_matrix()
-    E[:, :3, 3] = t
-    return poses @ E
-
-
-def _shift_rot(D: np.ndarray, p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    shift = np.linalg.norm((D @ p)[..., :3] - p[:3], axis=-1) * 1000.0
-    cos = (np.trace(D[..., :3, :3], axis1=-2, axis2=-1) - 1.0) / 2.0
-    return shift, np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
-
-
-def pose_errors(true_poses: np.ndarray, used_poses: np.ndarray, point) -> dict:
-    """pose 오차를 두 갈래로 나눠 잰다 — 점 ``point``(ROI 중심)의 밀림 mm 와 회전 deg.
-
-    카메라 원점의 이동만 보면 회전 오차가 숨는다. 물체가 있는 자리가 그 pose 로 얼마나 밀려
-    보이는지가 복원에 실제로 들어가는 오차다.
-
-      total     프레임별 전체 오차
-      common    모든 프레임에 공통인 부분(평균 변환) — 복원을 통째로 옮길 뿐 모양은 안 망친다
-      relative  공통 부분을 뺀 프레임끼리의 불일치 — 표면을 겹겹이 어긋나게 만드는 쪽
-    """
-    p = np.append(np.asarray(point, dtype=np.float64), 1.0)
-    # used 로 world 에 놓은 점 = used @ inv(true) @ p_true — 참 자리에서 얼마나 옮겨졌나
-    D = used_poses @ np.linalg.inv(true_poses)
-    M = _mean_transform(D)
-    total = _shift_rot(D, p)
-    common = _shift_rot(M, p)
-    relative = _shift_rot(np.linalg.inv(M) @ D, p)
-    return {"total": total, "common": (float(common[0]), float(common[1])), "relative": relative}
-
-
 def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride):
     """물체 점(ROI 중심 원점 좌표) + 법선 — 측정 pose 로 펼친다."""
     import open3d as o3d
@@ -97,13 +56,6 @@ def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride):
     pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=4.0 * voxel_m, max_nn=30))
     pcd.orient_normals_towards_camera_location(pose[:3, 3] - roi_c)
     return pcd
-
-
-def _mean_transform(Ts: np.ndarray) -> np.ndarray:
-    M = np.eye(4)
-    M[:3, :3] = Rotation.from_matrix(Ts[:, :3, :3]).mean().as_matrix()
-    M[:3, 3] = Ts[:, :3, 3].mean(axis=0)
-    return M
 
 
 def _vee(T: np.ndarray) -> np.ndarray:

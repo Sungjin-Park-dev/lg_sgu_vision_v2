@@ -88,22 +88,18 @@ def look_at(cam_pos, target, roll_deg: float = 0.0, up=(0.0, 0.0, 1.0)) -> np.nd
     return T
 
 
-def backproject(depth: np.ndarray, K: np.ndarray, world_T_cam: np.ndarray,
-                min_range_m: float = 0.0, max_range_m: float = np.inf,
-                stride: int = 1) -> np.ndarray:
-    """z-depth 이미지(H, W) → world 점 (N, 3). 범위 밖·inf·NaN 픽셀은 버린다.
+def pixel_world_points(depth, K, world_T_cam, stride: int = 1) -> np.ndarray:
+    """z-depth 이미지 → (H', W', 3) world 좌표. stride 간격 픽셀만, 무효 depth 는 NaN.
 
     depth 는 **광축 방향 거리**(Isaac ``distance_to_image_plane``)여야 한다 — 광선 길이
-    (``distance_to_camera``)를 넣으면 가장자리일수록 바깥으로 부푼다.
+    (``distance_to_camera``)를 넣으면 가장자리일수록 바깥으로 부푼다. 픽셀 격자를 유지해 돌려주므로
+    호출자가 픽셀별 판정(segment)이나 depth 마스킹에 그대로 쓸 수 있다.
     """
     d = np.asarray(depth, dtype=np.float64)[::stride, ::stride]
+    d = np.where(np.isfinite(d), d, np.nan)     # inf 를 그대로 곱하면 inf·0 경고가 난다
     h, w = d.shape
     v, u = np.mgrid[0:h, 0:w]
-    u = u * stride
-    v = v * stride
-    ok = np.isfinite(d) & (d >= min_range_m) & (d <= max_range_m)
-    z = d[ok]
-    x = (u[ok] - K[0, 2]) * z / K[0, 0]
-    y = (v[ok] - K[1, 2]) * z / K[1, 1]
-    pts = np.stack([x, y, z], axis=1)
-    return pts @ world_T_cam[:3, :3].T + world_T_cam[:3, 3]
+    u, v = u * stride, v * stride
+    x = (u - K[0, 2]) * d / K[0, 0]
+    y = (v - K[1, 2]) * d / K[1, 1]
+    return np.stack([x, y, d], axis=-1) @ world_T_cam[:3, :3].T + world_T_cam[:3, 3]
