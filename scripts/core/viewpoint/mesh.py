@@ -184,9 +184,10 @@ def load_meshes(object_name, material_rgb=None, color_tolerance=5.0, *,
             오므로(sample_step: SAMPLE / SAMPLE_BRACKET) 검사 대상만 남길 수 있다.
             **자세·원점 정렬은 고른 부품 기준으로** 잡는다 — 지그까지 포함해 맞추면
             검사 대상이 원점에서 벗어난다.
-        align: 자세 규약. ``auto`` 는 source.obj 와 방향별 면적 분포를 맞춘다(모호하면
-            경고). CAD 파일이 어느 축을 위로 쓰는지 알면 ``z-up``/``y-up`` 으로 못박고,
-            ``none`` 이면 CAD 좌표 그대로 둔다.
+        align: 자세 규약 — **STEP 에만** 쓴다. ``auto`` 는 source.obj 와 방향별 면적 분포를
+            맞춘다(모호하면 경고). CAD 파일이 어느 축을 위로 쓰는지 알면 ``z-up``/``y-up`` 으로
+            못박고, ``none`` 이면 CAD 좌표 그대로 둔다. 메시 파일(.obj/.ply 등)은 이미 물체
+            좌표로 만들어 넣는다는 규약이라 값과 상관없이 그대로 쓴다.
         tol_linear: STEP 테셀레이션 허용 오차(파일 단위, 우리 파일은 mm).
 
     Returns: (full_mesh, target_mesh, input_path)
@@ -219,8 +220,12 @@ def load_meshes(object_name, material_rgb=None, color_tolerance=5.0, *,
           f"geometry group{'s' if len(parts) != 1 else ''} from {path.name}"
           + (f" — sampling '{list(selected)[0]}'" if part_name else ""))
 
+    # 정렬은 CAD 좌표계를 우리 규약으로 옮기는 장치라 STEP 에만 건다. 메시 파일에 걸면 해롭다:
+    # 스캔 복원 메시(recon.obj)는 카메라가 못 본 아랫면이 없어 방향별 면적 지문이 source.obj 와
+    # 원래 다르고, curved_structure 에서 0.761 vs 0.753 으로 뒤집힌 쪽이 이겨 viewpoint 가
+    # 96 → 46 개로 줄었다. Studio 는 .obj 일 때 Align 을 숨기므로 사용자가 끌 수도 없었다.
     is_alternate = path.resolve() != canonical.resolve()
-    if is_alternate and align != ALIGN_NONE:
+    if is_alternate and align != ALIGN_NONE and path.suffix.lower() in STEP_SUFFIXES:
         # 자세·원점은 **검사 대상 부품** 기준으로 잡는다(지그까지 넣어 맞추면 대상이
         # 원점에서 밀린다). 변환 자체는 어셈블리 전체에 똑같이 씌워 상대 배치를 지킨다.
         anchor = trimesh.util.concatenate([parts[i] for i in selected_idx]) \

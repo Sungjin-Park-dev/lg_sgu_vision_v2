@@ -61,7 +61,8 @@ Examples:
     parser.add_argument('--no-filter-occluded', action='store_true',
                         help='가시성(가림) 필터 끄기 — 카메라가 못 보는 점도 남긴다')
     parser.add_argument('--no-mesh-align', action='store_true',
-                        help='--mesh 를 source.obj 자세/원점에 맞추지 않고 파일 좌표 그대로 쓴다')
+                        help='STEP --mesh 를 source.obj 자세/원점에 맞추지 않고 CAD 좌표 그대로 쓴다 '
+                             '(메시 파일은 원래 정렬하지 않는다)')
     parser.add_argument('--material-rgb', type=str, default=None,
                         help='Target material RGB color as "R,G,B" (e.g., "0,255,0")')
     parser.add_argument('--color-tolerance', type=float, default=5.0,
