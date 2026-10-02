@@ -40,6 +40,9 @@ data/**/video*/
 # Saved IK candidates (Check and Save IK / GLNS reuse; per object pose + options)
 data/**/ik/
 
+# 도면 없는 복원용 depth 스캔(계획·프레임·합친 점군) — 다시 찍으면 나오는 산출물
+data/**/scan/
+
 # Check-and-Save-IK 산출물(물체 배치별로 다시 생성되는 IK 관절해)
 data/**/ik_solutions.h5
 
