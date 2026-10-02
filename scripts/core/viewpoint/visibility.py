@@ -279,6 +279,56 @@ def pair_candidates(targets, view_positions, radius_m: float,
     return idx, dist
 
 
+def sees_all_pairs(view_positions, view_normals, targets, target_normals,
+                   occluder, spec: SensorSpec, fov_mm=None,
+                   frames: Optional[ViewFrames] = None) -> np.ndarray:
+    """**모든 쌍** 판정 — ``M[i, j]`` = i번째 viewpoint 가 j번째 표면점을 검사 가능한가.
+
+    ``covered_by_any`` 는 "하나라도 있나" 만 답하고 후보도 가까운 ``cap`` 개로 자른다.
+    결함 하나를 **몇 대가, 어느 카메라가** 보는지 세려면 전부가 필요하다. 판정은 같은
+    ``sees`` 를 거치므로 커버리지·선택과 기준이 어긋날 수 없다. 탐색 반경 밖의 쌍은 FOV 에서
+    어차피 떨어지므로 KD-tree 로 먼저 걸러, ``sees`` 는 살아남은 쌍에 한 번만 부른다.
+
+    Args:
+        fov_mm: 스칼라 또는 viewpoint 별 (N,). ``frames`` 가 있으면 사각형으로 판정한다.
+            둘 다 None 이면 FOV 검사 없이 모든 쌍을 본다.
+    Returns:
+        (N_view, T) bool
+    """
+    from scipy.spatial import cKDTree
+
+    view_positions = np.asarray(view_positions, dtype=np.float64).reshape(-1, 3)
+    view_normals = np.asarray(view_normals, dtype=np.float64).reshape(-1, 3)
+    targets = np.asarray(targets, dtype=np.float64).reshape(-1, 3)
+    target_normals = np.asarray(target_normals, dtype=np.float64).reshape(-1, 3)
+    n_view, n_target = len(view_positions), len(targets)
+    result = np.zeros((n_view, n_target), dtype=bool)
+    if n_view == 0 or n_target == 0:
+        return result
+
+    fov = None
+    if fov_mm is not None:
+        fov = np.asarray(fov_mm, dtype=np.float64)
+        fov = np.full(n_view, float(fov)) if fov.ndim == 0 else fov.reshape(-1)
+
+    if frames is None and fov is None:
+        vi, ti = (a.ravel() for a in np.meshgrid(np.arange(n_view), np.arange(n_target),
+                                                 indexing="ij"))
+    else:
+        nearby = cKDTree(view_positions).query_ball_point(targets, search_radius_m(fov, frames))
+        counts = np.array([len(c) for c in nearby], dtype=np.int64)
+        if not counts.sum():
+            return result
+        ti = np.repeat(np.arange(n_target), counts)
+        vi = np.concatenate([np.asarray(c, dtype=np.int64) for c in nearby if c])
+
+    ok = sees(view_positions[vi], view_normals[vi], targets[ti], target_normals[ti],
+              occluder, spec, fov_mm=None if fov is None else fov[vi],
+              frames=frames[vi] if frames is not None else None)
+    result[vi[ok], ti[ok]] = True
+    return result
+
+
 def covered_by_any(targets, target_normals, view_positions, view_normals,
                    point_fov_mm, occluder, spec: SensorSpec,
                    mask=None, cap: int = DEFAULT_CANDIDATE_CAP,

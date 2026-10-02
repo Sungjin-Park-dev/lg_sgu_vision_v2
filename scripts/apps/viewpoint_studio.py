@@ -117,6 +117,7 @@ from core.viewpoint import (
     subset_viewpoints,
 )
 from core.viewpoint import brep, select, visibility
+from apps.studio_defects import DefectsPanel
 
 MESH_RGB = (180, 180, 180)
 SURFACE_RGB = (255, 255, 255)
@@ -427,6 +428,9 @@ class Studio:
 
         self.layers: dict[str, list] = {
             "mesh": [], "surface": [], "markers": [], "delaunay": [], "cells": [],
+            # 스크래치(Defects 패널). defects_base 는 viewpoint 가 없을 때 패널이 깔아 두는
+            # 물체 — 토글이 걸리지 않는다.
+            "defects": [], "defects_base": [],
         }
         self.data: dict | None = None
         self.scene_full_mesh = None
@@ -451,6 +455,7 @@ class Studio:
         self._build_gui(initial_object)
         self._refresh_mesh_options()
         self._refresh_existing_options()
+        self.defects.on_object_change(initial_object)
 
     # ---------- GUI construction ----------
     def _build_gui(self, initial_object: str) -> None:
@@ -677,6 +682,10 @@ class Studio:
             self.btn_save = g.add_button("Save h5")
             self.save_status = g.add_markdown("Idle.")
 
+        # 스크래치 — viewpoint 와 같은 화면에 놓고, 어느 카메라가 보는지 센다.
+        self.defects = DefectsPanel(self)
+        self.defects.build_gui(g)
+
         # 화면에 무엇을 그릴지 — 순수 토글만 둔다. hops 는 표시가 아니라 데이터를 다시
         # 계산하는 렌즈라 여기가 아니라 진단창 옆에 있다.
         with g.add_folder("Display"):
@@ -700,6 +709,9 @@ class Studio:
                 "Coverage cells", initial_value=False,
                 hint="커버리지 셀을 상태별 색으로 — 초록 덮임 · 빨강 구멍 · 회색 검사 불가 "
                      "(CAD faces + Coverage check 일 때만)")
+            self.cb_defects = g.add_checkbox(
+                "Scratches", initial_value=True,
+                hint="스크래치 모양 — 어느 카메라가 보는지는 Defects 패널 목록에 🟢🟠🔴 로 나온다")
             # 유일한 토글 아닌 항목인데 여기 있는 이유: **저장되는 것을 바꾸지 않는다**.
             # h5 에는 늘 1-hop 간선이 들어가고, 이 값은 그것을 몇 hop 으로 펼쳐 볼지만
             # 정한다 — 성분 색과 아래 진단줄이 그 렌즈로 다시 그려진다. 슬라이더인 이유도
@@ -721,7 +733,7 @@ class Studio:
         self.existing_dd.on_update(lambda _: self._on_existing_change())
         self.sl_hops.on_update(lambda _: self._on_hops_change())
         for cb in (self.cb_mesh, self.cb_surface, self.cb_markers, self.cb_delaunay,
-                   self.cb_cells):
+                   self.cb_cells, self.cb_defects):
             cb.on_update(lambda _: self._apply_visibility())
         # 이건 표시/숨김이 아니라 노드 종류(add_glb vs add_mesh_simple)를 바꾼다 → 다시 그린다.
         self.cb_material_view.on_update(lambda _: self._on_material_view_change())
@@ -883,6 +895,7 @@ class Studio:
         obj = self.object_dd.value
         self._refresh_mesh_options()
         self.tb_material.value = config.OBJECT_TARGET_MATERIAL.get(obj) or ""
+        self.defects.on_object_change(obj)
 
     def _on_existing_change(self) -> None:
         if self._suppress_existing:
@@ -902,6 +915,7 @@ class Studio:
         self.last = None  # loaded (not generated) → nothing to Save
         self._adopt_camera_spec(data)
         self._set_scene(full, data, source=f"h5: {label}")
+        self.defects.on_viewpoints_changed()
 
     def _adopt_camera_spec(self, data: dict) -> None:
         """로드한 h5 의 카메라 스펙을 입력칸에 반영한다.
@@ -1038,6 +1052,7 @@ class Studio:
                          "adjacency": None, "surface_key": gkey}
             # 화면에는 결과만 — 어떤 파라미터로 만들었는지는 바로 위 입력칸들이 이미 보여준다.
             self._set_scene(full_mesh, data, source="gen · viewpoints")
+            self.defects.on_viewpoints_changed()
             self._refresh_existing_options(select=GENERATED_LABEL, keep_generated=True)
             self.graph_status.content = "Idle — 점이 새로 생겼습니다. **Build graph**."
             tag = " · CAD faces" if p["sampler"] == SAMPLER_BREP else ""
@@ -1079,6 +1094,7 @@ class Studio:
                 button.disabled = not enabled
             except Exception:  # noqa: BLE001
                 pass
+        self.defects.set_enabled(enabled)
 
     def _graph_knobs(self) -> dict:
         return {"k_neighbors": int(self.nb_knn.value),
@@ -1364,7 +1380,7 @@ class Studio:
         toggles = {
             "mesh": self.cb_mesh, "surface": self.cb_surface,
             "markers": self.cb_markers, "delaunay": self.cb_delaunay,
-            "cells": self.cb_cells,
+            "cells": self.cb_cells, "defects": self.cb_defects,
         }
         for key, cb in toggles.items():
             for handle in self.layers[key]:
@@ -1443,6 +1459,7 @@ class Studio:
                     colors=np.tile(np.array(rgb, dtype=np.uint8), (idx.size, 1)),
                     point_size=0.0015, point_shape="circle"))
 
+        self.defects.draw()
         self._apply_visibility()
 
     def _add_mesh_node(self, full_mesh, data: dict):
@@ -1533,6 +1550,7 @@ class Studio:
         self.last = None
         self._adopt_camera_spec(data)
         self._set_scene(full, data, source=f"h5: {path.name}")
+        self.defects.on_viewpoints_changed()
 
 
 def parse_args() -> argparse.Namespace:
