@@ -42,9 +42,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:  # inside `blender -b --python this_file`
@@ -177,7 +181,9 @@ def _blender_stage(cfg: dict) -> None:
         root_prim_path="/root",
         evaluation_mode="RENDER",
     )
-    print(f"[scratch]   exported {usd_out}")
+    # The outer stage exports to a staging file and swaps it in once verified;
+    # name the file the user will actually get.
+    print(f"[scratch]   exported {cfg.get('usd_label', usd_out)}")
 
     if cfg.get("preview_dir"):
         for i, s in enumerate(cfg["scratches"]):
@@ -530,8 +536,88 @@ def _render_preview(s: dict, out: Path, size=(900, 900)) -> None:
 # ============================================================================
 # stage 1 -- outer process (numpy + PIL + trimesh + pxr)
 # ============================================================================
+#
+# Everything below is a library first and a CLI second: the Viewpoint Studio
+# calls these functions directly, and ``main()`` is a thin argparse wrapper.
+# Failures raise ``ScratchError`` rather than exiting, so a GUI can show the
+# message and carry on; the CLI turns it back into ``sys.exit(message)``.
 
-def load_surface(object_name: str):
+# What scratches.json records per scratch -- the ground truth and the --spec input.
+SPEC_KEYS = ("png", "center", "normal", "direction", "length_mm", "strength")
+
+
+class ScratchError(RuntimeError):
+    """A scratch run that cannot go on.
+
+    ``placed`` keeps whatever a random placement managed before it gave up, so
+    a GUI can still show the partial plan.
+    """
+
+    def __init__(self, message: str, *, placed: list | None = None):
+        super().__init__(message)
+        self.placed = list(placed or [])
+
+
+@dataclass(frozen=True)
+class PlanOptions:
+    """Where scratches go.  Exactly one of ``count``, ``at_mm``, ``spec`` is set."""
+
+    count: int | None = None                   # random placement
+    seed: int = 0
+    at_mm: tuple | None = None                 # one scratch here (object frame, mm)
+    scratch_png: Path | None = None            # the PNG for ``at_mm``
+    angle_deg: float = 0.0
+    length_mm: tuple = (20.0, 20.0)            # (lo, hi); equal values = fixed length
+    strength: float = 1.0
+    smooth_deg: float = 30.0
+    spec: Path | None = None                   # replay a scratches.json
+
+
+@dataclass(frozen=True)
+class ApplyOptions:
+    """How the planned scratches are stamped into source.usd."""
+
+    tex_size: int = 1024
+    smooth_deg: float = 30.0
+    roughness: float = 0.5
+    preview_dir: Path | None = None
+    preview_size: tuple = (900, 900)
+    force_backup: bool = False                 # refresh source_prev.usd from source.usd
+    blender: Path | None = None                # None -> find_blender()
+    timeout_s: float | None = None
+
+
+@dataclass
+class ApplyResult:
+    usd: Path
+    spec_path: Path
+    backup: Path | None
+    backup_written: bool
+    n_clamped: int
+    lines: list = field(default_factory=list)  # the "[scratch]" lines Blender printed
+
+
+def find_blender(explicit: Path | None = None) -> Path | None:
+    """The Blender binary, or None: --blender / $BLENDER / PATH / /usr/local/bin."""
+    candidates = [explicit, os.environ.get("BLENDER"), shutil.which("blender"),
+                  "/usr/local/bin/blender"]
+    for c in candidates:
+        if c and Path(c).is_file() and os.access(c, os.X_OK):
+            return Path(c)
+    return None
+
+
+def scratch_library() -> list[Path]:
+    """The scratch normal maps random placement picks from (``ff/`` is gitignored)."""
+    if not SCRATCH_DIR.is_dir():
+        raise ScratchError(f"scratch library not found: {SCRATCH_DIR}")
+    library = sorted(SCRATCH_DIR.glob("*.png"))
+    if not library:
+        raise ScratchError(f"no scratch PNGs under {SCRATCH_DIR}")
+    return library
+
+
+def load_surface(object_name: str, *, data_root: Path = DATA_ROOT):
     """The surface scratches may land on, and the full mesh they get stamped on.
 
     ``sample`` is an assembly: source.obj carries the fixture too, and only
@@ -539,13 +625,24 @@ def load_surface(object_name: str):
     """
     import trimesh
 
-    mesh_dir = DATA_ROOT / object_name / "mesh"
+    mesh_dir = data_root / object_name / "mesh"
     full = trimesh.load(str(mesh_dir / "source.obj"), force="mesh")
     target_path = next((mesh_dir / n for n in ("target.ply", "target.obj")
                         if (mesh_dir / n).exists()), None)
     target = trimesh.load(str(target_path), force="mesh") if target_path else full
     target.merge_vertices()
     return target, target_path
+
+
+def load_spec(path: Path) -> list[dict]:
+    """The scratches a previous run recorded."""
+    spec = json.loads(Path(path).read_text())
+    return [dict(s) for s in spec["scratches"]]
+
+
+def spec_record(object_name: str, scratches: list) -> dict:
+    return {"object": object_name,
+            "scratches": [{k: s[k] for k in SPEC_KEYS} for s in scratches]}
 
 
 def tangent_frame(normal, np):
@@ -577,42 +674,68 @@ def _footprint_is_smooth(mesh, centre, basis, half, smooth_deg: float, np) -> bo
     return not bool((mesh.face_adjacency_angles[both] > math.radians(smooth_deg)).any())
 
 
-def plan_scratches(object_name: str, args) -> list:
-    """Where the scratches go: from --spec, from --at, or sampled at random."""
+def plan_scratches(object_name: str, opts: PlanOptions, *, surface=None,
+                   data_root: Path = DATA_ROOT, log=print) -> list:
+    """Where the scratches go: from a spec, at a point, or sampled at random.
+
+    ``surface`` is ``load_surface``'s result, so a caller that plans often (the
+    studio) does not reload the mesh every time.
+    """
+    import numpy as np
+
+    if opts.spec:
+        return load_spec(opts.spec)
+
+    target, target_path = surface or load_surface(object_name, data_root=data_root)
+    lo, hi = float(min(opts.length_mm)), float(max(opts.length_mm))
+
+    if opts.at_mm is not None:
+        return [place_at(target, np.asarray(opts.at_mm, dtype=np.float64) / 1000.0,
+                         png=opts.scratch_png, angle_deg=opts.angle_deg,
+                         length_mm=lo, strength=opts.strength)]
+
+    return place_random(object_name, target, target_path, count=opts.count, seed=opts.seed,
+                        length_mm=(lo, hi), strength=opts.strength,
+                        smooth_deg=opts.smooth_deg, data_root=data_root, log=log)
+
+
+def place_at(target, point_m, *, png, angle_deg: float, length_mm: float,
+             strength: float) -> dict:
+    """One scratch at the surface point nearest ``point_m`` (object frame, metres)."""
     import numpy as np
     import trimesh
 
-    if args.spec:
-        spec = json.loads(Path(args.spec).read_text())
-        return [dict(s) for s in spec["scratches"]]
+    closest, _, face = trimesh.proximity.closest_point(target, [point_m])
+    centre, normal = closest[0], target.face_normals[face[0]]
+    t0, t1 = tangent_frame(normal, np)
+    a = math.radians(angle_deg)
+    return _placement(png, centre, normal, math.cos(a) * t0 + math.sin(a) * t1,
+                      length_mm, strength, np)
 
-    target, target_path = load_surface(object_name)
-    lengths = args.length_mm if len(args.length_mm) == 2 else args.length_mm * 2
-    lo, hi = float(min(lengths)), float(max(lengths))
 
-    if args.at is not None:
-        point = np.asarray(args.at, dtype=np.float64) / 1000.0
-        closest, _, face = trimesh.proximity.closest_point(target, [point])
-        centre, normal = closest[0], target.face_normals[face[0]]
-        t0, t1 = tangent_frame(normal, np)
-        a = math.radians(args.angle_deg)
-        return [_placement(args.scratch, centre, normal,
-                           math.cos(a) * t0 + math.sin(a) * t1, lo, args.strength, np)]
+def place_random(object_name: str, target, target_path, *, count: int, seed: int,
+                 length_mm: tuple, strength: float, smooth_deg: float,
+                 data_root: Path = DATA_ROOT, log=print) -> list:
+    """``count`` scratches at random on ``target``, reproducible from ``seed``.
 
-    if not SCRATCH_DIR.is_dir():
-        sys.exit(f"scratch library not found: {SCRATCH_DIR}")
-    library = sorted(SCRATCH_DIR.glob("*.png"))
-    if not library:
-        sys.exit(f"no scratch PNGs under {SCRATCH_DIR}")
+    The random draws happen in a fixed order -- keep it that way, or the same
+    seed stops giving the same scratches (recorded scratches.json replay fine
+    either way; it is the seed that would silently change meaning).
+    """
+    import numpy as np
+    import trimesh
 
-    rng = np.random.default_rng(args.seed)
-    print(f"[scratch] placing {args.random} scratch(es) on "
-          f"{(target_path or (DATA_ROOT / object_name / 'mesh' / 'source.obj')).name} "
-          f"({target.area * 1e4:.1f}cm2), seed={args.seed}")
+    library = scratch_library()
+    lo, hi = length_mm
+
+    rng = np.random.default_rng(seed)
+    log(f"[scratch] placing {count} scratch(es) on "
+        f"{(target_path or (data_root / object_name / 'mesh' / 'source.obj')).name} "
+        f"({target.area * 1e4:.1f}cm2), seed={seed}")
 
     placed, tries = [], 0
     rejected = {"downward": 0, "crease": 0, "off the edge": 0, "too close": 0}
-    while len(placed) < args.random and tries < 4000:
+    while len(placed) < count and tries < 4000:
         tries += 1
         points, faces = trimesh.sample.sample_surface(target, 1, seed=int(rng.integers(1 << 31)))
         centre, normal = points[0], target.face_normals[faces[0]]
@@ -636,7 +759,7 @@ def plan_scratches(object_name: str, args) -> list:
                          length / 1000.0 * SMOOTH_RADIUS_FACTOR])
         if not _footprint_is_smooth(target, centre,
                                     np.stack([direction, np.cross(normal, direction), normal]),
-                                    half, args.smooth_deg, np):
+                                    half, smooth_deg, np):
             rejected["crease"] += 1
             continue
         # Both ends have to land on the part.  Without this a scratch sampled
@@ -655,11 +778,11 @@ def plan_scratches(object_name: str, args) -> list:
         png = library[int(rng.integers(len(library)))]
         placed.append(_placement(png, centre, normal,
                                  math.cos(a) * t0 + math.sin(a) * t1,
-                                 length, args.strength, np))
-    if len(placed) < args.random:
+                                 length, strength, np))
+    if len(placed) < count:
         why = ", ".join(f"{k} {v}" for k, v in rejected.items())
-        sys.exit(f"only placed {len(placed)}/{args.random} scratches in {tries} tries "
-                 f"(rejected: {why}) -- try a shorter --length-mm")
+        raise ScratchError(f"only placed {len(placed)}/{count} scratches in {tries} tries "
+                           f"(rejected: {why}) -- try a shorter --length-mm", placed=placed)
     return placed
 
 
@@ -679,13 +802,13 @@ def _placement(png, centre, normal, direction, length_mm: float, strength: float
     }
 
 
-def composite_normal_map(scratch: Path, out: Path, *, size: int,
-                         length_px: float, strength: float) -> tuple[int, int]:
-    """Alpha-composite an already-tangent-space scratch onto a flat canvas.
+def composite_normal_array(scratch: Path, *, size: int, length_px: float, strength: float):
+    """The decal texture as arrays: ``(rgb uint8 (size,size,3), alpha (size,size), stamp_wh)``.
 
     One scratch per texture, centred, long axis along +u.  The border stays
     flat, which is what the clamped wrap reads for faces that reach past the
-    decal window.
+    decal window.  ``alpha`` is the scratch's own coverage -- the studio uses it
+    to shade a preview decal.
     """
     import numpy as np
     from PIL import Image
@@ -694,7 +817,7 @@ def composite_normal_map(scratch: Path, out: Path, *, size: int,
     a_full = np.asarray(src)[:, :, 3]
     ys, xs = np.nonzero(a_full > 8)
     if len(xs) == 0:
-        raise SystemExit(f"{scratch}: fully transparent, nothing to stamp")
+        raise ScratchError(f"{scratch}: fully transparent, nothing to stamp")
     src = src.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
     if src.height > src.width:      # the long axis is the scratch's own axis
         src = src.transpose(Image.ROTATE_90)
@@ -729,9 +852,98 @@ def composite_normal_map(scratch: Path, out: Path, *, size: int,
     out_n /= np.maximum(np.linalg.norm(out_n, axis=2, keepdims=True), 1e-8)
 
     rgb = np.clip(np.rint((out_n * 0.5 + 0.5) * 255.0), 0, 255).astype(np.uint8)
+    return rgb, alpha[:, :, 0], dst
+
+
+def composite_normal_map(scratch: Path, out: Path, *, size: int,
+                         length_px: float, strength: float) -> tuple[int, int]:
+    """``composite_normal_array`` written to ``out`` as the decal's normal map."""
+    from PIL import Image
+
+    rgb, _, dst = composite_normal_array(scratch, size=size, length_px=length_px,
+                                         strength=strength)
     out.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgb, "RGB").save(out)
     return dst
+
+
+def prepare_scratches(object_name: str, scratches: list, *, tex_size: int, roughness: float,
+                      data_root: Path = DATA_ROOT, log=print) -> list:
+    """Write each scratch's texture and return copies carrying what Blender needs.
+
+    The inputs are left alone -- they are the spec (``SPEC_KEYS``) a caller may
+    keep showing or save again.
+    """
+    mesh_dir = data_root / object_name / "mesh"
+    out = []
+    for i, src in enumerate(scratches):
+        s = dict(src)
+        if not Path(s["png"]).exists():
+            raise ScratchError(f"scratch PNG not found: {s['png']}")
+        s["span_m"] = s["length_mm"] / 1000.0 * SPAN_FACTOR
+        s["texture"] = str(mesh_dir / "textures" / f"scratch_{i}.png")
+        s["material"] = f"{object_name}_scratch{i}"
+        s["base_color"] = [0.9, 0.9, 0.9]
+        s["roughness"] = roughness
+        dst = composite_normal_map(
+            Path(s["png"]), Path(s["texture"]), size=tex_size,
+            length_px=tex_size / SPAN_FACTOR, strength=s["strength"])
+        # How much surface the decal actually needs: the stamp's own box in
+        # metres, plus a margin.  The rest of the window is flat.
+        stamp_w = dst[0] / tex_size * s["span_m"]
+        stamp_h = dst[1] / tex_size * s["span_m"]
+        s["half_len_m"] = stamp_w * 0.5 * 1.25
+        s["half_wid_m"] = max(stamp_h * 0.5 * 1.5, stamp_w * 0.06)
+        c = s["center"]
+        log(f"[scratch] {i}: {Path(s['png']).name} {s['length_mm']:.0f}mm at "
+            f"({c[0] * 1000:.0f}, {c[1] * 1000:.0f}, {c[2] * 1000:.0f})mm "
+            f"-> {Path(s['texture']).name} ({tex_size}^2, stamp {dst[0]}x{dst[1]}px "
+            f"in a {s['span_m'] * 1000:.0f}mm window)")
+        out.append(s)
+    return out
+
+
+def run_blender(cfg: dict, *, blender: Path, on_line=print, timeout_s: float | None = None) -> list:
+    """Run the Blender stage, passing its ``[scratch]`` lines to ``on_line`` as they come.
+
+    stdout and stderr stay apart: only stdout is filtered for progress, exactly
+    as before, and stderr (Blender warnings, the traceback ``blender_stage``
+    prints) only surfaces in the failure message.
+    """
+    lines, tail = [], []
+    with tempfile.TemporaryFile(mode="w+") as err:
+        proc = subprocess.Popen(
+            [str(blender), "-b", "--factory-startup", "--python", str(Path(__file__).resolve()),
+             "--", json.dumps(cfg)],
+            cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)
+        timer = None
+        timed_out = threading.Event()
+        if timeout_s is not None:
+            def _kill():
+                timed_out.set()
+                proc.kill()
+            timer = threading.Timer(timeout_s, _kill)
+            timer.start()
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                tail.append(line)
+                if len(tail) > 400:
+                    del tail[:200]
+                if line.startswith("[scratch]") or "Error" in line or "Traceback" in line:
+                    lines.append(line)
+                    on_line(line)
+            rc = proc.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
+        if timed_out.is_set():
+            raise ScratchError(f"blender stage timed out after {timeout_s:g}s")
+        if rc != 0:
+            err.seek(0)
+            raise ScratchError(f"blender stage failed (rc={rc}):\n"
+                               f"{chr(10).join(tail)[-4000:]}\n{err.read()[-2000:]}")
+    return lines
 
 
 def obj_bbox(obj_path: Path) -> tuple[list, list]:
@@ -768,33 +980,43 @@ def clamp_texture_wrap(usd: Path) -> int:
     return n
 
 
-def verify_usd(usd: Path, expect_bbox: tuple[list, list], n_scratches: int) -> None:
-    """Fail loudly on the failure modes that are invisible until Isaac loads."""
+def _check(ok, message: str) -> None:
+    """``assert`` that survives ``python -O`` and reads as a ScratchError."""
+    if not ok:
+        raise ScratchError(message)
+
+
+def verify_usd(usd: Path, expect_bbox: tuple[list, list], n_scratches: int, *,
+               label: Path | None = None, log=print) -> None:
+    """Fail loudly on the failure modes that are invisible until Isaac loads.
+
+    ``label`` is the path to report -- the file being checked may be a staging
+    copy that is about to replace it.
+    """
     from pxr import Gf, Usd, UsdGeom, UsdShade
 
     stage = Usd.Stage.Open(str(usd))
-    assert UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z, "upAxis is not Z"
-    assert UsdGeom.GetStageMetersPerUnit(stage) == 1.0, "metersPerUnit is not 1"
+    _check(UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z, "upAxis is not Z")
+    _check(UsdGeom.GetStageMetersPerUnit(stage) == 1.0, "metersPerUnit is not 1")
 
     mesh = next((p for p in stage.Traverse() if p.GetTypeName() == "Mesh"), None)
-    assert mesh is not None, "no Mesh prim in exported USD"
+    _check(mesh is not None, "no Mesh prim in exported USD")
     g = UsdGeom.Mesh(mesh)
 
     ext = g.GetExtentAttr().Get()
     lo, hi = expect_bbox
     for got, want, tag in ((ext[0], lo, "min"), (ext[1], hi, "max")):
-        assert Gf.IsClose(Gf.Vec3f(*got), Gf.Vec3f(*[float(x) for x in want]), 1e-4), (
-            f"extent {tag} {tuple(got)} != OBJ bbox {tuple(want)} "
-            f"-- axis or scale went wrong on import"
-        )
+        _check(Gf.IsClose(Gf.Vec3f(*got), Gf.Vec3f(*[float(x) for x in want]), 1e-4),
+               f"extent {tag} {tuple(got)} != OBJ bbox {tuple(want)} "
+               f"-- axis or scale went wrong on import")
     names = [pv.GetName() for pv in UsdGeom.PrimvarsAPI(mesh).GetPrimvars()]
-    assert "primvars:st" in names, f"no UV primvar exported (got {names})"
-    assert g.GetNormalsAttr().Get(), "no normals exported"
+    _check("primvars:st" in names, f"no UV primvar exported (got {names})")
+    _check(g.GetNormalsAttr().Get(), "no normals exported")
 
     surfaces = [UsdShade.Shader(p) for p in stage.Traverse()
                 if p.GetTypeName() == "Shader"
                 and UsdShade.Shader(p).GetIdAttr().Get() == "UsdPreviewSurface"]
-    assert surfaces, "no UsdPreviewSurface shader"
+    _check(surfaces, "no UsdPreviewSurface shader")
 
     textured = 0
     for surf in surfaces:
@@ -802,29 +1024,29 @@ def verify_usd(usd: Path, expect_bbox: tuple[list, list], n_scratches: int) -> N
         if not (nrm and nrm.HasConnectedSource()):
             continue                      # the base material carries no normal map
         tex = UsdShade.Shader(nrm.GetConnectedSource()[0].GetPrim())
-        assert tex.GetIdAttr().Get() == "UsdUVTexture", "normal source is not a texture"
+        _check(tex.GetIdAttr().Get() == "UsdUVTexture", "normal source is not a texture")
 
         cs = tex.GetInput("sourceColorSpace").Get()
-        assert cs == "raw", f"texture colorspace is {cs!r}, expected 'raw'"
+        _check(cs == "raw", f"texture colorspace is {cs!r}, expected 'raw'")
         for key, want in (("scale", (2, 2, 2, 2)), ("bias", (-1, -1, -1, -1))):
             got = tex.GetInput(key).Get()
-            assert got and tuple(got) == want, f"texture {key}={got}, expected {want}"
+            _check(got and tuple(got) == want, f"texture {key}={got}, expected {want}")
         for key in ("wrapS", "wrapT"):
             got = tex.GetInput(key).Get()
-            assert got == "clamp", f"texture {key}={got!r}, expected 'clamp'"
+            _check(got == "clamp", f"texture {key}={got!r}, expected 'clamp'")
 
         asset = tex.GetInput("file").Get()
-        assert asset and Path(asset.resolvedPath).exists(), (
-            f"texture path does not resolve: {asset}")
+        _check(asset and Path(asset.resolvedPath).exists(),
+               f"texture path does not resolve: {asset}")
         st = tex.GetInput("st")
-        assert st and st.HasConnectedSource(), "texture st input is not connected"
+        _check(st and st.HasConnectedSource(), "texture st input is not connected")
         textured += 1
 
-    assert textured == n_scratches, (
-        f"{textured} materials carry a normal map, expected {n_scratches}")
-    print(f"[scratch] verified {usd}")
-    print(f"[scratch]   extent {tuple(ext[0])} .. {tuple(ext[1])}")
-    print(f"[scratch]   {textured} scratch material(s), UV primvar and normals present")
+    _check(textured == n_scratches,
+           f"{textured} materials carry a normal map, expected {n_scratches}")
+    log(f"[scratch] verified {label or usd}")
+    log(f"[scratch]   extent {tuple(ext[0])} .. {tuple(ext[1])}")
+    log(f"[scratch]   {textured} scratch material(s), UV primvar and normals present")
 
 
 def stamp_provenance(usd: Path, params: dict) -> None:
@@ -837,6 +1059,72 @@ def stamp_provenance(usd: Path, params: dict) -> None:
     data["scratchNormal"] = {k: str(v) for k, v in params.items()}
     prim.SetCustomData(data)
     stage.GetRootLayer().Save()
+
+
+def apply_scratches(object_name: str, scratches: list, opts: ApplyOptions | None = None, *,
+                    data_root: Path = DATA_ROOT, log=print, on_line=None) -> ApplyResult:
+    """Stamp ``scratches`` into ``data/{object}/mesh/source.usd``.
+
+    Blender writes a staging file next to source.usd (so relative texture paths
+    stay the same); it is verified and only then swapped in.  A failed or
+    killed run leaves source.usd as it was -- before, Blender overwrote it in
+    place and a failed check left a broken file behind.
+    """
+    opts = opts or ApplyOptions()
+    on_line = on_line or log
+    mesh_dir = data_root / object_name / "mesh"
+    obj_path = mesh_dir / "source.obj"
+    usd_path = mesh_dir / "source.usd"
+    prev_path = mesh_dir / "source_prev.usd"
+    spec_path = mesh_dir / "scratches.json"
+    staging = mesh_dir / "source.staging.usd"
+
+    if not obj_path.exists():
+        raise ScratchError(f"source.obj not found: {obj_path}")
+    blender = opts.blender or find_blender()
+    if blender is None or not Path(blender).exists():
+        raise ScratchError(f"blender not found: {blender} (pass --blender)")
+    if not scratches:
+        raise ScratchError("no scratches to apply")
+
+    prepared = prepare_scratches(object_name, scratches, tex_size=opts.tex_size,
+                                 roughness=opts.roughness, data_root=data_root, log=log)
+
+    backup_written = False
+    if usd_path.exists() and (opts.force_backup or not prev_path.exists()):
+        shutil.copy2(usd_path, prev_path)
+        backup_written = True
+        log(f"[scratch] backed up -> {prev_path.relative_to(PROJECT_ROOT)}")
+
+    cfg = {
+        "object": object_name, "obj": str(obj_path),
+        "usd": str(staging), "usd_label": str(usd_path),
+        "smooth_deg": opts.smooth_deg, "roughness": opts.roughness,
+        "scratches": prepared,
+        "preview_dir": str(opts.preview_dir) if opts.preview_dir else None,
+        "preview_size": [int(v) for v in opts.preview_size],
+    }
+    try:
+        lines = run_blender(cfg, blender=Path(blender), on_line=on_line,
+                            timeout_s=opts.timeout_s)
+        n_clamped = clamp_texture_wrap(staging)
+        log(f"[scratch] wrap=clamp on {n_clamped} texture(s)")
+        verify_usd(staging, obj_bbox(obj_path), len(prepared), label=usd_path, log=log)
+        stamp_provenance(staging, {"spec": spec_path.name, "count": len(prepared),
+                                   "texSize": opts.tex_size})
+        os.replace(staging, usd_path)
+    finally:
+        if staging.exists():
+            staging.unlink()
+
+    # The ground truth of where the defects are -- and the input that replays
+    # this exact run with --spec.  Written only once the USD it describes is in place.
+    spec_path.write_text(json.dumps(spec_record(object_name, prepared), indent=2) + "\n")
+    log(f"[scratch] recorded -> {spec_path.relative_to(PROJECT_ROOT)}")
+    log(f"[scratch] done -> {usd_path.relative_to(PROJECT_ROOT)}")
+    return ApplyResult(usd=usd_path, spec_path=spec_path,
+                       backup=prev_path if prev_path.exists() else None,
+                       backup_written=backup_written, n_clamped=n_clamped, lines=lines)
 
 
 def main() -> None:
@@ -880,81 +1168,28 @@ def main() -> None:
     if args.scratch and not args.scratch.exists():
         sys.exit(f"scratch PNG not found: {args.scratch}")
 
-    mesh_dir = DATA_ROOT / args.object / "mesh"
-    obj_path = mesh_dir / "source.obj"
-    usd_path = mesh_dir / "source.usd"
-    prev_path = mesh_dir / "source_prev.usd"
-    spec_path = mesh_dir / "scratches.json"
-
+    obj_path = DATA_ROOT / args.object / "mesh" / "source.obj"
     if not obj_path.exists():
         sys.exit(f"source.obj not found: {obj_path}")
     if not args.blender.exists():
         sys.exit(f"blender not found: {args.blender} (pass --blender)")
 
-    scratches = plan_scratches(args.object, args)
-    for i, s in enumerate(scratches):
-        missing = not Path(s["png"]).exists()
-        if missing:
-            sys.exit(f"scratch PNG not found: {s['png']}")
-        s["span_m"] = s["length_mm"] / 1000.0 * SPAN_FACTOR
-        s["texture"] = str(mesh_dir / "textures" / f"scratch_{i}.png")
-        s["material"] = f"{args.object}_scratch{i}"
-        s["base_color"] = [0.9, 0.9, 0.9]
-        s["roughness"] = args.roughness
-        dst = composite_normal_map(
-            Path(s["png"]), Path(s["texture"]), size=args.tex_size,
-            length_px=args.tex_size / SPAN_FACTOR, strength=s["strength"])
-        # How much surface the decal actually needs: the stamp's own box in
-        # metres, plus a margin.  The rest of the window is flat.
-        stamp_w = dst[0] / args.tex_size * s["span_m"]
-        stamp_h = dst[1] / args.tex_size * s["span_m"]
-        s["half_len_m"] = stamp_w * 0.5 * 1.25
-        s["half_wid_m"] = max(stamp_h * 0.5 * 1.5, stamp_w * 0.06)
-        c = s["center"]
-        print(f"[scratch] {i}: {Path(s['png']).name} {s['length_mm']:.0f}mm at "
-              f"({c[0] * 1000:.0f}, {c[1] * 1000:.0f}, {c[2] * 1000:.0f})mm "
-              f"-> {Path(s['texture']).name} ({args.tex_size}^2, stamp {dst[0]}x{dst[1]}px "
-              f"in a {s['span_m'] * 1000:.0f}mm window)")
-
-    if usd_path.exists() and (args.force or not prev_path.exists()):
-        shutil.copy2(usd_path, prev_path)
-        print(f"[scratch] backed up -> {prev_path.relative_to(PROJECT_ROOT)}")
-
-    cfg = {
-        "object": args.object, "obj": str(obj_path), "usd": str(usd_path),
-        "smooth_deg": args.smooth_deg, "roughness": args.roughness,
-        "scratches": scratches,
-        "preview_dir": str(args.preview_dir) if args.preview_dir else None,
-        "preview_size": [int(v) for v in str(args.preview_size).lower().split("x")],
-    }
-    proc = subprocess.run(
-        [str(args.blender), "-b", "--factory-startup", "--python", str(Path(__file__).resolve()),
-         "--", json.dumps(cfg)],
-        cwd=PROJECT_ROOT, capture_output=True, text=True,
-    )
-    for line in proc.stdout.splitlines():
-        if line.startswith("[scratch]") or "Error" in line or "Traceback" in line:
-            print(line)
-    if proc.returncode != 0:
-        sys.exit(f"blender stage failed (rc={proc.returncode}):\n{proc.stdout[-4000:]}\n{proc.stderr[-2000:]}")
-
-    n_clamped = clamp_texture_wrap(usd_path)
-    print(f"[scratch] wrap=clamp on {n_clamped} texture(s)")
-    verify_usd(usd_path, obj_bbox(obj_path), len(scratches))
-
-    # The ground truth of where the defects are -- and the input that replays
-    # this exact run with --spec.
-    record = {
-        "object": args.object,
-        "scratches": [{k: s[k] for k in
-                       ("png", "center", "normal", "direction", "length_mm", "strength")}
-                      for s in scratches],
-    }
-    spec_path.write_text(json.dumps(record, indent=2) + "\n")
-    print(f"[scratch] recorded -> {spec_path.relative_to(PROJECT_ROOT)}")
-    stamp_provenance(usd_path, {"spec": spec_path.name, "count": len(scratches),
-                                "texSize": args.tex_size})
-    print(f"[scratch] done -> {usd_path.relative_to(PROJECT_ROOT)}")
+    plan = PlanOptions(
+        count=args.random, seed=args.seed,
+        at_mm=tuple(args.at) if args.at is not None else None, scratch_png=args.scratch,
+        angle_deg=args.angle_deg,
+        length_mm=(float(min(args.length_mm)), float(max(args.length_mm))),
+        strength=args.strength, smooth_deg=args.smooth_deg, spec=args.spec)
+    apply = ApplyOptions(
+        tex_size=args.tex_size, smooth_deg=args.smooth_deg, roughness=args.roughness,
+        preview_dir=args.preview_dir,
+        preview_size=tuple(int(v) for v in str(args.preview_size).lower().split("x")),
+        force_backup=args.force, blender=args.blender)
+    try:
+        scratches = plan_scratches(args.object, plan)
+        apply_scratches(args.object, scratches, apply)
+    except ScratchError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":
