@@ -6,6 +6,8 @@ Boots Isaac Sim through the shared ``core.isaac.scene`` runtime, then opens
 an Omni UI window whose panels follow the order of the work:
 
     A) Load object (dropdown + native viewport gizmo move)
+    A') Scan Object    — no-CAD reconstruction: ROI → plan (subprocess) → capture
+                         (in-process, stepped from pump) → reconstruct (subprocess)
     B) Solve IK        — IK candidate options + [Check and Save IK]  (subprocess)
     C) Motion Speed    — the timing knobs baked into every generated CSV
     D) Generate Trajectory — scan (GLNS) and tilt motion              (subprocess)
@@ -198,6 +200,11 @@ INSPECTION_CONTROLLER = "joint_trajectory_controller"
 
 # Matches scene.load_target_object (/World/{config.TARGET_OBJECT['name']}).
 TARGET_OBJECT_PRIM = "/World/target_object"
+# 도면 없는 복원(Scan Object 패널). 둘 다 최상위에 둔다 — target_object 밑에 두면 물체를 다시
+# 로드할 때(load_target_object 가 서브트리를 지운다) 같이 사라진다.
+SCAN_ROI_PRIM = "/World/ScanROI"
+SCAN_RECON_PRIM = "/World/ScanRecon"
+SCAN_RUN_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 ARUCO_MARKER_PRIM = "/World/ArUcoMarkerPreview"
 ARUCO_MARKER_DEFAULT_SIZE_M = 0.05
 ARUCO_MARKER_THICKNESS_M = 0.001
@@ -1092,6 +1099,17 @@ class PipelineWindow:
         self._pose_frame_combo = None
         self._pose_frame_index = 0
         self._marker_pose_initialized = False
+        # Scan Object — 단계(None/"plan"/"capture"/"recon"), 촬영 세션, 실행 맥락, 숨긴 오버레이.
+        # 계획과 복원은 같은 러너를 차례로 쓴다(앞 단계가 끝나야 다음을 띄우므로 겹치지 않는다).
+        self._scan_runner = SubprocessRunner()
+        self._scan_stage: Optional[str] = None
+        self._scan_session = None
+        self._scan_ctx: dict = {}
+        self._scan_cancel = False
+        self._scan_hidden: list = []
+        self._btn_scan = None
+        self._btn_cancel_scan = None
+        self._scan_status_label = None
         self._build()
 
         # Dock into the right-hand panel instead of floating as a standalone
@@ -1124,6 +1142,9 @@ class PipelineWindow:
                     # 도구다. 여기서 만들고 저장한 파일을 바로 아래 패널이 골라 쓴다.
                     self._build_panel_viewpoint_studio()
                     self._build_panel_object()
+                    # 도면 없는 물체의 입력(메시)을 만드는 곁가지 — 물체가 스테이지에 있어야 하고,
+                    # 평소 흐름(IK→생성)을 밀어내지 않도록 기본 접힘이다.
+                    self._build_panel_scan()
                     # IK 는 궤적 생성과 다른 단계다 — 산출물(ik/{N}/*.h5)이 따로 남고
                     # 여러 번의 Generate 가 그걸 재사용한다. 그래서 패널도 따로 둔다.
                     self._build_panel_solve_ik()
@@ -1478,7 +1499,7 @@ class PipelineWindow:
             self._btn_publish.enabled = (
                 self._pipeline_mode == "inspection"
                 and not self._pub_runner.running and not self._sim_executor.running
-                and ready
+                and self._scan_stage is None and ready
             )
             # 이 Isaac 테마는 .enabled=False 만으로 회색이 되지 않는다(_set_inspection_ui_enabled
             # 가 같은 이유로 스타일을 따로 준다). 눌리지 않는데 멀쩡해 보이면 착각한다.
@@ -1491,9 +1512,12 @@ class PipelineWindow:
         # Unified labels across sim/real (sim naming is the standard). "Move to Start" 는
         # 스캔·틸트 공용이다 — 두 궤적이 같은 CSV 칸을 쓰므로 하는 일이 정확히 같다.
         # _pub_runner 항이 빠져 있어 real 이동 중에 버튼이 되살아났다(기존 버그).
+        # _ik_runner·스캔도 같은 이유로 넣는다 — 빠져 있으면 0.25 s 마다 이 함수가 그 작업 도중에
+        # Plan/Move 를 되살린다.
         idle = (
             self._pipeline_mode == "inspection" and not self._gen_runner.running
             and not self._sim_executor.running and not self._pub_runner.running
+            and not self._ik_runner.running and self._scan_stage is None
         )
         pending = (self._pending_move or {}).get("transition")
         for transition, plan_btn, move_btn in (
@@ -1667,7 +1691,10 @@ class PipelineWindow:
             self._sync_studio_status()
             return
         port = max(1, int(self._get_field("studio_port", int)))
-        shell = (f"{self._uv} run scripts/apps/viewpoint_studio.py --port {port}")
+        # 지금 물체·씬으로 연다 — Studio 의 Scan 패널이 이 앱에서 찍은 스캔을 바로 보이게.
+        shell = (f"{self._uv} run scripts/apps/viewpoint_studio.py --port {port}"
+                 f" --scene {self._scene!r}"
+                 + (f" --object {self._current_object!r}" if self._current_object else ""))
 
         def on_exit(rc: int):
             self._append_log(
@@ -1810,6 +1837,385 @@ class PipelineWindow:
                     self._lock(ui.Button("Clear Viewpoints", clicked_fn=self._on_clear_viewpoints))
                 # 카메라 스펙 입력은 Preview / Execute 패널로 옮겼다. Show Viewpoints 는
                 # 여전히 h5 스냅샷으로 그 공유 스펙을 채워준다(_sync_camera_spec_from_h5).
+
+    # ------------------------------------------------------------------
+    # Scan Object panel — 도면 없는 물체: ROI → 계획 → 촬영 → 복원
+    # ------------------------------------------------------------------
+    def _build_panel_scan(self):
+        """손목 depth 로 물체를 스캔해 메시를 복원한다 — 도면이 없을 때 이 파이프라인의 입력 만들기.
+
+        버튼 하나가 세 단계를 잇는다: scan_plan.py(서브프로세스, cuRobo) → 촬영(이 프로세스 안,
+        pump 가 프레임마다 CaptureSession.step) → reconstruct.py(서브프로세스, Open3D). 결과는
+        data/{object}/scan/{run}/ 이고, 확인·재복원·내보내기는 Viewpoint Studio 의 Scan 패널이 한다.
+        sim 에서만 돈다 — 촬영이 실제 articulation 을 순간이동시키는데 real 에서는 /joint_states
+        미러가 같은 관절을 잡고 있다.
+        """
+        ui = self._ui
+        frame = ui.CollapsableFrame("Scan Object (no CAD)", height=0, collapsed=True)
+        self._inspection_frames.append(frame)
+        with frame:
+            with ui.VStack(spacing=4):
+                ui.Label(
+                    "Scans the loaded object with a wrist depth camera and rebuilds its mesh "
+                    "(sim only). Review, re-run and export in Viewpoint Studio's Scan panel.",
+                    height=30, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                self._fields["scan_roi_r"] = self._row("ROI radius [m]", 0.15)
+                with ui.HStack(height=26, spacing=6):
+                    self._lock(ui.Button("Fit ROI to Object", clicked_fn=self._on_fit_scan_roi))
+                    self._lock(ui.Button("Show / Update ROI", clicked_fn=self._on_show_scan_roi))
+                    self._lock(ui.Button("Hide ROI", width=80, clicked_fn=self._on_hide_scan_roi))
+                ui.Label("Move the sphere with the viewport gizmo; the radius comes from the field.",
+                         height=18, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                self._fields["scan_name"] = self._row("run name", "default")
+                self._fields["scan_icp"] = self._checkbox_row("ICP pose refine", False)
+                with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
+                    with ui.VStack(spacing=4):
+                        self._fields["scan_n_views"] = self._row("views on the sphere", 48)
+                        self._fields["scan_standoff"] = self._row("standoff [m] (0 = sensor)", 0.0)
+                        self._fields["scan_min_elev"] = self._row("min elevation [deg]", 15.0)
+                        self._fields["scan_max_elev"] = self._row("max elevation [deg]", 85.0)
+                        self._fields["scan_settle"] = self._row("settle frames", 2)
+                        self._fields["scan_max_steps"] = self._row("max frames / pose", 60)
+                with ui.HStack(height=28, spacing=6):
+                    self._btn_scan = self._lock(ui.Button(
+                        "Scan & Reconstruct", clicked_fn=self._on_scan_object))
+                    self._btn_cancel_scan = self._lock(ui.Button(
+                        "Cancel", width=80, clicked_fn=self._on_cancel_scan))
+                with ui.HStack(height=26, spacing=6):
+                    self._lock(ui.Button("Show Result", clicked_fn=self._on_show_scan_result))
+                    self._lock(ui.Button("Hide Result", clicked_fn=self._on_hide_scan_result))
+                self._scan_status_label = ui.Label("idle", height=20, word_wrap=True,
+                                                   style=self._DIM_WIDGET_STYLE)
+
+    def _scan_status(self, text: str, color: int = 0xFF999999):
+        if self._scan_status_label is not None:
+            self._scan_status_label.text = text
+            self._scan_status_label.style = {"color": color}
+
+    def _draw_scan_roi(self, center, radius: float):
+        """ROI 구를 (다시) 그린다. 기즈모로 늘인 스케일은 버리고 반경은 칸 값으로 맞춘다."""
+        import omni.usd
+        from pxr import Gf, UsdGeom, Vt
+
+        stage = omni.usd.get_context().get_stage()
+        sphere = UsdGeom.Sphere.Define(stage, SCAN_ROI_PRIM)
+        sphere.CreateRadiusAttr(float(radius))
+        sphere.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.3, 0.6, 1.0)]))
+        sphere.CreateDisplayOpacityAttr(Vt.FloatArray([0.12]))
+        xf = UsdGeom.Xformable(sphere)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(*(float(v) for v in center)))
+        UsdGeom.Imageable(sphere.GetPrim()).MakeVisible()
+
+    def _read_scan_roi(self):
+        """(center (3,), radius) — 구의 중심은 스테이지(기즈모로 옮긴 값), 반경은 칸. 없으면 None."""
+        import omni.usd
+        from pxr import UsdGeom
+
+        prim = omni.usd.get_context().get_stage().GetPrimAtPath(SCAN_ROI_PRIM)
+        if not prim or not prim.IsValid():
+            return None
+        t = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0).ExtractTranslation()
+        return np.array([float(t[0]), float(t[1]), float(t[2])]), self._get_field("scan_roi_r", float)
+
+    def _on_fit_scan_roi(self):
+        """물체 bbox 를 감싸는 구로 맞춘다(반대각 절반 + 2cm — sim.roi_from_ground_truth 와 같은 식).
+
+        시뮬레이션 편의다: 도면 없는 실물에서는 사람이 구를 끌어다 놓는다. 물체 prim 밑의
+        오버레이(Viewpoints·TiltFan)는 bbox 에서 뺀다.
+        """
+        import omni.usd
+        from pxr import Gf, Usd, UsdGeom
+
+        prim = omni.usd.get_context().get_stage().GetPrimAtPath(TARGET_OBJECT_PRIM)
+        if not prim or not prim.IsValid():
+            self._append_log("[scan] no target object on stage - Load Object first.")
+            return
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                  [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+        box = Gf.Range3d()
+        for child in prim.GetChildren():
+            if child.GetName().startswith(("Viewpoints", TILT_FAN_SCOPE_NAME)):
+                continue
+            rng = cache.ComputeWorldBound(child).ComputeAlignedRange()
+            if not rng.IsEmpty():
+                box.UnionWith(rng)
+        if box.IsEmpty():
+            box = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        lo, hi = np.array(box.GetMin()), np.array(box.GetMax())
+        center, radius = 0.5 * (lo + hi), 0.5 * float(np.linalg.norm(hi - lo)) + 0.02
+        self._fields["scan_roi_r"].set_value(round(radius, 4))
+        self._draw_scan_roi(center, radius)
+        self._append_log(f"[scan] ROI fitted: center {np.round(center, 4).tolist()} r {radius:.4f} m")
+
+    def _on_show_scan_roi(self):
+        roi = self._read_scan_roi()
+        if roi is None:
+            pose = self._read_object_world_pose()
+            if pose is None:
+                self._append_log("[scan] no target object on stage - Load Object first.")
+                return
+            center = np.asarray(pose[0]) + np.array([0.0, 0.0, self._get_field("scan_roi_r", float) * 0.5])
+        else:
+            center = roi[0]
+        self._draw_scan_roi(center, self._get_field("scan_roi_r", float))
+
+    def _on_hide_scan_roi(self):
+        from isaacsim.core.utils import prims
+
+        if prims.is_prim_path_valid(SCAN_ROI_PRIM):
+            prims.delete_prim(SCAN_ROI_PRIM)
+
+    def _hide_scan_overlays(self):
+        """촬영 동안 보이는 시각물을 전부 숨긴다 — 스캔 카메라는 보이는 것을 다 찍는다.
+
+        특히 FOV 평면은 실제 로봇 camera_optical_frame 밑, WD 거리에 있어 스캔 카메라 바로 앞이다.
+        원래 가시성을 기억해 두었다가 _restore_scan_overlays 가 그대로 되돌린다.
+        """
+        import omni.usd
+        from pxr import UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        fixed = {GHOST_ROOT_PATH, ARUCO_MARKER_PRIM, VIEWPOINTS_ROOT_PRIM, SCAN_ROI_PRIM, SCAN_RECON_PRIM}
+        prefixes = (FOV_PLANE_SCOPE_NAME, COLLISION_SPHERES_SCOPE_NAME, CAMERA_RANGE_SCOPE_NAME,
+                    TILT_FAN_SCOPE_NAME)
+        hidden = []
+        for prim in stage.Traverse():
+            if str(prim.GetPath()) not in fixed and not prim.GetName().startswith(prefixes):
+                continue
+            img = UsdGeom.Imageable(prim)
+            if not img:
+                continue
+            hidden.append((str(prim.GetPath()), img.GetVisibilityAttr().Get()))
+            img.MakeInvisible()
+        self._scan_hidden = hidden
+
+    def _restore_scan_overlays(self):
+        import omni.usd
+        from pxr import UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        for path, vis in reversed(self._scan_hidden):
+            prim = stage.GetPrimAtPath(path)
+            if prim and prim.IsValid():
+                UsdGeom.Imageable(prim).GetVisibilityAttr().Set(vis or UsdGeom.Tokens.inherited)
+        self._scan_hidden = []
+
+    def _on_scan_object(self):
+        import omni.timeline
+        from core.reconstruction import storage   # numpy 만 — 이 프로세스에서 안전
+
+        if self._scan_stage is not None:
+            self._append_log("[scan] already running")
+            return
+        if self._pipeline_mode != "inspection":
+            self._append_log("[scan] Inspection pipeline mode only.")
+            return
+        if self._mode != "sim":
+            self._append_log("[scan] sim run mode only - capture teleports the Isaac robot, "
+                             "which the real-robot mirror would fight.")
+            return
+        if not omni.timeline.get_timeline_interface().is_playing():
+            self._append_log("[scan] press Play first - capture needs physics and rendering.")
+            return
+        if (self._gen_runner.running or self._ik_runner.running or self._pub_runner.running
+                or self._sim_executor.running):
+            self._append_log("[scan] another job is running - wait or cancel it first.")
+            return
+        obj = (self._current_object or "").strip()
+        pose = self._read_object_world_pose()
+        if not obj or pose is None:
+            self._append_log("[scan] no target object on stage - Load Object first.")
+            return
+        roi = self._read_scan_roi()
+        if roi is None:
+            self._append_log("[scan] no ROI - click 'Fit ROI to Object' or 'Show / Update ROI'.")
+            return
+        name = self._get_field("scan_name", str).strip()
+        if not SCAN_RUN_NAME_RE.fullmatch(name):
+            self._append_log(f"[scan] run name '{name}' - use letters, digits, _ . - only.")
+            return
+
+        # 기즈모로 옮긴 물체를 config·지지대에 반영한다(시각물도 같이). 계획 서브프로세스에는 pose 를
+        # 따로 넘긴다 — 계획에 남는 장애물이 화면과 같도록.
+        self._place_object_at(*pose)
+        center, radius = roi
+        cmd = [
+            self._uv, "run", "scripts/core/reconstruction/scan_plan.py",
+            "--object", obj, "--scene", self._scene, "--name", name,
+            "--roi-center", *(f"{v:.6f}" for v in center), "--roi-radius", f"{radius:.6f}",
+            "--n-views", str(self._get_field("scan_n_views", int)),
+            "--min-elev", f"{self._get_field('scan_min_elev', float):.3f}",
+            "--max-elev", f"{self._get_field('scan_max_elev', float):.3f}",
+            "--object-position", *(f"{v:.6f}" for v in pose[0]),
+            "--object-quat", *(f"{v:.6f}" for v in pose[1]),
+        ]
+        standoff = self._get_field("scan_standoff", float)
+        if standoff > 0.0:
+            cmd += ["--standoff", f"{standoff:.4f}"]
+        self._scan_ctx = {"object": obj, "name": name, "dir": storage.scan_dir(obj, name),
+                          "icp": self._get_field("scan_icp", bool),
+                          "settle": self._get_field("scan_settle", int),
+                          "max_steps": self._get_field("scan_max_steps", int)}
+        self._scan_stage, self._scan_cancel = "plan", False
+        self._set_busy(self._btn_cancel_scan)
+        self._scan_status("planning scan poses (IK)...", 0xFF2277EE)
+        self._append_log("[scan] $ " + " ".join(cmd))
+        self._scan_runner.start(cmd, cwd=PROJECT_ROOT, on_line=self._append_log,
+                                on_exit=self._on_scan_plan_exit)
+
+    def _on_scan_plan_exit(self, rc: int):
+        if self._scan_runner.cancelled:
+            self._scan_finish("cancelled during planning")
+            return
+        if rc != 0:
+            self._scan_finish(f"planning failed (exit {rc}) - see log", ok=False)
+            return
+        self._start_scan_capture()
+
+    def _start_scan_capture(self):
+        """계획이 끝났다 — 오버레이를 숨기고 촬영 세션을 연다. 이후는 pump 가 프레임마다 민다."""
+        from core.isaac.scan_capture import CaptureSession
+        from core.reconstruction import storage
+
+        ctx = self._scan_ctx
+        self._preview.stop()
+        self._pending_move = None           # 로봇이 움직인다 — 대기 중이던 이동 계획은 낡는다
+        self._on_hide_scan_result()
+        self._hide_scan_overlays()
+        try:
+            plan = storage.load_plan(ctx["dir"])
+            self._scan_session = CaptureSession(
+                ctx["dir"], plan, self._articulation_root, settle=ctx["settle"],
+                max_steps=ctx["max_steps"], log=self._append_log)
+            self._scan_session.start()
+        except Exception as exc:  # noqa: BLE001 — 시작 실패도 깔끔히 되돌린다
+            self._append_log(f"[scan] capture could not start: {exc}")
+            if self._scan_session is not None:
+                self._scan_session.close(restore=True)
+                self._scan_session = None
+            self._restore_scan_overlays()
+            self._scan_finish("capture could not start - see log", ok=False)
+            return
+        self._scan_stage = "capture"
+        self._scan_status(f"capturing 0/{len(plan.q)}...", 0xFF2277EE)
+
+    def _step_scan_capture(self):
+        """pump 에서 프레임마다 — 촬영 한 걸음. 끝나거나 멈추면 정리하고 복원을 띄운다."""
+        import omni.timeline
+
+        session = self._scan_session
+        if session is None:
+            return
+        abort = None
+        if self._scan_cancel:
+            abort = "cancelled"
+        elif not omni.timeline.get_timeline_interface().is_playing():
+            abort = "aborted - timeline stopped"
+        more = False
+        if abort is None:
+            try:
+                more = session.step()
+            except Exception as exc:  # noqa: BLE001
+                abort = f"failed: {exc}"
+        i, n = session.progress
+        if more:
+            self._scan_status(f"capturing {i}/{n}...", 0xFF2277EE)
+            return
+        if abort:
+            session.cancel()
+        summary = session.close(restore=True)
+        self._scan_session = None
+        self._restore_scan_overlays()
+        if abort:
+            self._scan_finish(f"capture {abort}", ok=False)
+            return
+        if not summary.get("n_frames"):
+            self._scan_finish("capture produced no frames - see log", ok=False)
+            return
+        ctx = self._scan_ctx
+        cmd = [self._uv, "run", "scripts/core/reconstruction/reconstruct.py",
+               "--object", ctx["object"], "--scene", self._scene, "--name", ctx["name"]]
+        if ctx["icp"]:
+            cmd.append("--icp")
+        self._scan_stage = "recon"
+        self._scan_status(f"reconstructing ({summary['n_frames']} frames)...", 0xFF2277EE)
+        self._append_log("[scan] $ " + " ".join(cmd))
+        self._scan_runner.start(cmd, cwd=PROJECT_ROOT, on_line=self._append_log,
+                                on_exit=self._on_scan_recon_exit)
+
+    def _on_scan_recon_exit(self, rc: int):
+        import json
+
+        if self._scan_runner.cancelled:
+            self._scan_finish("cancelled during reconstruction (frames are kept)")
+            return
+        if rc != 0:
+            self._scan_finish(f"reconstruction failed (exit {rc}) - see log", ok=False)
+            return
+        msg = "done"
+        try:
+            report = json.loads((self._scan_ctx["dir"] / "recon.json").read_text())
+            e = report.get("eval")
+            msg = f"done - {report['faces']} faces"
+            if e:
+                msg += (f", accuracy median {e['accuracy_mm']['median']:.2f} mm, "
+                        f"{e['completeness']['within_1mm'] * 100:.1f}% within 1 mm")
+        except Exception as exc:  # noqa: BLE001 — 요약은 덤이다
+            self._append_log(f"[scan] could not read recon.json: {exc}")
+        self._append_log(f"[scan] {msg}. Review / re-run / export in Viewpoint Studio's Scan panel "
+                         f"(run '{self._scan_ctx['name']}').")
+        self._scan_finish(msg)
+
+    def _scan_finish(self, msg: str, ok: bool = True):
+        self._scan_stage = None
+        self._scan_status(msg, 0xFF33CC33 if ok else 0xFFCC7722)
+        self._clear_busy()
+
+    def _on_cancel_scan(self):
+        if self._scan_stage in ("plan", "recon"):
+            self._append_log("[scan] terminating...")
+            self._scan_runner.terminate()
+        elif self._scan_stage == "capture":
+            # 정리(카메라 해제·로봇 복귀)는 pump 에서 한다 — UI 이벤트 안에서 하지 않는다.
+            self._scan_cancel = True
+
+    def _on_show_scan_result(self):
+        """복원 메시(world 좌표)를 스테이지에 올린다 — 물체와 겹쳐 보며 확인하는 용도."""
+        import omni.usd
+        import trimesh
+        from pxr import Gf, UsdGeom, Vt
+        from core.reconstruction import storage
+
+        obj = (self._current_object or "").strip()
+        name = self._get_field("scan_name", str).strip()
+        path = storage.scan_dir(obj, name) / "recon.ply"
+        if not obj or not path.exists():
+            self._append_log(f"[scan] no reconstruction at {path}")
+            return
+        mesh = trimesh.load(str(path), force="mesh")
+        self._on_hide_scan_result()
+        stage = omni.usd.get_context().get_stage()
+        geom = UsdGeom.Mesh.Define(stage, SCAN_RECON_PRIM)
+        # prim 원점을 메시의 바닥 중심에 둔다(물체 prim 과 같은 규약). 정점을 world 그대로 넣으면
+        # 원점이 world 원점 = 로봇 베이스가 되어, 기즈모로 끌 때 축이 로봇에 잡힌다.
+        lo, hi = mesh.bounds
+        origin = np.array([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, lo[2]])
+        geom.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*map(float, v)) for v in mesh.vertices - origin]))
+        xf = UsdGeom.Xformable(geom)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(*(float(v) for v in origin)))
+        geom.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(mesh.faces)))
+        geom.CreateFaceVertexIndicesAttr(Vt.IntArray([int(i) for i in mesh.faces.ravel()]))
+        geom.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.35, 0.8, 0.45)]))
+        geom.CreateDoubleSidedAttr(True)
+        self._append_log(f"[scan] showing {path.relative_to(PROJECT_ROOT)} ({len(mesh.faces)} faces)")
+
+    def _on_hide_scan_result(self):
+        from isaacsim.core.utils import prims
+
+        if prims.is_prim_path_valid(SCAN_RECON_PRIM):
+            prims.delete_prim(SCAN_RECON_PRIM)
 
     def _build_panel_solve_ik(self):
         """IK 후보를 풀어 data/{object}/ik/{N}/*.h5 로 저장하는 단계.
@@ -4709,6 +5115,12 @@ class PipelineWindow:
     EXECUTE_GATE_REFRESH_DT = 0.25
 
     def pump(self, dt: float):
+        # 촬영 스텝은 러너 pump 보다 **먼저** 부른다. 계획 서브프로세스의 on_exit(러너 pump 안)가
+        # 세션을 시작하므로, 순서가 반대면 시작 직후 렌더 없이 step 이 한 번 세어진다 — step 은
+        # "렌더 한 번 뒤" 에만 불려야 한다(CaptureSession 의 계약).
+        if self._scan_stage == "capture":
+            self._step_scan_capture()
+        self._scan_runner.pump()
         self._gen_runner.pump()
         self._ik_runner.pump()
         self._pub_runner.pump()
@@ -4717,8 +5129,10 @@ class PipelineWindow:
         self._studio_runner.pump()
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
+        # 촬영 중에는 멈춘다 — 다시 그려지는 선이 스캔 카메라 depth 에 찍힌다.
         try:
-            self._tick_camera_ranges(dt)
+            if self._scan_stage != "capture":
+                self._tick_camera_ranges(dt)
         except Exception:  # noqa: BLE001
             pass
         # Keep inspection-camera viewports square so the full FOV is shown, and
@@ -4733,7 +5147,8 @@ class PipelineWindow:
         # controller and abort the trajectory, and switching run mode (sim/real) would
         # move the ground under a job that already picked its target.
         busy = (self._pub_runner.running or self._sim_executor.running
-                or self._gen_runner.running or self._ik_runner.running)
+                or self._gen_runner.running or self._ik_runner.running
+                or self._scan_stage is not None)
         if self._pipeline_combo is not None:
             self._pipeline_combo.enabled = not busy
         if self._mode_combo is not None:

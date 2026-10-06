@@ -118,6 +118,7 @@ from core.viewpoint import (
 )
 from core.viewpoint import brep, select, visibility
 from apps.studio_defects import DefectsPanel
+from apps.studio_scan import ScanPanel
 
 MESH_RGB = (180, 180, 180)
 SURFACE_RGB = (255, 255, 255)
@@ -456,6 +457,7 @@ class Studio:
         self._refresh_mesh_options()
         self._refresh_existing_options()
         self.defects.on_object_change(initial_object)
+        self.scan.on_object_change(initial_object)
 
     # ---------- GUI construction ----------
     def _build_gui(self, initial_object: str) -> None:
@@ -686,6 +688,10 @@ class Studio:
         self.defects = DefectsPanel(self)
         self.defects.build_gui(g)
 
+        # 도면 없는 복원 — Isaac 이 찍은 스캔을 보고, 다시 복원하고, recon.obj 로 내보낸다.
+        self.scan = ScanPanel(self)
+        self.scan.build_gui(g)
+
         # 화면에 무엇을 그릴지 — 순수 토글만 둔다. hops 는 표시가 아니라 데이터를 다시
         # 계산하는 렌즈라 여기가 아니라 진단창 옆에 있다.
         with g.add_folder("Display"):
@@ -896,6 +902,7 @@ class Studio:
         self._refresh_mesh_options()
         self.tb_material.value = config.OBJECT_TARGET_MATERIAL.get(obj) or ""
         self.defects.on_object_change(obj)
+        self.scan.on_object_change(obj)
 
     def _on_existing_change(self) -> None:
         if self._suppress_existing:
@@ -1095,6 +1102,7 @@ class Studio:
             except Exception:  # noqa: BLE001
                 pass
         self.defects.set_enabled(enabled)
+        self.scan.set_enabled(enabled)
 
     def _graph_knobs(self) -> dict:
         return {"k_neighbors": int(self.nb_knn.value),

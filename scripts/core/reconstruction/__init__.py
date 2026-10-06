@@ -9,12 +9,15 @@
   pipeline.py      reconstruct(): 마스킹 → (ICP) → TSDF → 메시     (Open3D) — 앱의 진입점
   sim.py           시뮬레이션 전용: 정답 메시·ROI·pose 오차 주입·평가 — 실물 경로는 안 쓴다
 
+앱에서 (사용자가 쓰는 경로):
+  isaac_pipeline "Scan Object" 패널   ROI → 계획(서브프로세스) → 촬영(앱 안, CaptureSession) → 복원(서브프로세스)
+  viewpoint_studio "Scan" 패널        스캔 보기 · 다시 복원 · recon.obj 내보내기 (apps/studio_scan.py)
+
 CLI (단계마다 프로세스가 다르다 — Isaac 의 Python 과 cuRobo 를 섞지 않는 리포 규약):
   scan_plan.py                 (uv, cuRobo)  계획 → plan.npz
-  ../isaac/scan_capture.py     (Isaac)       관절 순간이동 → depth 렌더 → frames/
+  ../isaac/scan_capture.py     (Isaac)       관절 순간이동 → depth 렌더 → frames/ (CaptureSession)
   reconstruct.py               (uv, Open3D)  프레임 → recon.ply (+ 정답 대비 평가)
   export_recon.py              (uv)          recon.ply → 정답 물체 좌표의 recon.obj (평가용)
-  ../../apps/scan_viewer.py    (viser)       점군·복원·정답 보기
 
 여기서는 아무것도 import 하지 않는다 — Isaac 프로세스가 sensor·storage 만 가져가는데, 패키지
 __init__ 이 planning(cuRobo)·pipeline(Open3D) 을 끌고 오면 안 되기 때문이다.

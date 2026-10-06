@@ -45,12 +45,12 @@ from scipy.spatial.transform import Rotation
 from core.reconstruction.segment import OBJECT, classify_pixels
 
 
-def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride):
+def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride, obstacles):
     """물체 점(ROI 중심 원점 좌표) + 법선 — 측정 pose 로 펼친다."""
     import open3d as o3d
 
     pts, labels = classify_pixels(frame["depth"], frame["K"], pose, spec, roi_c, roi_r,
-                                  margin_m, stride=stride)
+                                  margin_m, stride=stride, obstacles=obstacles)
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[labels == OBJECT] - roi_c))
     pcd = pcd.voxel_down_sample(voxel_m)
     pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=4.0 * voxel_m, max_nn=30))
@@ -92,7 +92,7 @@ def refine_poses(frames, poses, spec, roi_center, roi_radius, *,
                  obstacle_margin_m: float = 0.006, voxel_m: float = 0.0015, stride: int = 2,
                  max_pair_angle_deg: float = 60.0, min_fitness: float = 0.2,
                  corr_schedule_m=(0.008, 0.004, 0.002), rounds: int = 3,
-                 robust_mm: float = 0.5, irls_iters: int = 10, log=print) -> tuple[np.ndarray, dict]:
+                 robust_mm: float = 0.5, irls_iters: int = 10, obstacles=None, log=print) -> tuple[np.ndarray, dict]:
     """측정 pose 를 ICP 다중 정렬로 바로잡는다 → (보정된 pose (N,4,4), 진단).
 
     prior_*: 측정 pose 를 얼마나 믿나(로봇 FK + hand-eye 오차의 대략적 크기). 데이터가 잡아 주는
@@ -118,7 +118,8 @@ def refine_poses(frames, poses, spec, roi_center, roi_radius, *,
     diag = {"rounds": []}
     for rnd in range(rounds):
         current = C @ np.stack([_exp(x) for x in xi]) @ np.linalg.inv(C) @ poses
-        clouds = [_frame_cloud(f, p, spec, roi_center, roi_radius, obstacle_margin_m, voxel_m, stride)
+        clouds = [_frame_cloud(f, p, spec, roi_center, roi_radius, obstacle_margin_m, voxel_m,
+                               stride, obstacles)
                   for f, p in zip(frames, current)]
         dirs = roi_center - current[:, :3, 3]
         dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)

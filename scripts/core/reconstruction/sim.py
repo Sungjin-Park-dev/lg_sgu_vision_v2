@@ -1,9 +1,13 @@
 """시뮬레이션 전용 — 정답 CAD 가 있을 때만 쓰는 것들. 실물 파이프라인은 이 모듈을 import 하지 않는다.
 
-  world_T_object / ground_truth_mesh   씬 배치로 놓은 정답 source.obj (world 좌표)
+  world_T_object / ground_truth_mesh   정답 source.obj 를 물체 pose 로 world 에 놓는다
+  scan_object_pose                     스캔 당시의 물체 pose (계획에 남긴 값, 없으면 씬 배치)
   roi_from_ground_truth                정답 bbox 를 감싸는 ROI 구 — 실물에선 사용자가 준다
   perturb_poses / pose_errors          측정 pose 오차를 섞고, 남은 오차를 공통/프레임 간으로 나눠 잰다
-  closest_on / evaluate                복원 메시를 정답과 비교 (정확도·완전성·법선)
+  closest_on / evaluate / eval_report  복원 메시를 정답과 비교 (정확도·완전성·법선)
+  export_gt_frame                      복원 메시를 정답 물체 좌표의 OBJ 로 (평가용)
+
+물체 pose 는 (7,) [x,y,z, qw,qx,qy,qz] 다(storage.ScanPlan.object_pose 와 같은 꼴).
 """
 
 from __future__ import annotations
@@ -19,26 +23,35 @@ from common.math_utils import quaternion_to_rotation_matrix
 DOWN_FACING_DEG = 10.0
 
 
-def world_T_object() -> np.ndarray:
-    """씬 배치(config.TARGET_OBJECT)의 4×4 — apply_object_placement 뒤에 부른다."""
+def world_T_object(pose=None) -> np.ndarray:
+    """물체 pose 의 4×4. pose 가 없으면 config.TARGET_OBJECT (apply_object_placement 뒤에 부른다)."""
+    if pose is None:
+        pos, quat = config.TARGET_OBJECT["position"], config.TARGET_OBJECT["rotation"]
+    else:
+        pos, quat = pose[:3], pose[3:7]
     T = np.eye(4)
-    T[:3, :3] = quaternion_to_rotation_matrix(np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64))
-    T[:3, 3] = np.asarray(config.TARGET_OBJECT["position"], dtype=np.float64)
+    T[:3, :3] = quaternion_to_rotation_matrix(np.asarray(quat, dtype=np.float64))
+    T[:3, 3] = np.asarray(pos, dtype=np.float64)
     return T
 
 
-def ground_truth_mesh(object_name: str):
-    """정답 source.obj 를 씬 배치로 world 에 놓은 trimesh."""
+def scan_object_pose(plan):
+    """스캔 당시의 물체 pose (7,) — 계획에 남긴 값. 옛 계획이면 None(→ 지금 씬 배치)."""
+    return None if plan.object_pose is None else np.asarray(plan.object_pose, dtype=np.float64)
+
+
+def ground_truth_mesh(object_name: str, pose=None):
+    """정답 source.obj 를 물체 pose 로 world 에 놓은 trimesh."""
     import trimesh
 
     mesh = trimesh.load(str(config.get_mesh_path(object_name, mesh_type="source")), force="mesh")
-    mesh.apply_transform(world_T_object())
+    mesh.apply_transform(world_T_object(pose))
     return mesh
 
 
-def roi_from_ground_truth(object_name: str, margin_m: float = 0.02):
+def roi_from_ground_truth(object_name: str, margin_m: float = 0.02, pose=None):
     """정답 메시의 배치 bbox 를 감싸는 구 → (center (3,), radius)."""
-    lo, hi = ground_truth_mesh(object_name).bounds
+    lo, hi = ground_truth_mesh(object_name, pose).bounds
     return 0.5 * (lo + hi), 0.5 * float(np.linalg.norm(hi - lo)) + margin_m
 
 
@@ -160,3 +173,28 @@ def evaluate(recon, gt, n_samples: int = 50000) -> dict:
                        "p95": float(np.percentile(ang[near], 95)) if near.any() else None},
         "gt_samples_excluding_bottom": int(seen.sum()),
     }
+
+
+def eval_report(recon, gt) -> dict:
+    """recon{_tag}.json 에 덧붙일 정답 대비 평가."""
+    return {"eval": evaluate(recon, gt), "gt_extents_mm": (gt.extents * 1000).round(2).tolist()}
+
+
+def export_gt_frame(recon, object_name: str, pose=None, out_name: str = "recon.obj"):
+    """복원 메시(world)를 정답 물체 좌표로 옮겨 data/{object}/mesh/{out_name} 에 쓴다.
+
+    정답 source.obj 와 같은 좌표라 복원 메시로 만든 viewpoint 를 정답 것과 그대로 비교할 수 있다.
+    정답 배치를 빌려 쓰는 셈이라 도면 없는 실제 흐름은 아니다. → (경로, bbox 비교 문자열).
+    """
+    import trimesh
+
+    local = recon.copy()
+    local.apply_transform(np.linalg.inv(world_T_object(pose)))
+    out = config.DATA_ROOT / object_name / "mesh" / out_name
+    local.export(str(out))
+    gt = trimesh.load(str(config.get_mesh_path(object_name, mesh_type="source")), force="mesh")
+    lines = []
+    for name, m in (("recon", local), ("source", gt)):
+        lo, hi = m.bounds * 1000.0
+        lines.append(f"{name:6s} bbox mm  min {np.round(lo, 2).tolist()}  max {np.round(hi, 2).tolist()}")
+    return out, "\n".join(lines)

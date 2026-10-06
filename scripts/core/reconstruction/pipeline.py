@@ -58,7 +58,7 @@ def fuse_tsdf(frames, poses, plan: ScanPlan, params: FusionParams):
     for fr, pose in zip(frames, poses):
         depth = fr["depth"].astype(np.float64).copy()
         _, labels = classify_pixels(depth, fr["K"], pose, spec, plan.roi_center, plan.roi_radius,
-                                    params.obstacle_margin_mm / 1000.0)
+                                    params.obstacle_margin_mm / 1000.0, obstacles=plan.obstacles)
         depth[labels != OBJECT] = 0.0               # Open3D 는 0 을 무효 depth 로 본다
         counts += np.bincount(labels.ravel(), minlength=len(LABEL_NAMES))
         h, w = depth.shape
@@ -105,7 +105,7 @@ def reconstruct(frames, plan: ScanPlan, params: FusionParams = FusionParams(), *
     stats: dict = {}
     if icp:
         poses, stats["icp"] = refine_poses(frames, poses, plan.camera, plan.roi_center,
-                                           plan.roi_radius, log=log)
+                                           plan.roi_radius, obstacles=plan.obstacles, log=log)
 
     vol, counts = fuse_tsdf(frames, poses, plan, params)
     total = max(int(counts.sum()), 1)
@@ -121,3 +121,12 @@ def reconstruct(frames, plan: ScanPlan, params: FusionParams = FusionParams(), *
     log(f"[recon] mesh: {mstats['raw_faces']} -> {len(mesh.faces)} triangles "
         f"({mstats['components']} components, kept the largest) in {stats['seconds']}s")
     return ReconResult(mesh=mesh, poses=poses, stats=stats)
+
+
+def recon_report(params: FusionParams, result: ReconResult, icp: bool) -> dict:
+    """recon{_tag}.json 에 남길 설정·통계·메시 요약 (정답 평가는 sim.eval_report 가 덧붙인다)."""
+    lo, hi = result.mesh.bounds
+    return {**params.to_dict(), "trunc_mm": params.voxel_mm * params.trunc_voxels,
+            "icp": bool(icp), "stats": result.stats, "faces": int(len(result.mesh.faces)),
+            "watertight": bool(result.mesh.is_watertight),
+            "extents_mm": ((hi - lo) * 1000).round(2).tolist()}

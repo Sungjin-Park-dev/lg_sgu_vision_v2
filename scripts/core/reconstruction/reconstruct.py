@@ -26,7 +26,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config, scene_config  # noqa: E402
 from core.reconstruction import sim, storage  # noqa: E402
-from core.reconstruction.pipeline import FusionParams, reconstruct  # noqa: E402
+from core.reconstruction.pipeline import FusionParams, reconstruct, recon_report  # noqa: E402
 
 
 def parse_args():
@@ -98,19 +98,12 @@ def main():
         print_pose("after ICP", pose_report["after ICP"])
 
     recon = result.mesh
-    lo, hi = recon.bounds
-    report = {
-        **params.to_dict(), "trunc_mm": params.voxel_mm * params.trunc_voxels,
-        "pose_noise": {"trans_mm": args.pose_noise_mm, "rot_deg": args.pose_noise_deg,
-                       "seed": args.noise_seed},
-        "icp": bool(args.icp), "pose_errors": pose_report, "stats": result.stats,
-        "faces": int(len(recon.faces)), "watertight": bool(recon.is_watertight),
-        "extents_mm": ((hi - lo) * 1000).round(2).tolist(),
-    }
+    report = {**recon_report(params, result, args.icp),
+              "pose_noise": {"trans_mm": args.pose_noise_mm, "rot_deg": args.pose_noise_deg,
+                             "seed": args.noise_seed},
+              "pose_errors": pose_report}
     if not args.no_eval:
-        gt = sim.ground_truth_mesh(args.object)
-        report["eval"] = sim.evaluate(recon, gt)
-        report["gt_extents_mm"] = (gt.extents * 1000).round(2).tolist()
+        report.update(sim.eval_report(recon, sim.ground_truth_mesh(args.object, sim.scan_object_pose(plan))))
         print_eval(report["eval"], report["extents_mm"], report["gt_extents_mm"])
     path = storage.save_recon(scan, recon, report, tag=args.tag)
     print(f"[recon] -> {path.relative_to(PROJECT_ROOT)}")

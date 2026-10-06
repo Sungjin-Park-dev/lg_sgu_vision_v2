@@ -3,6 +3,10 @@
 
 계획 로직은 planning.plan_scan 에 있다. 이 스크립트는 ROI 를 정하고 저장만 한다.
 
+물체 pose 를 주면(--object-position/--object-quat, Isaac 이 스테이지에서 읽어 넘긴다) 씬 배치
+대신 그것을 쓰고 지지대도 거기 맞춘다. 계획에는 그 pose 와 장애물 OBB 를 함께 남긴다 — 복원·
+Studio 가 촬영 당시의 셀로 점을 지우게 하려는 것이다(storage.ScanPlan).
+
 관심 영역을 안 주면 시뮬레이션 편의상 정답 메시(source.obj)의 배치 bbox 에서 만든다
 (sim.roi_from_ground_truth) — 도면 없는 상황에서는 사용자가 줘야 하는 값이다.
 
@@ -26,6 +30,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from common import config, scene_config  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
+from core.reconstruction.storage import config_object_pose, snapshot_obstacles  # noqa: E402
 from core.reconstruction.planning import plan_scan  # noqa: E402
 from core.reconstruction.sensor import DEFAULT_SCAN_CAMERA  # noqa: E402
 
@@ -45,6 +50,10 @@ def parse_args():
     p.add_argument("--min-elev", type=float, default=15.0, help="최저 앙각 (deg)")
     p.add_argument("--max-elev", type=float, default=85.0, help="최고 앙각 (deg)")
     p.add_argument("--ik-seeds", type=int, default=32)
+    p.add_argument("--object-position", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
+                   help="물체 바닥 중심 (robot frame, m) — 씬 배치 대신 (Isaac 스테이지 pose)")
+    p.add_argument("--object-quat", type=float, nargs=4, default=None, metavar=("W", "X", "Y", "Z"),
+                   help="물체 회전 (w,x,y,z) — 씬 배치 대신")
     return p.parse_args()
 
 
@@ -52,6 +61,16 @@ def main():
     args = parse_args()
     scene_config.apply_cli(args, config)
     config.apply_object_placement(args.object)
+    pose_source = "scene_placement"
+    if args.object_position is not None:
+        config.TARGET_OBJECT["position"] = np.asarray(args.object_position, dtype=np.float64)
+        pose_source = "cli"
+    if args.object_quat is not None:
+        config.TARGET_OBJECT["rotation"] = np.asarray(args.object_quat, dtype=np.float64)
+        pose_source = "cli"
+    # 지지대는 물체 바닥에 맞춰 늘고 준다. planning.collision_world 는 config.OBSTACLES 를 그대로
+    # 읽으므로(build_collision_world 처럼 다시 맞추지 않는다) 덮어쓴 뒤 여기서 맞춰야 한다.
+    config.sync_support_to_target()
 
     if args.roi_center is not None and args.roi_radius is not None:
         center, radius = np.asarray(args.roi_center, dtype=np.float64), float(args.roi_radius)
@@ -71,7 +90,9 @@ def main():
     except ValueError as exc:
         sys.exit(f"[plan] {exc}")
     plan.meta = {"object": args.object, "scene": config.ACTIVE_SCENE, "roi_source": roi_source,
-                 **plan.meta}
+                 "object_pose_source": pose_source, **plan.meta}
+    plan.object_pose = config_object_pose()
+    plan.obstacles, plan.obstacle_names = snapshot_obstacles()
 
     out = storage.scan_dir(args.object, args.name)
     storage.save_plan(out, plan)

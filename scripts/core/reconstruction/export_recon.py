@@ -18,8 +18,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
@@ -41,24 +39,19 @@ def parse_args():
 def main():
     args = parse_args()
     scene_config.apply_cli(args, config)
-    if not config.apply_object_placement(args.object):
-        sys.exit(f"'{args.object}' 의 배치가 씬에 없다 — 정답 좌표로 옮길 수 없다")
+    scan = storage.scan_dir(args.object, args.name)
+    pose = sim.scan_object_pose(storage.load_plan(scan))
+    # 계획에 스캔 당시 pose 가 있으면 그것을 쓴다. 옛 계획만 씬 배치에 기댄다.
+    if pose is None and not config.apply_object_placement(args.object):
+        sys.exit(f"'{args.object}' 의 배치가 계획에도 씬에도 없다 — 정답 좌표로 옮길 수 없다")
 
-    recon = storage.load_recon(storage.scan_dir(args.object, args.name), args.tag)
+    recon = storage.load_recon(scan, args.tag)
     if recon is None:
         sys.exit("복원 메시가 없다 — reconstruct.py 를 먼저 돌린다")
-    recon.apply_transform(np.linalg.inv(sim.world_T_object()))
-    out = config.DATA_ROOT / args.object / "mesh" / args.out
-    recon.export(str(out))
-
-    # 같은 좌표에 놓였는지 — 정답 source.obj 와 bbox 를 비교한다.
-    import trimesh
-
-    gt = trimesh.load(str(config.get_mesh_path(args.object, mesh_type="source")), force="mesh")
+    out, bbox = sim.export_gt_frame(recon, args.object, pose, args.out)
     print(f"[export] {len(recon.faces)} faces -> {out.relative_to(PROJECT_ROOT)}")
-    for name, m in (("recon", recon), ("source", gt)):
-        lo, hi = m.bounds * 1000.0
-        print(f"[export]   {name:6s} bbox mm  min {np.round(lo, 2).tolist()}  max {np.round(hi, 2).tolist()}")
+    for line in bbox.splitlines():
+        print(f"[export]   {line}")
 
 
 if __name__ == "__main__":
