@@ -81,6 +81,24 @@ def add_scan_camera(spec: ScanCameraSpec) -> str:
     return path
 
 
+# "새 자세의 화면인가" 판정 — 픽셀이 이만큼 이상 바뀐 비율이 이보다 커야 새 화면으로 본다.
+# 비트 단위로 "다르다" 만 보면 안 된다: 순간이동 직후 렌더러가 **직전 자세 화면을 미세하게 흔들린
+# 채로**(물리 정지 판정 전의 µm 움직임) 다시 내보낼 때가 있고, 그 화면이 "다르다" 를 통과한 뒤 두 번
+# 같게 나와 확정됐다 — cylinder_sample 에서 25번 자세 화면이 26번 pose 로 저장돼(평균 차 0.00mm)
+# 물체 옆에 덩어리가 복원됐다. 연속한 스캔 자세는 방향이 크게 달라 진짜 새 화면이면 대부분이 바뀐다.
+VIEW_CHANGE_TOL_M = 0.005
+VIEW_CHANGE_MIN_FRAC = 0.01
+
+
+def _view_changed(a: np.ndarray, b: np.ndarray) -> bool:
+    """두 depth 가 의미 있게 다른 화면인가 — 유효/무효가 바뀌었거나 5mm 넘게 달라진 픽셀이 1% 넘나."""
+    fa, fb = np.isfinite(a), np.isfinite(b)
+    both = fa & fb
+    changed = (fa != fb)
+    changed[both] |= np.abs(a[both] - b[both]) > VIEW_CHANGE_TOL_M
+    return float(changed.mean()) > VIEW_CHANGE_MIN_FRAC
+
+
 def _pose_matrix(pos, quat_wxyz) -> np.ndarray:
     """Isaac 의 (pos, quat wxyz) → 4×4. 쿼터니언이 float32 로 오므로 float64 로 정규화부터 한다."""
     q = np.asarray(quat_wxyz, dtype=np.float64)
@@ -95,7 +113,8 @@ class CaptureSession:
 
     새 자세의 depth 판정: 렌더는 비동기라 annotator 가 몇 프레임 전 화면을 준다. 몇 프레임을
     넘겨야 하는지는 고정돼 있지 않다(3장 시험에선 맞았던 고정 4프레임이 42장에선 한 자세씩
-    밀렸다). 그래서 **직전 자세의 depth 와 다르고, 연속 두 번 같은** 값이 나올 때까지 기다린다 —
+    밀렸다). 그래서 **직전 자세의 depth 와 의미 있게 다르고(_view_changed), 연속 두 번 같은** 값이
+    나올 때까지 기다린다 —
     로봇은 순간이동 뒤 멈춰 있고 depth 렌더는 결정적이라, 같은 값이 두 번 나오면 그게 지금 자세의
     화면이다. ``steps`` 는 순간이동 뒤 렌더 횟수다(물리 엔진이 정지로 판정할 때까지 대부분 ~29 —
     headless 42장 20초).
@@ -198,7 +217,7 @@ class CaptureSession:
             return True
         if d is not None:
             d = np.asarray(d, dtype=np.float32)
-            fresh = self._prev is None or not np.array_equal(d, self._prev)
+            fresh = self._prev is None or _view_changed(d, self._prev)
             if fresh and self._last is not None and np.array_equal(d, self._last):
                 self._save(d)
                 return self._advance()

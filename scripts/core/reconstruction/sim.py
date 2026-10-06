@@ -2,7 +2,6 @@
 
   world_T_object / ground_truth_mesh   정답 source.obj 를 물체 pose 로 world 에 놓는다
   scan_object_pose                     스캔 당시의 물체 pose (계획에 남긴 값, 없으면 씬 배치)
-  roi_from_ground_truth                정답 bbox 를 감싸는 ROI 구 — 실물에선 사용자가 준다
   perturb_poses / pose_errors          측정 pose 오차를 섞고, 남은 오차를 공통/프레임 간으로 나눠 잰다
   closest_on / evaluate / eval_report  복원 메시를 정답과 비교 (정확도·완전성·법선)
   export_gt_frame                      복원 메시를 정답 물체 좌표의 OBJ 로 (평가용)
@@ -47,12 +46,6 @@ def ground_truth_mesh(object_name: str, pose=None):
     mesh = trimesh.load(str(config.get_mesh_path(object_name, mesh_type="source")), force="mesh")
     mesh.apply_transform(world_T_object(pose))
     return mesh
-
-
-def roi_from_ground_truth(object_name: str, margin_m: float = 0.02, pose=None):
-    """정답 메시의 배치 bbox 를 감싸는 구 → (center (3,), radius)."""
-    lo, hi = ground_truth_mesh(object_name, pose).bounds
-    return 0.5 * (lo + hi), 0.5 * float(np.linalg.norm(hi - lo)) + margin_m
 
 
 # ---------------------------------------------------------------------------

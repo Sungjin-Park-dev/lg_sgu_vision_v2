@@ -1859,13 +1859,15 @@ class PipelineWindow:
                     "Scans the loaded object with a wrist depth camera and rebuilds its mesh "
                     "(sim only). Review, re-run and export in Viewpoint Studio's Scan panel.",
                     height=30, word_wrap=True, style=self._DIM_WIDGET_STYLE)
-                self._fields["scan_roi_r"] = self._row("ROI radius [m]", 0.15)
+                self._fields["scan_roi_r"] = self._row("ROI radius [m]", 0.20)
                 with ui.HStack(height=26, spacing=6):
-                    self._lock(ui.Button("Fit ROI to Object", clicked_fn=self._on_fit_scan_roi))
-                    self._lock(ui.Button("Show / Update ROI", clicked_fn=self._on_show_scan_roi))
+                    self._lock(ui.Button("ROI at Placement", clicked_fn=self._on_scan_roi_at_placement))
+                    self._lock(ui.Button("Update Radius", clicked_fn=self._on_update_scan_roi))
                     self._lock(ui.Button("Hide ROI", width=80, clicked_fn=self._on_hide_scan_roi))
-                ui.Label("Move the sphere with the viewport gizmo; the radius comes from the field.",
-                         height=18, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                ui.Label("The sphere is centred where the object is placed (its pose, e.g. from the "
+                         "ArUco marker). Radius ~ the object's largest size; a loose sphere is fine. "
+                         "Move it with the gizmo if needed.",
+                         height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
                 self._fields["scan_name"] = self._row("run name", "default")
                 self._fields["scan_icp"] = self._checkbox_row("ICP pose refine", False)
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
@@ -1918,47 +1920,31 @@ class PipelineWindow:
         t = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0).ExtractTranslation()
         return np.array([float(t[0]), float(t[1]), float(t[2])]), self._get_field("scan_roi_r", float)
 
-    def _on_fit_scan_roi(self):
-        """물체 bbox 를 감싸는 구로 맞춘다(반대각 절반 + 2cm — sim.roi_from_ground_truth 와 같은 식).
+    def _on_scan_roi_at_placement(self) -> bool:
+        """물체 놓는 위치(물체 pose = 바닥 중심)를 중심으로 ROI 구를 (다시) 만든다.
 
-        시뮬레이션 편의다: 도면 없는 실물에서는 사람이 구를 끌어다 놓는다. 물체 prim 밑의
-        오버레이(Viewpoints·TiltFan)는 bbox 에서 뺀다.
+        도면이 없어도 **어디 놓였는지**는 안다(ArUco 마커 등으로 물체 pose 를 정한다). 크기는 칸의
+        반경으로 대충 준다 — 구의 아래 절반은 받침·테이블에 묻히지만 그것들은 씬 장애물로 지워진다.
+        반경 ≥ √(바닥 반폭² + 높이²) 면 물체 꼭대기 모서리까지 들어간다. 실험으로 ROI 가 넉넉하거나
+        5cm 어긋나도 복원이 같았고(넓어진 ROI 로 들어온 점은 장애물로 지워진다), 이 방식은 정답 bbox
+        에 맞춘 ROI 와 같은 결과였다(cylinder 95.1% vs 95.0%, sample 48.1% vs 47.3%).
         """
-        import omni.usd
-        from pxr import Gf, Usd, UsdGeom
-
-        prim = omni.usd.get_context().get_stage().GetPrimAtPath(TARGET_OBJECT_PRIM)
-        if not prim or not prim.IsValid():
+        pose = self._read_object_world_pose()
+        if pose is None:
             self._append_log("[scan] no target object on stage - Load Object first.")
-            return
-        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
-                                  [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-        box = Gf.Range3d()
-        for child in prim.GetChildren():
-            if child.GetName().startswith(("Viewpoints", TILT_FAN_SCOPE_NAME)):
-                continue
-            rng = cache.ComputeWorldBound(child).ComputeAlignedRange()
-            if not rng.IsEmpty():
-                box.UnionWith(rng)
-        if box.IsEmpty():
-            box = cache.ComputeWorldBound(prim).ComputeAlignedRange()
-        lo, hi = np.array(box.GetMin()), np.array(box.GetMax())
-        center, radius = 0.5 * (lo + hi), 0.5 * float(np.linalg.norm(hi - lo)) + 0.02
-        self._fields["scan_roi_r"].set_value(round(radius, 4))
-        self._draw_scan_roi(center, radius)
-        self._append_log(f"[scan] ROI fitted: center {np.round(center, 4).tolist()} r {radius:.4f} m")
+            return False
+        radius = self._get_field("scan_roi_r", float)
+        self._draw_scan_roi(pose[0], radius)
+        self._append_log(f"[scan] ROI at placement: center {np.round(pose[0], 4).tolist()} r {radius:.3f} m")
+        return True
 
-    def _on_show_scan_roi(self):
+    def _on_update_scan_roi(self):
+        """반경 칸을 구에 반영한다. 기즈모로 옮긴 중심은 그대로 두고, 늘인 스케일은 버린다."""
         roi = self._read_scan_roi()
         if roi is None:
-            pose = self._read_object_world_pose()
-            if pose is None:
-                self._append_log("[scan] no target object on stage - Load Object first.")
-                return
-            center = np.asarray(pose[0]) + np.array([0.0, 0.0, self._get_field("scan_roi_r", float) * 0.5])
-        else:
-            center = roi[0]
-        self._draw_scan_roi(center, self._get_field("scan_roi_r", float))
+            self._on_scan_roi_at_placement()
+            return
+        self._draw_scan_roi(roi[0], self._get_field("scan_roi_r", float))
 
     def _on_hide_scan_roi(self):
         from isaacsim.core.utils import prims
@@ -2028,9 +2014,10 @@ class PipelineWindow:
             self._append_log("[scan] no target object on stage - Load Object first.")
             return
         roi = self._read_scan_roi()
-        if roi is None:
-            self._append_log("[scan] no ROI - click 'Fit ROI to Object' or 'Show / Update ROI'.")
-            return
+        if roi is None:                     # 구를 안 그렸으면 놓는 위치에 만든다(기본 방식)
+            if not self._on_scan_roi_at_placement():
+                return
+            roi = self._read_scan_roi()
         name = self._get_field("scan_name", str).strip()
         if not SCAN_RUN_NAME_RE.fullmatch(name):
             self._append_log(f"[scan] run name '{name}' - use letters, digits, _ . - only.")

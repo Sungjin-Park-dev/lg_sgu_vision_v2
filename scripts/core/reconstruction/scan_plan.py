@@ -7,13 +7,14 @@
 대신 그것을 쓰고 지지대도 거기 맞춘다. 계획에는 그 pose 와 장애물 OBB 를 함께 남긴다 — 복원·
 Studio 가 촬영 당시의 셀로 점을 지우게 하려는 것이다(storage.ScanPlan).
 
-관심 영역을 안 주면 시뮬레이션 편의상 정답 메시(source.obj)의 배치 bbox 에서 만든다
-(sim.roi_from_ground_truth) — 도면 없는 상황에서는 사용자가 줘야 하는 값이다.
+관심 영역(ROI) 구: 중심을 안 주면 **물체 놓는 위치**(물체 pose = 바닥 중심)를 쓴다. 도면이 없어도
+어디 놓였는지는 안다(ArUco 마커 등). 반경은 물체 크기를 대충 — 넉넉해도 결과가 같다(넓어진 ROI 로
+들어온 받침·테이블 점은 씬 장애물로 지워진다). Isaac 패널의 "ROI at Placement" 와 같은 규칙이다.
 
 Usage:
-    uv run scripts/core/reconstruction/scan_plan.py --object cylinder_sample
+    uv run scripts/core/reconstruction/scan_plan.py --object cylinder_sample --roi-radius 0.12
     uv run scripts/core/reconstruction/scan_plan.py --object sample \\
-        --roi-center -0.73 -0.17 0.25 --roi-radius 0.15 --n-views 40
+        --roi-center -1.12 -0.25 0.07 --roi-radius 0.22 --n-views 16
 """
 
 from __future__ import annotations
@@ -38,12 +39,13 @@ from core.reconstruction.sensor import DEFAULT_SCAN_CAMERA  # noqa: E402
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--object", required=True,
-                   help="배치(씬 object_placements)와, ROI 기본값을 만들 정답 메시의 이름")
+                   help="물체 이름 — 배치(씬 object_placements)와 결과 폴더를 정한다")
     scene_config.add_cli_argument(p)
     p.add_argument("--name", default="default", help="결과 폴더 data/{object}/scan/{name}")
     p.add_argument("--roi-center", type=float, nargs=3, metavar=("X", "Y", "Z"),
-                   help="관심 영역 구의 중심 (world, m). 없으면 정답 메시 bbox 에서")
-    p.add_argument("--roi-radius", type=float, help="관심 영역 구의 반경 (m)")
+                   help="관심 영역 구의 중심 (world, m). 없으면 물체 놓는 위치(물체 pose)")
+    p.add_argument("--roi-radius", type=float, default=0.20,
+                   help="관심 영역 구의 반경 (m) — 물체 크기를 대충 (기본 0.20)")
     p.add_argument("--standoff", type=float, default=None,
                    help="카메라 ↔ ROI 중심 거리 (m). 기본 = 센서 최적 거리")
     p.add_argument("--n-views", type=int, default=48, help="구면 위 후보 방향 수")
@@ -72,16 +74,12 @@ def main():
     # 읽으므로(build_collision_world 처럼 다시 맞추지 않는다) 덮어쓴 뒤 여기서 맞춰야 한다.
     config.sync_support_to_target()
 
-    if args.roi_center is not None and args.roi_radius is not None:
-        center, radius = np.asarray(args.roi_center, dtype=np.float64), float(args.roi_radius)
-        roi_source = "cli"
+    if args.roi_center is not None:
+        center, roi_source = np.asarray(args.roi_center, dtype=np.float64), "cli"
     else:
-        from core.reconstruction.sim import roi_from_ground_truth
-
-        center, radius = roi_from_ground_truth(args.object)
-        roi_source = "ground_truth_bbox"
-        print(f"[plan] ROI from ground-truth bbox (sim convenience): "
-              f"center={np.round(center, 3).tolist()} r={radius:.3f} m")
+        center, roi_source = np.asarray(config.TARGET_OBJECT["position"], dtype=np.float64), "placement"
+    radius = float(args.roi_radius)
+    print(f"[plan] ROI ({roi_source}): center {np.round(center, 4).tolist()} r {radius:.3f} m")
 
     try:
         plan = plan_scan(DEFAULT_SCAN_CAMERA, center, radius, standoff=args.standoff,

@@ -35,13 +35,16 @@ CAD 가 없는 물체는 손목 depth 카메라로 찍어 메시를 만든다. �
 
 ```text
 Isaac Pipeline "Scan Object" 패널
-  ROI 구 지정(기즈모) → scan_plan.py(서브프로세스, cuRobo IK·자기 가림 제거)
+  ROI 구(물체 놓는 위치 중심, 반경은 대략) → scan_plan.py(서브프로세스, cuRobo IK·자기 가림 제거)
   → 촬영(앱 안, CaptureSession — 관절 순간이동 + depth 렌더)
   → reconstruct.py(서브프로세스, 장애물 지우기 → (ICP) → TSDF → 메시)
       ↓ data/{object}/scan/{run}/  (plan · frames · recon{_tag}.ply/json)
 Viewpoint Studio "Scan" 패널
   스캔 확인(남긴/지운 점·카메라·정답) · 파라미터 바꿔 재복원 · recon.obj 내보내기 → Generate
 ```
+
+ROI 는 물체를 넉넉히 감싸기만 하면 된다 — 중심은 물체를 놓은 위치(ArUco 등으로 정한 물체 pose)를
+쓰고, 넓어진 ROI 로 들어온 받침·테이블은 씬 장애물로 지워진다. 정답 형상은 쓰지 않는다.
 
 `core/reconstruction` 이 엔진이다. `storage.py` 가 스캔 폴더 규약을 소유하고, 계획에는 촬영 당시의
 물체 pose 와 씬 장애물 OBB 가 함께 남는다 — 복원과 Studio 가 지금 씬 설정이 아니라 그 값으로 점을
