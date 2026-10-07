@@ -1,8 +1,15 @@
 """관심 영역(구) 둘레의 스캔 자세 — 구면 배치 → cuRobo IK → 자기 가림 제거 → 촬영 순서.
 
-물체가 **어떤 구 안에 있다**는 것만 안다고 가정한다. 카메라는 그 구의 중심을 바라보며
-위쪽 구면 위를 한 바퀴 돈다(Fibonacci 분포). 광축 roll 은 시야를 거의 바꾸지 않으므로
-roll 4가지를 같이 풀어 도달성을 늘리고, 방향마다 시작 자세에 가장 가까운 해 하나를 고른다.
+물체가 **어떤 구 안에 있다**는 것만 안다고 가정한다. 카메라는 그 구의 중심을 바라보며 구면 위
+(standoff 거리)에 놓인다. 광축 roll 은 시야를 거의 바꾸지 않으므로 roll 4가지를 같이 풀어 도달성을
+늘리고, 방향마다 시작 자세에 가장 가까운 해 하나를 고른다.
+
+어느 방향에서 찍나 — **고정 패턴**(SCAN_PATTERN, 11장: 정수리 1 + 앙각 50° 4 + 앙각 25° 6)을 물체
+방향(yaw)에 맞춰 돌려 쓴다. 매번 같은 방향이라 결과를 예측하고 비교하기 쉽다. 패턴 방향에 로봇이
+못 닿으면(로봇 반대편 등) 위쪽 띠 후보(Fibonacci n_views 개) 중 **가장 가까운 닿는 방향**으로
+바꾼다(SUBSTITUTE_MAX_DEG 이내). 그 안에도 없으면 그 장은 뺀다. 찍은 42장 중 고르게 고른 8~10장만
+으로 완전성이 이미 포화됐다(cylinder 94.9%, curved 99.6%, sample 47.8%) — 11장은 넉넉한 쪽이다.
+pattern=None 이면 패턴 없이 닿는 후보 방향 전부를 찍는다(실험용).
 
 충돌 월드: 씬 장애물 + **관심 영역 전체를 막힌 상자로** 넣는다. 아직 모르는 공간이므로
 점유됐다고 본다.
@@ -29,6 +36,16 @@ ROLLS_DEG = (0.0, 90.0, 180.0, 270.0)
 # 자기 가림 검사에서 뺄 링크 — 카메라 몸체는 스캔 카메라 뒤·옆에 있고, 충돌구가 렌즈 앞으로
 # 조금 삐져나와 있어 넣으면 모든 해가 가려진다고 나온다.
 OCCLUSION_IGNORE_LINKS = ("camera_link",)
+# 고정 스캔 패턴 — (앙각 deg, (방위 deg, ...)). 방위는 물체 x축 기준이고 물체 yaw 를 따라 돈다.
+# 정수리는 90° 대신 80°: 바로 위는 방위가 정해지지 않아 IK 가 불안정하다. 고리마다 방위를 엇갈려
+# 위아래 장이 같은 쪽만 보지 않게 했다.
+SCAN_PATTERN = (
+    (80.0, (0.0,)),
+    (50.0, (45.0, 135.0, 225.0, 315.0)),
+    (25.0, (0.0, 60.0, 120.0, 180.0, 240.0, 300.0)),
+)
+# 못 닿는 패턴 방향을 이 각도 안의 닿는 후보로 바꾼다. 넘으면 그 장은 뺀다.
+SUBSTITUTE_MAX_DEG = 30.0
 
 
 def fibonacci_cap(n: int, min_elev_deg: float, max_elev_deg: float) -> np.ndarray:
@@ -93,6 +110,17 @@ def self_occluded(robot_cfg, q: np.ndarray, world_T_cam: np.ndarray, roi_center,
     return out
 
 
+def pattern_dirs(pattern, yaw_deg: float = 0.0) -> np.ndarray:
+    """(앙각, 방위들) 패턴 → 단위 방향 (P,3). 방위는 yaw_deg(물체 방향) 만큼 돌린다."""
+    out = []
+    for elev, azims in pattern:
+        e = math.radians(elev)
+        for az in azims:
+            a = math.radians(az + yaw_deg)
+            out.append((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)))
+    return np.asarray(out, dtype=np.float64).reshape(-1, 3)
+
+
 def greedy_order(q: np.ndarray, start: np.ndarray) -> np.ndarray:
     """관절 L∞ 최근접 순서. 순간이동 캡처에는 상관없지만 실물로 갈 때의 기본 순서다."""
     left = list(range(len(q)))
@@ -107,8 +135,14 @@ def greedy_order(q: np.ndarray, start: np.ndarray) -> np.ndarray:
 
 def plan_scan(spec: ScanCameraSpec, roi_center, roi_radius: float, *, standoff: float | None = None,
               n_views: int = 48, min_elev_deg: float = 15.0, max_elev_deg: float = 85.0,
-              ik_seeds: int = 32, log=print) -> ScanPlan:
-    """ROI 구 둘레 스캔 자세 → ScanPlan. 하나도 안 닿으면 ValueError."""
+              ik_seeds: int = 32, pattern=SCAN_PATTERN, yaw_deg: float = 0.0,
+              log=print) -> ScanPlan:
+    """ROI 구 둘레 스캔 자세 → ScanPlan. 하나도 안 닿으면 ValueError.
+
+    pattern: 고정 방향 패턴(모듈 docstring). None 이면 닿는 후보 방향 전부.
+    yaw_deg: 패턴을 돌릴 물체 방향(z축 둘레, deg).
+    n_views: 위쪽 띠(min/max_elev) 후보 수 — 패턴 방향을 대신할 풀이다.
+    """
     from scipy.spatial.transform import Rotation
 
     from core import trajectory as PT
@@ -125,7 +159,9 @@ def plan_scan(spec: ScanCameraSpec, roi_center, roi_radius: float, *, standoff: 
         log(f"[plan] ⚠️  ROI (r={radius:.3f}) 가 한 장의 시야({standoff * math.sin(half_fov):.3f}) "
             f"보다 크다 — 프레임마다 일부만 담긴다")
 
-    dirs = fibonacci_cap(n_views, min_elev_deg, max_elev_deg)
+    # 후보 = 패턴 방향(앞쪽 P개) + 대체용 띠 후보. 한 번의 IK 로 같이 푼다.
+    pat = pattern_dirs(pattern, yaw_deg) if pattern else np.zeros((0, 3))
+    dirs = np.concatenate([pat, fibonacci_cap(n_views, min_elev_deg, max_elev_deg)])
     cam_T = np.stack([look_at(center + standoff * d, center, roll)
                       for d in dirs for roll in ROLLS_DEG])                    # (n*R, 4, 4)
     tool_T = cam_T @ np.linalg.inv(spec.tool_T_cam_matrix)
@@ -148,20 +184,48 @@ def plan_scan(spec: ScanCameraSpec, roi_center, roi_radius: float, *, standoff: 
 
     start = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
     n_roll = len(ROLLS_DEG)
-    picked = []                                  # (q, goal_T, dir, roll)
+    best = {}                                    # 방향 i → (q, goal_T, dir, roll) — 시작 자세에 가장 가까운 해
     for i in range(len(dirs)):
-        best = None
+        top = None
         for r in range(n_roll):
             k = i * n_roll + r
             for s in np.flatnonzero(usable[k]):
                 cost = float(np.max(np.abs(sols[k, s] - start)))
-                if best is None or cost < best[0]:
-                    best = (cost, k, s, r)
-        if best is not None:
-            _, k, s, r = best
-            picked.append((sols[k, s], cam_T[k], dirs[i], ROLLS_DEG[r]))
-    if not picked:
+                if top is None or cost < top[0]:
+                    top = (cost, k, s, r)
+        if top is not None:
+            _, k, s, r = top
+            best[i] = (sols[k, s], cam_T[k], dirs[i], ROLLS_DEG[r])
+    if not best:
         raise ValueError("도달 가능한 스캔 자세가 하나도 없다 — ROI/standoff/앙각을 확인")
+
+    substituted, dropped = [], []
+    if pattern:
+        n_pat, used, picked = len(pat), set(), []
+        pool = [i for i in best if i >= n_pat]
+        for j in range(n_pat):
+            if j in best:
+                picked.append(best[j])
+                continue
+            free = [i for i in pool if i not in used]
+            if free:
+                ang = np.degrees(np.arccos(np.clip(dirs[free] @ dirs[j], -1.0, 1.0)))
+                m = int(np.argmin(ang))
+                if ang[m] <= SUBSTITUTE_MAX_DEG:
+                    used.add(free[m])
+                    picked.append(best[free[m]])
+                    substituted.append([j, round(float(ang[m]), 1)])
+                    continue
+            dropped.append(j)
+        log(f"[plan] pattern: {len(picked)}/{n_pat} views"
+            + (f", {len(substituted)} moved to the nearest reachable direction "
+               f"({', '.join(f'#{j} by {a:.0f}°' for j, a in substituted)})" if substituted else "")
+            + (f" — ⚠️  {len(dropped)} dropped (nothing reachable within {SUBSTITUTE_MAX_DEG:.0f}°)"
+               if dropped else ""))
+        if not picked:
+            raise ValueError("패턴 방향을 하나도 찍을 수 없다 — ROI/standoff 를 확인")
+    else:
+        picked = list(best.values())
 
     q = np.asarray([p[0] for p in picked])
     order = greedy_order(q, start)
@@ -183,4 +247,6 @@ def plan_scan(spec: ScanCameraSpec, roi_center, roi_radius: float, *, standoff: 
         roll_deg=np.asarray([p[3] for p in picked])[order],
         roi_center=center, roi_radius=radius, standoff=standoff, camera=spec,
         meta={"n_candidates": int(len(dirs)), "n_with_ik": n_dirs_ik,
+              "pattern": [[e, list(a)] for e, a in pattern] if pattern else None,
+              "yaw_deg": float(yaw_deg), "substituted": substituted, "dropped": dropped,
               "elev_deg": [min_elev_deg, max_elev_deg], "rolls_deg": list(ROLLS_DEG)})

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """관심 영역(구) 둘레에 스캔 자세를 깔고 IK 로 거른다 → data/{object}/scan/{name}/plan.npz.
 
-계획 로직은 planning.plan_scan 에 있다. 이 스크립트는 ROI 를 정하고 저장만 한다.
+계획 로직은 planning.plan_scan 에 있다(고정 11장 패턴, 못 닿으면 가까운 방향으로 대체). 이
+스크립트는 ROI·물체 방향을 정하고 저장만 한다.
 
 물체 pose 를 주면(--object-position/--object-quat, Isaac 이 스테이지에서 읽어 넘긴다) 씬 배치
 대신 그것을 쓰고 지지대도 거기 맞춘다. 계획에는 그 pose 와 장애물 OBB 를 함께 남긴다 — 복원·
@@ -14,7 +15,7 @@ Studio 가 촬영 당시의 셀로 점을 지우게 하려는 것이다(storage.
 Usage:
     uv run scripts/core/reconstruction/scan_plan.py --object cylinder_sample --roi-radius 0.12
     uv run scripts/core/reconstruction/scan_plan.py --object sample \\
-        --roi-center -1.12 -0.25 0.07 --roi-radius 0.22 --n-views 16
+        --roi-center -1.12 -0.25 0.07 --roi-radius 0.22 --all-views
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 from common import config, scene_config  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.storage import config_object_pose, snapshot_obstacles  # noqa: E402
-from core.reconstruction.planning import plan_scan  # noqa: E402
+from common.math_utils import quaternion_to_rotation_matrix  # noqa: E402
+from core.reconstruction.planning import SCAN_PATTERN, plan_scan  # noqa: E402
 from core.reconstruction.sensor import DEFAULT_SCAN_CAMERA  # noqa: E402
 
 
@@ -48,7 +50,10 @@ def parse_args():
                    help="관심 영역 구의 반경 (m) — 물체 크기를 대충 (기본 0.20)")
     p.add_argument("--standoff", type=float, default=None,
                    help="카메라 ↔ ROI 중심 거리 (m). 기본 = 센서 최적 거리")
-    p.add_argument("--n-views", type=int, default=48, help="구면 위 후보 방향 수")
+    p.add_argument("--all-views", action="store_true",
+                   help="고정 패턴(11장) 대신 닿는 후보 방향 전부를 찍는다 — 실험용")
+    p.add_argument("--n-views", type=int, default=48,
+                   help="위쪽 띠 후보 방향 수 — 못 닿는 패턴 방향을 대신할 풀 (--all-views 면 찍을 후보)")
     p.add_argument("--min-elev", type=float, default=15.0, help="최저 앙각 (deg)")
     p.add_argument("--max-elev", type=float, default=85.0, help="최고 앙각 (deg)")
     p.add_argument("--ik-seeds", type=int, default=32)
@@ -80,11 +85,15 @@ def main():
         center, roi_source = np.asarray(config.TARGET_OBJECT["position"], dtype=np.float64), "placement"
     radius = float(args.roi_radius)
     print(f"[plan] ROI ({roi_source}): center {np.round(center, 4).tolist()} r {radius:.3f} m")
+    # 고정 패턴은 물체 방향을 따라 돈다 — 물체 x축의 수평 방위.
+    R = quaternion_to_rotation_matrix(np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64))
+    yaw_deg = float(np.degrees(np.arctan2(R[1, 0], R[0, 0])))
 
     try:
         plan = plan_scan(DEFAULT_SCAN_CAMERA, center, radius, standoff=args.standoff,
                          n_views=args.n_views, min_elev_deg=args.min_elev,
-                         max_elev_deg=args.max_elev, ik_seeds=args.ik_seeds)
+                         max_elev_deg=args.max_elev, ik_seeds=args.ik_seeds,
+                         pattern=None if args.all_views else SCAN_PATTERN, yaw_deg=yaw_deg)
     except ValueError as exc:
         sys.exit(f"[plan] {exc}")
     plan.meta = {"object": args.object, "scene": config.ACTIVE_SCENE, "roi_source": roi_source,
@@ -95,8 +104,8 @@ def main():
     out = storage.scan_dir(args.object, args.name)
     storage.save_plan(out, plan)
     elev = np.degrees(np.arcsin(plan.view_dirs[:, 2]))
-    print(f"[plan] {len(plan.q)}/{plan.meta['n_candidates']} directions reachable "
-          f"(elev {elev.min():.0f}–{elev.max():.0f}°) -> {out.relative_to(PROJECT_ROOT)}/plan.npz")
+    print(f"[plan] {len(plan.q)} shots (elev {elev.min():.0f}–{elev.max():.0f}°) "
+          f"-> {out.relative_to(PROJECT_ROOT)}/plan.npz")
 
 
 if __name__ == "__main__":

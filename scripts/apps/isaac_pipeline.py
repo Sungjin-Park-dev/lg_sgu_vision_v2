@@ -1856,9 +1856,10 @@ class PipelineWindow:
         with frame:
             with ui.VStack(spacing=4):
                 ui.Label(
-                    "Scans the loaded object with a wrist depth camera and rebuilds its mesh "
-                    "(sim only). Review, re-run and export in Viewpoint Studio's Scan panel.",
-                    height=30, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                    "Scans the loaded object with a wrist depth camera (11 fixed views around it: "
+                    "1 top, 4 at 50 deg, 6 at 25 deg) and rebuilds its mesh (sim only). Review, re-run "
+                    "and export in Viewpoint Studio's Scan panel.",
+                    height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
                 self._fields["scan_roi_r"] = self._row("ROI radius [m]", 0.20)
                 with ui.HStack(height=26, spacing=6):
                     self._lock(ui.Button("ROI at Placement", clicked_fn=self._on_scan_roi_at_placement))
@@ -1872,7 +1873,9 @@ class PipelineWindow:
                 self._fields["scan_icp"] = self._checkbox_row("ICP pose refine", False)
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
-                        self._fields["scan_n_views"] = self._row("views on the sphere", 48)
+                        self._fields["scan_all_views"] = self._checkbox_row(
+                            "all reachable directions", False)
+                        self._fields["scan_n_views"] = self._row("candidate directions", 48)
                         self._fields["scan_standoff"] = self._row("standoff [m] (0 = sensor)", 0.0)
                         self._fields["scan_min_elev"] = self._row("min elevation [deg]", 15.0)
                         self._fields["scan_max_elev"] = self._row("max elevation [deg]", 85.0)
@@ -1895,19 +1898,33 @@ class PipelineWindow:
             self._scan_status_label.style = {"color": color}
 
     def _draw_scan_roi(self, center, radius: float):
-        """ROI 구를 (다시) 그린다. 기즈모로 늘인 스케일은 버리고 반경은 칸 값으로 맞춘다."""
+        """ROI 구를 (다시) 그린다 — 면이 아니라 서로 직교하는 원 셋(와이어프레임)으로.
+
+        채운 구에 displayOpacity 를 줘도 RTX 는 재질 없이는 무시해 불투명한 공이 물체를 가렸다. 원
+        셋은 물체를 안 가리고 어느 방향에서도 보인다. 원 셋을 prim **하나**(BasisCurves)에 담아,
+        선택하면 기즈모가 ROI 전체를 옮긴다. 기즈모로 늘인 스케일은 버리고 반경은 칸 값으로 맞춘다.
+        """
         import omni.usd
         from pxr import Gf, UsdGeom, Vt
+        from isaacsim.core.utils import prims
 
+        if prims.is_prim_path_valid(SCAN_ROI_PRIM):      # 옛 Sphere prim 이 남아 있을 수도 있다
+            prims.delete_prim(SCAN_ROI_PRIM)
         stage = omni.usd.get_context().get_stage()
-        sphere = UsdGeom.Sphere.Define(stage, SCAN_ROI_PRIM)
-        sphere.CreateRadiusAttr(float(radius))
-        sphere.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.3, 0.6, 1.0)]))
-        sphere.CreateDisplayOpacityAttr(Vt.FloatArray([0.12]))
-        xf = UsdGeom.Xformable(sphere)
+        t = np.linspace(0.0, 2.0 * np.pi, 97)               # 끝점 = 시작점 → 닫힌 원
+        c, s = np.cos(t) * radius, np.sin(t) * radius
+        z = np.zeros_like(t)
+        rings = [np.stack(p, axis=1) for p in ((c, s, z), (c, z, s), (z, c, s))]   # XY, XZ, YZ
+        curves = UsdGeom.BasisCurves.Define(stage, SCAN_ROI_PRIM)
+        curves.CreateTypeAttr(UsdGeom.Tokens.linear)
+        curves.CreateWrapAttr(UsdGeom.Tokens.nonperiodic)
+        curves.CreateCurveVertexCountsAttr(Vt.IntArray([len(t)] * 3))
+        curves.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*map(float, p)) for p in np.concatenate(rings)]))
+        curves.CreateWidthsAttr(Vt.FloatArray([0.002] * (3 * len(t))))
+        curves.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.3, 0.6, 1.0)]))
+        xf = UsdGeom.Xformable(curves)
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(*(float(v) for v in center)))
-        UsdGeom.Imageable(sphere.GetPrim()).MakeVisible()
 
     def _read_scan_roi(self):
         """(center (3,), radius) — 구의 중심은 스테이지(기즈모로 옮긴 값), 반경은 칸. 없으면 None."""
@@ -2037,6 +2054,8 @@ class PipelineWindow:
             "--object-position", *(f"{v:.6f}" for v in pose[0]),
             "--object-quat", *(f"{v:.6f}" for v in pose[1]),
         ]
+        if self._get_field("scan_all_views", bool):
+            cmd.append("--all-views")
         standoff = self._get_field("scan_standoff", float)
         if standoff > 0.0:
             cmd += ["--standoff", f"{standoff:.4f}"]
