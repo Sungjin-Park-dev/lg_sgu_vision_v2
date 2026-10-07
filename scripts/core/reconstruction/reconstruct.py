@@ -43,6 +43,8 @@ def parse_args():
     p.add_argument("--smooth-iters", type=int, default=d.smooth_iters,
                    help="Taubin 평활화 반복 수 (0 = 안 함)")
     p.add_argument("--target-faces", type=int, default=d.target_faces, help="단순화 목표 면 수 (0 = 안 함)")
+    p.add_argument("--min-component-cm2", type=float, default=d.min_component_cm2,
+                   help="이보다 작은 메시 덩어리는 잡음으로 버린다 (cm²)")
     p.add_argument("--pose-noise-mm", type=float, default=0.0,
                    help="측정 pose 에 섞을 프레임별 이동 오차 (RMS, mm) — 시뮬레이션 전용")
     p.add_argument("--pose-noise-deg", type=float, default=0.0,
@@ -81,7 +83,8 @@ def main():
     frames = storage.load_frames(scan)
     params = FusionParams(voxel_mm=args.voxel_mm, trunc_voxels=args.trunc_voxels,
                           obstacle_margin_mm=args.obstacle_margin_mm,
-                          smooth_iters=args.smooth_iters, target_faces=args.target_faces)
+                          smooth_iters=args.smooth_iters, target_faces=args.target_faces,
+                          min_component_cm2=args.min_component_cm2)
 
     # 측정 pose — 시뮬레이션은 렌더에 쓴 참 pose 가 저장돼 있어, 원하면 오차를 섞는다.
     true_poses = np.stack([fr["world_T_cam"] for fr in frames])

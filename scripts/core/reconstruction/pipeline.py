@@ -7,7 +7,7 @@
      평면을 찾았는데, ROI 안 가장 큰 수평면이 지지대가 아니라 원기둥 윗면이라 물체가 통째로
      지워졌다.)
   3. TSDF 융합 (Open3D ScalableTSDFVolume)
-  4. 메시 추출 → 가장 큰 덩어리만 → Taubin 평활화 → 단순화
+  4. 메시 추출 → 작은 덩어리(잡음) 버리기 → Taubin 평활화 → 단순화
 
 메시는 world 좌표다. 정답과 비교하거나 오차를 일부러 섞는 일은 여기 없다(sim.py).
 """
@@ -33,6 +33,10 @@ class FusionParams:
     # 0.5mm 복셀에서 법선 중앙값 3.7° → 5.7°). Taubin 은 수축 없이 고주파만 깎는다(→ 2.1°).
     smooth_iters: int = 10
     target_faces: int = 20000            # 0 = 단순화 안 함
+    # 이보다 작은 덩어리는 잡음으로 버린다. 예전엔 "가장 큰 덩어리만" 남겼는데, 복원이 몸체와 아랫부분
+    # 두 덩어리로 나뉘는 물체(sample: 609 + 336cm²)에서 진짜 표면 1/3 을 버려 완전성이 50% 에 묶였다.
+    # 1cm² 기준으로 남기면 sample 80%, cylinder·curved 는 그대로(덩어리 하나).
+    min_component_cm2: float = 1.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -73,15 +77,17 @@ def fuse_tsdf(frames, poses, plan: ScanPlan, params: FusionParams):
 
 
 def extract_mesh(vol, params: FusionParams):
-    """TSDF → 정리된 trimesh. (메시, {raw_faces, components})."""
+    """TSDF → 정리된 trimesh. (메시, {raw_faces, components, components_kept})."""
     import trimesh
 
     mesh = vol.extract_triangle_mesh()
-    tri_cluster, cluster_n, _ = mesh.cluster_connected_triangles()
-    tri_cluster = np.asarray(tri_cluster)
+    tri_cluster, cluster_n, cluster_area = mesh.cluster_connected_triangles()
+    tri_cluster, cluster_area = np.asarray(tri_cluster), np.asarray(cluster_area)
     if not len(cluster_n):
         raise ValueError("TSDF 에서 메시가 하나도 안 나왔다 — 물체 픽셀이 0 인지 확인")
-    mesh.remove_triangles_by_mask(tri_cluster != int(np.argmax(np.asarray(cluster_n))))
+    keep = cluster_area >= params.min_component_cm2 * 1e-4
+    keep[int(np.argmax(cluster_area))] = True            # 전부 작아도 가장 큰 것 하나는 남긴다
+    mesh.remove_triangles_by_mask(~keep[tri_cluster])
     mesh.remove_unreferenced_vertices()
     n_raw = len(mesh.triangles)
     if params.smooth_iters:
@@ -89,7 +95,8 @@ def extract_mesh(vol, params: FusionParams):
     if params.target_faces and n_raw > params.target_faces:
         mesh = mesh.simplify_quadric_decimation(params.target_faces)
     out = trimesh.Trimesh(np.asarray(mesh.vertices), np.asarray(mesh.triangles), process=False)
-    return out, {"raw_faces": int(n_raw), "components": int(len(cluster_n))}
+    return out, {"raw_faces": int(n_raw), "components": int(len(cluster_n)),
+                 "components_kept": int(keep.sum())}
 
 
 def reconstruct(frames, plan: ScanPlan, params: FusionParams = FusionParams(), *,
@@ -119,7 +126,8 @@ def reconstruct(frames, plan: ScanPlan, params: FusionParams = FusionParams(), *
     stats.update(mstats)
     stats["seconds"] = round(time.time() - t0, 1)
     log(f"[recon] mesh: {mstats['raw_faces']} -> {len(mesh.faces)} triangles "
-        f"({mstats['components']} components, kept the largest) in {stats['seconds']}s")
+        f"({mstats['components_kept']} of {mstats['components']} components kept, "
+        f"≥{params.min_component_cm2:g} cm²) in {stats['seconds']}s")
     return ReconResult(mesh=mesh, poses=poses, stats=stats)
 
 

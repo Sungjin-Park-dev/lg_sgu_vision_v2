@@ -298,6 +298,31 @@ class CaptureSession:
         return self.summary
 
 
+def place_object(pose) -> None:
+    """물체를 계획에 남긴 pose (7,) 에 놓고 지지대·장애물 시각물을 거기 맞춘다(독립 실행용).
+
+    load_target_object 는 씬 배치에 놓는다. 계획이 다른 자리에서 세워졌으면(Isaac 기즈모, 또는
+    --object-position 으로 옮긴 실험) 찍는 장면이 계획과 어긋나므로, 계획의 pose 로 옮긴다.
+    """
+    import omni.usd
+    from pxr import Gf, UsdGeom
+
+    pose = np.asarray(pose, dtype=np.float64)
+    _config.TARGET_OBJECT["position"] = pose[:3].copy()
+    _config.TARGET_OBJECT["rotation"] = pose[3:7].copy()
+    _config.sync_support_to_target()
+    urscene.spawn_scene_obstacles(_config)
+    prim = omni.usd.get_context().get_stage().GetPrimAtPath(f"/World/{_config.TARGET_OBJECT['name']}")
+    if not prim or not prim.IsValid():
+        return
+    M = Gf.Matrix4d()
+    M.SetTransform(Gf.Rotation(Gf.Quatd(*(float(v) for v in pose[3:7]))),
+                   Gf.Vec3d(*(float(v) for v in pose[:3])))
+    xf = UsdGeom.Xformable(prim)
+    xf.ClearXformOpOrder()
+    xf.AddTransformOp().Set(M)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--object", required=True)
@@ -328,6 +353,8 @@ def main():
     urscene.load_workcell(urscene.DEFAULT_USD)
     app.update()
     urscene.load_target_object(args.object)
+    if plan.object_pose is not None:
+        place_object(plan.object_pose)
     app.update()
     art_root = urscene.find_articulation_root()
     app.update()
