@@ -3,6 +3,7 @@
     data/{object}/scan/{name}/          (config.get_scan_dir)
       plan.npz, plan.json               ScanPlan — 스캔 자세와 그 근거, 촬영 당시의 물체 pose·장애물
       frames/frame_###.npz              촬영 한 장 — FRAME_KEYS
+      trajectory.csv, trajectory.npz    장 사이를 잇는 실행 궤적 (scan_motion, 선택) — load_motion
       capture.json                      촬영 요약 (scan_capture 가 쓴다)
       recon{_tag}.ply, recon{_tag}.json 복원 메시(world 좌표)와 그 설정·평가
 
@@ -95,6 +96,33 @@ def save_plan(directory: Path, plan: ScanPlan) -> None:
             {"name": n, "pos": r[:3].tolist(), "quat": r[3:7].tolist(), "dims": r[7:].tolist()}
             for n, r in zip(plan.obstacle_names or [""] * len(plan.obstacles), plan.obstacles)]
     (directory / "plan.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+MOTION_CSV = "trajectory.csv"
+
+
+def load_motion(directory: Path):
+    """장 사이 실행 궤적 → (joints (M,6), times (M,), shot_rows (N,)) 또는 없으면 None.
+
+    shot_rows[i] = 장 i 의 자세가 놓인 행. 계획을 새로 쓸 때 scan_plan 이 옛 궤적을 지운다
+    (clear_motion) — 호출자는 행 수·관절값이 계획과 맞는지도 본다(scan_capture).
+    """
+    path = (Path(directory) / MOTION_CSV).with_suffix(".npz")
+    if not path.exists():
+        return None
+    with np.load(path) as z:
+        meta = json.loads(str(z["meta"]))
+        rows = meta.get("shot_rows")
+        if rows is None:
+            return None
+        return (np.asarray(z["joints"], dtype=np.float64), np.asarray(z["times"], dtype=np.float64),
+                np.asarray(rows, dtype=np.int64))
+
+
+def clear_motion(directory: Path) -> None:
+    """낡은 실행 궤적을 지운다 — 계획을 새로 쓸 때."""
+    for suffix in (".csv", ".npz"):
+        (Path(directory) / MOTION_CSV).with_suffix(suffix).unlink(missing_ok=True)
 
 
 def load_plan(directory: Path) -> ScanPlan:

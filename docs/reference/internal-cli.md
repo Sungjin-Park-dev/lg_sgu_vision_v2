@@ -10,7 +10,7 @@
 | ROS2/Isaac 궤적 전송 | `scripts/core/trajectory/publish.py` |
 | GLNS solve (1단계) | `scripts/core/glns/solve.py` |
 | GLNS motion 계획·연결 (2단계) | `scripts/core/glns/verify.py` |
-| 도면 없는 복원: 스캔 자세 계획 | `scripts/core/reconstruction/scan_plan.py` |
+| 도면 없는 복원: 스캔 자세 계획 + 장 사이 궤적 (`--layout`, `--no-motion`) | `scripts/core/reconstruction/scan_plan.py` |
 | 도면 없는 복원: Isaac 촬영 (headless) | `scripts/core/isaac/scan_capture.py` |
 | 도면 없는 복원: 프레임 → 메시 (+정답 평가·pose 오차 실험) | `scripts/core/reconstruction/reconstruct.py` |
 | 도면 없는 복원: 정답 물체 좌표로 recon.obj | `scripts/core/reconstruction/export_recon.py` |

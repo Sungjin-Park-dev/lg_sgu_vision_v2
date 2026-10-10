@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""스캔 계획의 관절 자세로 로봇을 순간이동시키며 손목 depth 를 찍는다.
+"""스캔 계획의 관절 자세로 로봇을 옮기며 손목 depth 를 찍는다.
 
-로봇을 실제로 움직이지 않는다 — 복원 품질만 볼 때는 궤적이 필요 없다. 자세마다 관절 상태와
-PD 목표를 같은 값으로 박고(``set_start_pose`` 와 같은 방식), 새 depth 가 나오면 depth·내부
-파라미터·카메라 pose 를 같은 프로세스에서 읽는다. 그래서 이미지와 pose 의 시점이 어긋날 일이 없다.
+옮기는 방법은 둘이다. 계획에 장 사이 실행 궤적(scan_motion → trajectory.csv)이 있으면 **그 궤적을
+따라** 움직인다 — 프레임마다 시간에 맞는 관절값을 박는 재생이다(speed 배속). 없으면(또는
+motion=False) 자세마다 순간이동한다 — 복원 품질만 볼 때는 궤적이 필요 없다. 어느 쪽이든 장 자세에
+닿으면 관절 상태와 PD 목표를 같은 값으로 박고(``set_start_pose`` 와 같은 방식), 새 depth 가 나오면
+depth·내부 파라미터·카메라 pose 를 같은 프로세스에서 읽는다. 그래서 이미지와 pose 의 시점이
+어긋날 일이 없다.
 
 촬영은 프레임 단위 상태기계 ``CaptureSession`` 이다. 렌더 한 번마다 ``step()`` 을 한 번 부른다 —
 아래 독립 실행은 ``sim.step(render=True)`` → ``session.step()`` 루프를 돌고, isaac_pipeline 은
@@ -19,6 +22,7 @@ PD 목표를 같은 값으로 박고(``set_start_pose`` 와 같은 방식), 새 
 Usage:
     uv run scripts/core/isaac/scan_capture.py --object cylinder_sample
     uv run scripts/core/isaac/scan_capture.py --object cylinder_sample --gui --limit 5
+    uv run scripts/core/isaac/scan_capture.py --object cylinder_sample --teleport
 """
 
 from __future__ import annotations
@@ -126,7 +130,8 @@ class CaptureSession:
     """
 
     def __init__(self, out_dir: Path, plan: storage.ScanPlan, articulation_root: str, *,
-                 settle: int = 2, max_steps: int = 60, limit: int | None = None, log=print):
+                 settle: int = 2, max_steps: int = 60, limit: int | None = None,
+                 motion: bool = True, speed: float = 1.0, log=print):
         self.out_dir = Path(out_dir)
         self.plan = plan
         self.articulation_root = articulation_root
@@ -152,6 +157,20 @@ class CaptureSession:
         self._pose_err_mm: list[float] = []
         self._rot_err_deg: list[float] = []
         self._t0 = None
+        # 궤적 재생 — (joints (M,6), times (M,), shot_rows (N,)) 또는 None(순간이동)
+        self.motion = storage.load_motion(self.out_dir) if motion else None
+        if self.motion is not None and not self._motion_matches():
+            self.log("[capture] ⚠️  trajectory.csv does not match the plan's poses — teleporting instead")
+            self.motion = None
+        self.speed = max(float(speed), 1e-3)
+        self._drive_to = None      # 재생 중이면 목표 행, 아니면 None
+        self._t_play = 0.0         # 궤적 시간(s)
+        self._t_wall = None
+
+    def _motion_matches(self) -> bool:
+        joints, times, rows = self.motion
+        return (len(rows) == len(self.plan.q) and len(times) == len(joints)
+                and bool(np.allclose(joints[rows], self.plan.q, atol=1e-4)))
 
     @property
     def progress(self) -> tuple[int, int]:
@@ -176,6 +195,14 @@ class CaptureSession:
 
         storage.clear_frames(self.out_dir)
         self._t0 = time.time()
+        if self.motion is not None:
+            q_start = self.motion[0][0]
+            if np.max(np.abs(q_start - self._q0)) > 1e-3:
+                # 궤적은 계획 당시 자세에서 시작한다. 그 사이 로봇이 움직였으면 거기로 먼저 옮긴다.
+                self.log(f"[capture] robot is {np.degrees(np.max(np.abs(q_start - self._q0))):.1f}° "
+                         f"away from the trajectory start — teleporting there first")
+                self._teleport(q_start)
+            self.log(f"[capture] following trajectory.csv ({self.motion[1][-1]:.1f} s at ×{self.speed:g})")
         if len(self.q_plan):
             self._warming = True               # 시작 자세 화면부터 잡는다 — step() 참고
             self._steps, self._last = 0, None
@@ -190,6 +217,39 @@ class CaptureSession:
         self._steps = 0
         self._last = None
 
+    def _set_q(self, q) -> None:
+        from isaacsim.core.utils.types import ArticulationAction
+
+        self._art.set_joint_positions(q, joint_indices=self._idx)
+        self._ctrl.apply_action(ArticulationAction(joint_positions=q, joint_indices=self._idx))
+
+    def _go_to_shot(self, i: int) -> None:
+        """장 i 로 — 궤적이 있으면 재생을 시작하고, 없으면 순간이동."""
+        if self.motion is None:
+            self._teleport(self.q_plan[i])
+            return
+        self._drive(int(self.motion[2][i]))
+
+    def _drive(self, row: int) -> None:
+        self._drive_to = row
+        self._t_wall = None
+
+    def _drive_step(self) -> bool:
+        """재생 한 프레임. True = 목표 행에 닿았다(그 자세로 박고 촬영 대기로 넘어간다)."""
+        joints, times, _ = self.motion
+        now = time.time()
+        # 실제 경과 시간 × 배속. 한 프레임이 오래 걸려도(셰이더 컴파일 등) 0.1s 이상은 건너뛰지 않는다.
+        dt = 0.0 if self._t_wall is None else min(now - self._t_wall, 0.1)
+        self._t_wall = now
+        t_goal = float(times[self._drive_to])
+        self._t_play = min(self._t_play + dt * self.speed, t_goal)
+        if self._t_play >= t_goal:
+            self._teleport(joints[self._drive_to])
+            self._drive_to = None
+            return True
+        self._set_q(np.array([np.interp(self._t_play, times, joints[:, j]) for j in range(joints.shape[1])]))
+        return False
+
     def cancel(self) -> None:
         self._cancelled = True
 
@@ -197,6 +257,13 @@ class CaptureSession:
         """렌더 한 번마다 부른다. True = 계속, False = 끝(또는 취소)."""
         if self.done or self._cancelled:
             return False
+        if self._drive_to is not None:
+            if not self._drive_step():
+                return True
+            if self.index >= len(self.q_plan):     # 마지막 장 뒤 시작 자세로 돌아왔다
+                self.done = True
+                return False
+            return True                            # 장 자세에 닿았다 — 다음 프레임부터 촬영 대기
         self._steps += 1
         if self._steps <= self.settle:
             return True
@@ -213,7 +280,7 @@ class CaptureSession:
             at_first = np.allclose(self._q0, self.q_plan[0], atol=1e-6)
             self._prev = None if at_first else self._last
             self._warming = False
-            self._teleport(self.q_plan[0])
+            self._go_to_shot(0)
             return True
         if d is not None:
             d = np.asarray(d, dtype=np.float32)
@@ -251,9 +318,12 @@ class CaptureSession:
     def _advance(self) -> bool:
         self.index += 1
         if self.index >= len(self.q_plan):
+            if self.motion is not None and len(self.q_plan) == len(self.plan.q):
+                self._drive(len(self.motion[0]) - 1)    # 궤적 끝(시작 자세)까지 마저 간다
+                return True
             self.done = True
             return False
-        self._teleport(self.q_plan[self.index])
+        self._go_to_shot(self.index)
         return True
 
     def close(self, restore: bool = True) -> dict:
@@ -271,6 +341,7 @@ class CaptureSession:
             "complete": bool(self.done and not self._cancelled and not self.skipped),
             "n_planned": int(len(self.q_plan)), "n_frames": self.saved, "skipped": self.skipped,
             "seconds": round(time.time() - self._t0, 1) if self._t0 else 0.0,
+            "moved_along_trajectory": self.motion is not None,
             "K_isaac": None if self._K is None else self._K.tolist(), "K_spec": spec.K.tolist(),
             "pose_vs_plan_mm": {"max": max(self._pose_err_mm, default=0.0),
                                 "median": float(np.median(self._pose_err_mm)) if self._pose_err_mm else 0.0},
@@ -334,6 +405,9 @@ def parse_args():
                    help="자세를 바꾼 뒤 depth 를 보기 전에 무조건 넘기는 렌더 프레임 수")
     p.add_argument("--max-steps", type=int, default=60,
                    help="depth 가 새 자세로 바뀌어 멈출 때까지 기다리는 최대 렌더 프레임 수")
+    p.add_argument("--teleport", action="store_true",
+                   help="trajectory.csv 가 있어도 따라가지 않고 자세마다 순간이동한다")
+    p.add_argument("--speed", type=float, default=1.0, help="궤적 재생 배속 (실제 시간 기준)")
     return p.parse_args()
 
 
@@ -363,7 +437,7 @@ def main():
     sim.play()
     sim.step(render=True)
     session = CaptureSession(out, plan, art_root, settle=args.settle, max_steps=args.max_steps,
-                             limit=args.limit)
+                             limit=args.limit, motion=not args.teleport, speed=args.speed)
     session.start()
     while True:
         sim.step(render=True)

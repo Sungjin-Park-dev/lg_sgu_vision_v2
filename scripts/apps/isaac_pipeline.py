@@ -1871,8 +1871,12 @@ class PipelineWindow:
                          height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
                 self._fields["scan_name"] = self._row("run name", "default")
                 self._fields["scan_icp"] = self._checkbox_row("ICP pose refine", False)
+                self._fields["scan_follow"] = self._checkbox_row("move along planned path", True)
+                self._fields["scan_speed"] = self._row("playback speed [x]", 1.0)
                 with ui.CollapsableFrame("Advanced", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
+                        self._fields["scan_pattern"] = self._checkbox_row(
+                            "fixed 11-view pattern", False)
                         self._fields["scan_all_views"] = self._checkbox_row(
                             "all reachable directions", False)
                         self._fields["scan_n_views"] = self._row("candidate directions", 48)
@@ -2015,7 +2019,7 @@ class PipelineWindow:
             self._append_log("[scan] Inspection pipeline mode only.")
             return
         if self._mode != "sim":
-            self._append_log("[scan] sim run mode only - capture teleports the Isaac robot, "
+            self._append_log("[scan] sim run mode only - capture drives the Isaac robot directly, "
                              "which the real-robot mirror would fight.")
             return
         if not omni.timeline.get_timeline_interface().is_playing():
@@ -2056,16 +2060,25 @@ class PipelineWindow:
         ]
         if self._get_field("scan_all_views", bool):
             cmd.append("--all-views")
+        elif self._get_field("scan_pattern", bool):
+            cmd += ["--layout", "pattern"]
+        # 궤적은 지금 자세에서 시작해 지금 자세로 돌아온다 — 촬영이 끝나면 로봇이 제자리다.
+        if self._get_field("scan_follow", bool):
+            cmd += ["--start-joints", *(f"{v:.6f}" for v in self._sim_executor.current_joints())]
+        else:
+            cmd.append("--no-motion")
         standoff = self._get_field("scan_standoff", float)
         if standoff > 0.0:
             cmd += ["--standoff", f"{standoff:.4f}"]
         self._scan_ctx = {"object": obj, "name": name, "dir": storage.scan_dir(obj, name),
                           "icp": self._get_field("scan_icp", bool),
                           "settle": self._get_field("scan_settle", int),
+                          "follow": self._get_field("scan_follow", bool),
+                          "speed": self._get_field("scan_speed", float),
                           "max_steps": self._get_field("scan_max_steps", int)}
         self._scan_stage, self._scan_cancel = "plan", False
         self._set_busy(self._btn_cancel_scan)
-        self._scan_status("planning scan poses (IK)...", 0xFF2277EE)
+        self._scan_status("planning scan poses (IK) and the path between them...", 0xFF2277EE)
         self._append_log("[scan] $ " + " ".join(cmd))
         self._scan_runner.start(cmd, cwd=PROJECT_ROOT, on_line=self._append_log,
                                 on_exit=self._on_scan_plan_exit)
@@ -2093,7 +2106,8 @@ class PipelineWindow:
             plan = storage.load_plan(ctx["dir"])
             self._scan_session = CaptureSession(
                 ctx["dir"], plan, self._articulation_root, settle=ctx["settle"],
-                max_steps=ctx["max_steps"], log=self._append_log)
+                max_steps=ctx["max_steps"], motion=ctx["follow"], speed=ctx["speed"],
+                log=self._append_log)
             self._scan_session.start()
         except Exception as exc:  # noqa: BLE001 — 시작 실패도 깔끔히 되돌린다
             self._append_log(f"[scan] capture could not start: {exc}")

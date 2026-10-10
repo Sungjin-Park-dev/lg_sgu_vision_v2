@@ -35,13 +35,18 @@ CAD 가 없는 물체는 손목 depth 카메라로 찍어 메시를 만든다. �
 
 ```text
 Isaac Pipeline "Scan Object" 패널
-  ROI 구(물체 놓는 위치 중심, 반경은 대략) → scan_plan.py(서브프로세스, cuRobo IK·자기 가림 제거)
-  → 촬영(앱 안, CaptureSession — 관절 순간이동 + depth 렌더)
+  ROI 구(물체 놓는 위치 중심, 반경은 대략) → scan_plan.py(서브프로세스, cuRobo IK·자기 가림 제거
+      → 고리별 지그재그 경로 + 경로 전체 DP 로 IK 해 고르기 → scan_motion: 장 사이 충돌-free 궤적)
+  → 촬영(앱 안, CaptureSession — 궤적을 따라 재생, 없으면 순간이동 + depth 렌더)
   → reconstruct.py(서브프로세스, 장애물 지우기 → (ICP) → TSDF → 메시)
       ↓ data/{object}/scan/{run}/  (plan · frames · recon{_tag}.ply/json)
 Viewpoint Studio "Scan" 패널
   스캔 확인(남긴/지운 점·카메라·정답) · 파라미터 바꿔 재복원 · recon.obj 내보내기 → Generate
 ```
+
+장 사이 궤적(`trajectory.csv`)은 GLNS 궤적과 같은 transit 엔진(direct → via-roll → via-home, densify
+충돌 게이트)으로 만들고, ROI 전체를 막힌 상자로 둔다(모양을 모르니 안으로 안 들어간다). 이동이
+막히면 그 장의 2π 동치(같은 카메라 자세, 관절을 반대로 감은 값)로 바꿔 다시 잇는다.
 
 ROI 는 물체를 넉넉히 감싸기만 하면 된다 — 중심은 물체를 놓은 위치(ArUco 등으로 정한 물체 pose)를
 쓰고, 넓어진 ROI 로 들어온 받침·테이블은 씬 장애물로 지워진다. 정답 형상은 쓰지 않는다.
