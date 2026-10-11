@@ -112,7 +112,8 @@ def main():
                          zigzag_spacing_deg=args.zigzag_spacing, start=start)
     except ValueError as exc:
         sys.exit(f"[plan] {exc}")
-    plan.meta = {"object": args.object, "scene": config.ACTIVE_SCENE, "roi_source": roi_source,
+    plan.meta = {"object": args.object, "scene": config.ACTIVE_SCENE, "robot": config.ROBOT["name"],
+                 "roi_source": roi_source,
                  "object_pose_source": pose_source, **plan.meta}
     plan.object_pose = config_object_pose()
     plan.obstacles, plan.obstacle_names = snapshot_obstacles()

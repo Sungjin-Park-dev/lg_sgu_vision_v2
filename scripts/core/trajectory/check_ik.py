@@ -34,7 +34,6 @@ from core.trajectory import (  # noqa: E402
     IK_BATCH_SIZE,
     IK_RANDOM_SEED,
     NUM_IK_SEEDS,
-    ROBOT_CONFIG,
     resolve_robot_config,
     build_camera_poses,
     build_collision_world,
@@ -171,7 +170,7 @@ def main() -> None:
 
     print("[3/5] Multi-seed IK + dedup...")
     world_config = build_collision_world(args.object)
-    robot_cfg = resolve_robot_config(ROBOT_CONFIG)
+    robot_cfg = resolve_robot_config()
     print(f"  Robot YAML: urdf={robot_cfg['robot_cfg']['kinematics']['urdf_path']}")
     _, _, joint_periods = _joint_limits_and_periods(robot_cfg)
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])

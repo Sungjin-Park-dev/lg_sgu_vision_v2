@@ -17,7 +17,7 @@
 #
 # Run (inside ros-jazzy container, system ROS sourced):
 #   ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
-#   (ur_type defaults to ur20)
+#   (robot / ur_type / xrdf come from the scene's robot profile — scene:=<name>)
 
 import os
 import sys
@@ -57,10 +57,9 @@ ROBOT_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
 # 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
 # wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
 SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
-# 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 xrdf.
-# launch 가 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
-CAMERA_XRDF = moveit_assets.SOURCE_XRDF
-KINEMATICS_URDF = '/tmp/ur20_camera_kinematics.urdf'
+# 로봇 자산(URDF·xrdf·ur_type)은 씬이 고른 로봇 프로필에서 온다(moveit_assets.robot_assets).
+# xrdf 는 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 것이고, launch 가
+# 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
 ROS2_CONTROLLERS = os.path.join(MOVEIT_DIR, 'ur_config', 'ros2_controllers.yaml')
 RELAY_SCRIPT = os.path.join(MOVEIT_DIR, 'isaac_joint_command_relay.py')
 GATE_SCRIPT = os.path.join(MOVEIT_DIR, 'wait_for_joint_state_gate.py')
@@ -74,12 +73,11 @@ STATUS_TOPIC = f'/{ACTIVE_CONTROLLER}/follow_joint_trajectory/_action/status'
 
 
 
-def get_robot_description_contents(ur_type: str, output_file: str) -> str:
+def get_robot_description_contents(kinematics_urdf: str, output_file: str) -> str:
     """Process the wrapper xacro to URDF xml and dump it to output_file."""
-    del ur_type          # 기구학은 workcell URDF 가 소유한다 (ur_type 파라미터 불필요)
     xacro_processed = xacro.process_file(
         ROBOT_URDF_XACRO,
-        mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF), 'isaac_control': 'true'},
+        mappings={'kinematics_urdf': kinematics_urdf, 'isaac_control': 'true'},
     )
     robot_description = xacro_processed.toxml()
     with open(output_file, 'w') as f:
@@ -91,19 +89,23 @@ def get_robot_description_contents(ur_type: str, output_file: str) -> str:
 
 def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     del args, kwargs
-    ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type')))
-    xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path')))
+    scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
+    robot = moveit_assets.robot_assets(scene_name)       # 씬 → 로봇 프로필
+    # 빈 값이면 프로필 것을 쓴다 — 명시하면 그 값(실험용 override).
+    ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type'))) or robot['ur_type']
+    xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path'))) or robot['xrdf']
     # base_link_inertia 스피어를 **월드충돌에서만** 뺀 파생 xrdf (자기충돌은 유지).
     # 그대로 쓰면 그 스피어가 robot_mount 상면을 상시 ~16mm 파고들어 cuMotion 이
     # 모든 시작 자세를 world collision 으로 거부한다 — prepare_xrdf 주석 참고.
-    xrdf_path = moveit_assets.prepare_xrdf('/tmp/ur20_camera_isaac.xrdf', xrdf_path)
-    scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
+    xrdf_path = moveit_assets.prepare_xrdf(f"/tmp/{robot['name']}_camera_isaac.xrdf", xrdf_path)
     scene_file = moveit_assets.build_collision_scene(scene_name, '/tmp/lg_cell_isaac.scene')
+    kinematics_urdf = moveit_assets.prepare_kinematics_urdf(
+        f"/tmp/{robot['name']}_camera_kinematics.urdf", robot['urdf'])
 
     moveit_config = (
         MoveItConfigsBuilder(ur_type, package_name='ur_moveit_config')
         .robot_description(file_path=ROBOT_URDF_XACRO, mappings={
-            'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF), 'isaac_control': 'true'})
+            'kinematics_urdf': kinematics_urdf, 'isaac_control': 'true'})
         .robot_description_semantic(file_path=SRDF_XACRO, mappings={'name': 'ur'})
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
@@ -132,8 +134,8 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
     # Tolerate small start-state mismatch (MoveIt seed vs Isaac state).
     moveit_config.trajectory_execution['trajectory_execution']['allowed_start_tolerance'] = 0.1
 
-    urdf_path = '/tmp/collated_ur20_urdf.urdf'
-    robot_description = get_robot_description_contents(ur_type, urdf_path)
+    urdf_path = f"/tmp/collated_{robot['name']}_urdf.urdf"
+    robot_description = get_robot_description_contents(kinematics_urdf, urdf_path)
 
     robot_state_publisher = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
@@ -264,12 +266,11 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[object]:
 
 
 def generate_launch_description():
-    default_xrdf = CAMERA_XRDF
     launch_args = [
         DeclareLaunchArgument(
-            'ur_type', default_value='ur20',
-            description='UR robot type',
-            choices=['ur3', 'ur3e', 'ur5', 'ur5e', 'ur10', 'ur10e', 'ur16e', 'ur20', 'ur30'],
+            'ur_type', default_value='',
+            description='UR robot type (빈 값 = 씬이 고른 로봇 프로필의 ur_type)',
+            choices=['', 'ur3', 'ur3e', 'ur5', 'ur5e', 'ur10', 'ur10e', 'ur16e', 'ur20', 'ur30'],
         ),
         DeclareLaunchArgument(
             'scene', default_value='sim_default',
@@ -277,8 +278,8 @@ def generate_launch_description():
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
         DeclareLaunchArgument(
-            'xrdf_path', default_value=default_xrdf,
-            description='Absolute path to the cuMotion XRDF for this robot.',
+            'xrdf_path', default_value='',
+            description='Absolute path to the cuMotion XRDF (빈 값 = 씬이 고른 로봇 프로필의 xrdf).',
         ),
     ]
     return LaunchDescription(launch_args + [OpaqueFunction(function=launch_setup)])

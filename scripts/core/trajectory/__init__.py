@@ -25,6 +25,7 @@ from .robot import (
     batch_collision_check,
     build_collision_world,
     compute_fk,
+    joint_limits_and_periods,
     resolve_robot_config,
 )
 from .settings import (
@@ -45,7 +46,6 @@ from .settings import (
     NUM_IK_SEEDS,
     RECONFIG_THRESHOLD_DEG,
     RESAMPLE_MODE,
-    ROBOT_CONFIG,
 )
 from .storage import save_trajectory_csv
 from .timing import compute_trajectory_times

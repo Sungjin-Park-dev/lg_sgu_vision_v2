@@ -4,6 +4,9 @@
 여기서 만드는 것은 **파생물**이라 리포에 두지 않고 매번 /tmp 에 쓴다 — 원본을 고친 뒤
 재생성을 잊어 MoveIt 만 옛 것을 보는 일이 구조적으로 불가능하게 하려고.
 (기존 launch 가 xacro → /tmp/collated_ur20_urdf.urdf 로 하던 것과 같은 패턴이다.)
+
+어느 로봇의 자산인가는 **씬이 고른다** — launch 의 ``scene`` 인자 → 씬 YAML 의 ``robot`` →
+workcell/robot/profiles/{robot}.yaml (robot_assets). Inspection 과 같은 경로다.
 """
 
 from __future__ import annotations
@@ -11,17 +14,39 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import sys
 
 import yaml
 
 MOVEIT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)
 PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
+if PROJECT_SCRIPTS not in sys.path:         # common.* (씬·로봇 프로필 로더) — numpy+yaml 만 쓴다
+    sys.path.insert(0, PROJECT_SCRIPTS)
 
-CUROBO_URDF = os.path.join(PROJECT_ROOT, 'workcell', 'robot', 'ur20_with_camera_curobo.urdf')
-CAMERA_MESH_DIR = os.path.join(PROJECT_ROOT, 'workcell', 'robot', 'camera')
-SOURCE_XRDF = os.path.join(PROJECT_ROOT, 'workcell', 'robot', 'ur20_with_camera.xrdf')
+ROBOT_DIR = os.path.join(PROJECT_ROOT, 'workcell', 'robot')
+CAMERA_MESH_DIR = os.path.join(ROBOT_DIR, 'camera')
 WORLD_GEOMETRY_NAME = 'world_collision_model'
+
+
+def robot_assets(scene_name: str) -> dict:
+    """씬이 고른 로봇의 MoveIt 입력 — {name, ur_type, urdf, xrdf} (urdf·xrdf 는 절대경로).
+
+    URDF 는 cuRobo yml 의 urdf_path 가 소유한다(Inspection 의 resolve_robot_config 와 같은 규칙:
+    파일명만 취해 workcell/robot/ 에서 찾는다). 빈 씬 이름이면 기본 씬의 로봇.
+    """
+    from common import robot_profile, scene_config
+
+    scene = scene_config.load_scene(scene_name or None)
+    profile = robot_profile.load_profile(scene['robot'])
+    curobo = yaml.safe_load(open(robot_profile.asset_path(profile, 'curobo_config')))
+    urdf_name = os.path.basename(curobo['robot_cfg']['kinematics']['urdf_path'])
+    return {
+        'name': profile['name'],
+        'ur_type': profile['ur_type'],
+        'urdf': os.path.join(ROBOT_DIR, urdf_name),
+        'xrdf': str(robot_profile.asset_path(profile, 'xrdf')),
+    }
 
 
 def _load_module(path: str, name: str):
@@ -35,15 +60,14 @@ def _collision_exclude_links() -> tuple:
     """Inspection 이 월드충돌에서 빼는 링크 목록. **같은 목록을 공유하려고** 읽어온다.
 
     core.trajectory 패키지로 import 하면 __init__ 이 cuRobo 까지 끌어오므로 파일로 연다.
+    settings.py 는 numpy 만 import 한다 — 못 읽으면 조용히 기본값으로 넘어가지 않고 죽는다
+    (예전 fallback 은 실제로 늘 걸려 있었고, 목록이 바뀌면 MoveIt 만 다른 기준을 쓰게 된다).
     """
     settings = os.path.join(PROJECT_SCRIPTS, 'core', 'trajectory', 'settings.py')
-    try:
-        return tuple(_load_module(settings, 'pt_settings').COLLISION_EXCLUDE_LINKS)
-    except Exception:                      # noqa: BLE001 — 못 읽으면 알려진 기본값으로
-        return ('base_link_inertia',)
+    return tuple(_load_module(settings, 'pt_settings').COLLISION_EXCLUDE_LINKS)
 
 
-def prepare_kinematics_urdf(output_file: str) -> str:
+def prepare_kinematics_urdf(output_file: str, source_urdf: str) -> str:
     """workcell 의 URDF 를 MoveIt 이 include 할 수 있게 손봐 /tmp 에 둔다.
 
     **기하는 건드리지 않는다** — 카메라 위치·clocking·관절은 그 파일이 소유한다.
@@ -53,7 +77,7 @@ def prepare_kinematics_urdf(output_file: str) -> str:
       2. 카메라 메시 package:// → 절대경로. 컨테이너의 ur_description 에는
          meshes/camera 가 없어 그 경로가 풀리지 않는다(팔 메시는 정상이다).
     """
-    source = open(CUROBO_URDF).read()
+    source = open(source_urdf).read()
     kinematics = re.sub(r'<ros2_control\b.*?</ros2_control>', '', source, flags=re.S)
     kinematics = kinematics.replace(
         'package://ur_description/meshes/camera/', f'file://{CAMERA_MESH_DIR}/')
@@ -62,7 +86,7 @@ def prepare_kinematics_urdf(output_file: str) -> str:
     return output_file
 
 
-def prepare_xrdf(output_file: str, source: str = None) -> str:
+def prepare_xrdf(output_file: str, source: str) -> str:
     """월드충돌용 스피어 집합을 파생시킨 xrdf 를 /tmp 에 둔다.
 
     ``base_link_inertia`` 스피어는 자세와 무관하게 ``robot_mount`` 상면을 ~16mm 파고든다.
@@ -77,7 +101,7 @@ def prepare_xrdf(output_file: str, source: str = None) -> str:
     (무작위 자세의 4.2%, forearm 과 최대 118mm). xrdf 가 collision 과 self_collision 에
     서로 다른 geometry 집합을 가리킬 수 있어서 가능하다(cuMotion 로드로 실측 확인).
     """
-    data = yaml.safe_load(open(source or SOURCE_XRDF))
+    data = yaml.safe_load(open(source))
     excluded = _collision_exclude_links()
     source_name = data['collision']['geometry']
     geometry = data['geometry'][source_name]

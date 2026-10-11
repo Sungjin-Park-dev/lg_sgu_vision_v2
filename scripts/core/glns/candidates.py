@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -32,26 +31,8 @@ def _collision_filter_representatives(representatives, robot_cfg, world, metadat
                 key: np.asarray(value)[free] for key, value in metadata[viewpoint].items()
             }
     return removed
-def _joint_limits_and_periods(robot_cfg) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Read active-joint limits and mark joints with at least two full turns as periodic."""
-    kin = robot_cfg["robot_cfg"]["kinematics"]
-    names = list(kin["cspace"]["joint_names"])
-    limit_clip = float(kin["cspace"].get("position_limit_clip", 0.0))
-    root = ET.parse(kin["urdf_path"]).getroot()
-    joints = {node.attrib.get("name"): node for node in root.findall("joint")}
-    lower, upper, periods = [], [], []
-    for name in names:
-        node = joints.get(name)
-        limit = None if node is None else node.find("limit")
-        if limit is None or "lower" not in limit.attrib or "upper" not in limit.attrib:
-            raise ValueError(f"URDF joint limits missing for {name}")
-        lo, hi = float(limit.attrib["lower"]), float(limit.attrib["upper"])
-        lower.append(lo + limit_clip)
-        upper.append(hi - limit_clip)
-        # A ±π joint cannot cross its endpoint even though its pose is angularly
-        # equivalent. Require a full extra revolution of available range.
-        periods.append(2.0 * np.pi if hi - lo >= 4.0 * np.pi - 1e-6 else 0.0)
-    return np.asarray(lower), np.asarray(upper), np.asarray(periods)
+# 로봇 한계·주기는 로봇 모듈이 소유한다(정찰·스캔 계획도 같이 쓴다). 기존 import 이름 유지.
+_joint_limits_and_periods = PT.joint_limits_and_periods
 
 
 def _build_pose_variants(world_poses, wd_m, *, roll_augment=False, roll_step_deg=30.0,

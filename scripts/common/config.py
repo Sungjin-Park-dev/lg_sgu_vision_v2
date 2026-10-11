@@ -4,7 +4,7 @@ import sys
 import numpy as np
 from pathlib import Path
 
-from common import scene_config
+from common import robot_profile, scene_config
 
 # 씬 로더가 이 모듈의 심볼을 in-place 로 갱신한다(scene_config.apply_to).
 _self = sys.modules[__name__]
@@ -93,8 +93,32 @@ INSPECTION_CAMERA_INFO_TOPIC = "/inspection_camera/camera_info"
 MOVEIT_JOINT_COMMANDS_TOPIC = "/isaac_joint_commands"   # ROS→Isaac (MoveIt 위치 명령)
 MOVEIT_JOINT_STATES_TOPIC = "/isaac_joint_states"       # Isaac→ROS (로봇 상태 피드백)
 
-# 실제 로봇 현재 자세 기준 vSample115
-ROBOT_START_STATE = np.deg2rad([-198, -79, 101, 49, 84, 73])
+# ============================================================================
+# 로봇 — 씬이 고른 프로필(workcell/robot/profiles/{name}.yaml)이 채운다
+# ============================================================================
+# 씬 YAML 의 `robot:`(없으면 ur20) → robot_profile.load_profile → 아래 두 심볼을 **제자리에서**
+# 갱신한다(apply_robot). 다른 모듈이 `from config import ROBOT` 로 붙잡아 둬도 따라온다.
+#   ROBOT             name, ur_type, curobo_config, xrdf, usd, ghost_usd, joint_names,
+#                     start_state_deg, path — 자산은 workcell/robot/ 기준 파일명
+#   ROBOT_START_STATE 시작(HOME) 자세 rad — 프로필의 start_state_deg
+#   ROBOT_JOINT_NAMES 관절 이름(cuRobo yml cspace 순서) — ROBOT["joint_names"] 와 같은 list 객체
+# 기본 씬 로드(아래 load_scene(DEFAULT_SCENE))보다 **앞에** 있어야 한다.
+ROBOT: dict = {}
+ROBOT_START_STATE = np.zeros(6, dtype=np.float64)
+ROBOT_JOINT_NAMES: list = []
+DEFAULT_ROBOT = robot_profile.DEFAULT_ROBOT
+
+
+def apply_robot(name=None) -> str:
+    """로봇 프로필을 로드해 ROBOT·ROBOT_START_STATE 를 갱신한다. 로봇 이름을 돌려준다."""
+    robot_profile.apply_to(_self, robot_profile.load_profile(name))
+    return ROBOT["name"]
+
+
+def robot_asset(key: str) -> Path:
+    """현재 로봇 자산의 절대경로 — key: curobo_config / xrdf / usd / ghost_usd."""
+    return robot_profile.asset_path(ROBOT, key)
+
 
 
 
@@ -165,6 +189,7 @@ def scene_snapshot() -> dict:
     """현재 월드를 JSON 직렬화 가능한 스냅샷으로. 해 h5 에 박제해 재현에 쓴다."""
     return scene_config.snapshot({
         "name": ACTIVE_SCENE,
+        "robot": ROBOT["name"],        # 결과를 다시 열 때 같은 로봇으로 맞추려고
         "target_object": TARGET_OBJECT,
         "environment": ENVIRONMENT,
         "obstacles": OBSTACLES,
@@ -260,13 +285,8 @@ load_scene(DEFAULT_SCENE)
 
 
 # ============================================================================
-# 로봇 설정
+# 카메라 장착 (로봇 설정은 위 ROBOT — 씬이 고른 프로필)
 # ============================================================================
-
-# cuRobo와 EAIK에서 사용되는 로봇 설정 파일.
-# URDF 경로는 여기 없다 — 이 yml 의 urdf_path 가 소유하고 robot.resolve_robot_config() 가
-# workcell/robot/ 절대경로로 푼다(현재 ur20_with_camera_curobo.urdf).
-DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"
 
 # mount_offset (m): flange → optical_frame 거리. 용어: docs/reference/camera-geometry.md
 # optical_frame = 렌즈 배럴 앞면(lens_front) = 카메라의 물리적 끝. CAD 실측 flange+218.770mm.

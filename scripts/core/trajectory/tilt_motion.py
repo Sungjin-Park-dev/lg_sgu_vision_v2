@@ -50,7 +50,7 @@ import numpy as np
 SCRIPTS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from common import config  # noqa: E402
+from common import config, scene_config  # noqa: E402
 from common.tilt_geometry import camera_pose, tilt_legs  # noqa: E402
 # 정의는 common 에 있다 — Isaac 앱이 cuRobo 를 끌어오지 않고 같은 함수를 쓰기 위해서다.
 from common.trajectory_csv import (  # noqa: E402,F401
@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--object", required=True, help="object name placed in the collision world")
+    scene_config.add_cli_argument(p)
     p.add_argument("--trajectory", required=True, type=Path,
                    help="scan trajectory CSV whose row is the tilt centre")
     p.add_argument("--row-index", required=True, type=int,
@@ -243,6 +244,8 @@ def main() -> int:
     # 충돌 게이트가 시간을 매기기 전에만 반영되면 된다. 여기가 그 앞이다.
     PT.apply_timing_cli(args)
 
+    # 씬(셀 기하·로봇)을 먼저 — 물체 배치가 씬 소유다.
+    scene_config.apply_cli(args, config)
     # 물체 배치: 기본값 → CLI override (plan_move.py / solve.py 와 같은 관례).
     config.apply_object_placement(args.object)
     if args.object_position is not None:
@@ -297,7 +300,7 @@ def main() -> int:
     # ---- IK + 충돌 필터 ----------------------------------------------------
     print("-" * 64)
     print("IK (multi-seed) + collision filter")
-    robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
+    robot_cfg = PT.resolve_robot_config()
     world_config = PT.build_collision_world(args.object)
     joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
     candidates = _solve_candidates(

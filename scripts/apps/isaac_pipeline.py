@@ -12,7 +12,7 @@ an Omni UI window whose panels follow the order of the work:
     C) Motion Speed    — the timing knobs baked into every generated CSV
     D) Generate Trajectory — scan (GLNS) and tilt motion              (subprocess)
     E) Ghost preview with Play/Pause/Stop/Slider            (in-process; sim, ROS-free)
-    F) Execute trajectory on Isaac UR20 or real robot       (subprocess)
+    F) Execute trajectory on Isaac robot or real robot       (subprocess)
 
 B is split out from D because it is a separate, reusable step: its output
 (data/{object}/ik/{N}/*.h5) is keyed by the candidate options, and D reuses that
@@ -22,9 +22,9 @@ changes nothing about IK and everything about what D writes.
 The pipeline scripts run as `uv run` subprocesses to keep Isaac Sim's bundled
 Python isolated from cuRobo / rclpy. Stdout streams into a scrolling log.
 
-Preview overlays a pre-built physics-free ghost UR20 with the camera attached
-(built via scripts/setup/build_ghost_usd.py) at /World/UR20_preview and
-poses each link by writing one xformOp per frame via FK. The real /World/UR20
+Preview overlays a pre-built physics-free ghost robot with the camera attached
+(built via scripts/setup/build_ghost_usd.py) at /World/Robot_preview and
+poses each link by writing one xformOp per frame via FK. The real /World/Robot
 articulation is never touched by preview.
 
 Usage:
@@ -58,14 +58,8 @@ from core.isaac import scene as urctl  # noqa: E402
 from common import config as _cfg_module  # noqa: E402
 from common import scene_config  # noqa: E402
 
-JOINT_NAMES = [
-    "shoulder_pan_joint",
-    "shoulder_lift_joint",
-    "elbow_joint",
-    "wrist_1_joint",
-    "wrist_2_joint",
-    "wrist_3_joint",
-]
+# 씬이 고른 로봇의 관절 이름 — config 가 제자리에서 갱신하는 list 라 --scene 적용 뒤에도 맞다.
+JOINT_NAMES = _cfg_module.ROBOT_JOINT_NAMES
 
 # Must match scripts/core/trajectory/settings.py::IK_RANDOM_SEED. Kept local because
 # this module is imported by Isaac Sim's bundled Python before the uv subprocess.
@@ -187,10 +181,9 @@ def quat_to_rotvec(q) -> np.ndarray:
     theta = 2.0 * float(np.arctan2(s, q[0]))
     return (q[1:] / s) * theta
 
-GHOST_ROOT_PATH = "/World/UR20_preview"
+GHOST_ROOT_PATH = "/World/Robot_preview"
 # prim 이름 → 씬 YAML 의 장애물 이름(USD prim 규칙: 영문/숫자/_).
 _SCENE_PRIM_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
-GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 
 # Trajectory controllers, gated by pipeline mode (only one active at a time):
 #   MoveIt (RViz move_group) → MOVEIT_CONTROLLER
@@ -597,7 +590,7 @@ def load_trajectory_csv(csv_path: str):
 # =============================================================================
 
 class IsaacArticulationExecutor:
-    """Apply CSV joint targets directly to Isaac's UR20 articulation each frame."""
+    """Apply CSV joint targets directly to Isaac's robot articulation each frame."""
 
     APPROACH_MAX_JOINT_VEL_RAD_S = 0.5
     MIN_APPROACH_TIME_S = 0.5
@@ -630,7 +623,7 @@ class IsaacArticulationExecutor:
             [art.get_dof_index(name) for name in self._joint_names], dtype=np.int32,
         )
         if np.any(indices < 0):
-            raise RuntimeError(f"UR20 joint lookup failed: {indices.tolist()}")
+            raise RuntimeError(f"robot joint lookup failed: {indices.tolist()}")
         self._articulation = art
         self._controller = art.get_articulation_controller()
         self._indices = indices
@@ -677,7 +670,7 @@ class IsaacArticulationExecutor:
         ))
 
     def current_joints(self) -> np.ndarray:
-        """UR20 의 현재 관절값 (rad).
+        """로봇의 현재 관절값 (rad).
 
         **두 run-mode 모두 여기서 읽는다.** sim 은 Isaac 이 곧 로봇이고, real 은
         /RealRobotGraph 가 실로봇 /joint_states 를 이 articulation 으로 미러링한다
@@ -689,7 +682,7 @@ class IsaacArticulationExecutor:
             dtype=np.float64,
         )
         if q.shape != (len(self._joint_names),) or not np.all(np.isfinite(q)):
-            raise RuntimeError(f"invalid current UR20 joint state: {q}")
+            raise RuntimeError(f"invalid current robot joint state: {q}")
         return q
 
     def step(self, dt: float):
@@ -704,7 +697,7 @@ class IsaacArticulationExecutor:
         if self._elapsed >= float(self._times[-1]):
             self._running = False
             callback, self._on_done = self._on_done, None
-            self._log("[execute] Isaac UR20 trajectory complete")
+            self._log("[execute] Isaac robot trajectory complete")
             if callback is not None:
                 callback(0)
 
@@ -736,10 +729,10 @@ class PreviewState:
 
 
 class PreviewPlayer:
-    """Animates the ghost UR20 by computing FK and writing each link's xformOp.
+    """Animates the ghost robot by computing FK and writing each link's xformOp.
 
     The ghost USD is physics-free; this class only does USD-level pose
-    writes. The real /World/UR20 articulation is never touched, so
+    writes. The real /World/Robot articulation is never touched, so
     GraphTickSwitch and any external /joint_states publisher keep running
     independently.
     """
@@ -1018,7 +1011,7 @@ class PipelineWindow:
         self._studio_status_label = None
         self._studio_port = 8080
         # Keep GraphTickSwitch around for the publish path. Preview no
-        # longer needs it (ghost is a separate prim tree, not the real UR20),
+        # longer needs it (ghost is a separate prim tree, not the real robot),
         # so we leave the graph untouched during preview — the user-confirmed
         # stable original idle behavior is preserved.
         self._real_graph = GraphTickSwitch(real_graph_path, self._append_log)
@@ -1448,7 +1441,7 @@ class PipelineWindow:
                 which = "/SimRobotGraph drives (live /isaac_joint_commands)"
             else:
                 self._sim_graph.set_active(False)
-                which = "in-process executor drives Isaac UR20 (ROS-free)"
+                which = "in-process executor drives Isaac robot (ROS-free)"
         else:  # real
             self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
             self._sim_graph.set_active(False)
@@ -2514,7 +2507,7 @@ class PipelineWindow:
     def _publish_hint_text(self) -> str:
         if self._mode == "real":
             return "* REAL mode - executes the CSV on the live robot."
-        return "* SIM mode - executes the CSV on the Isaac UR20 articulation."
+        return "* SIM mode - executes the CSV on the Isaac robot articulation."
 
     def _build_log(self):
         ui = self._ui
@@ -3239,8 +3232,8 @@ class PipelineWindow:
                 continue
             if f"/{FOV_PLANE_SCOPE_NAME}/" in p:
                 continue
-            # `+ "/"` so root="/World/UR20" does not also match the sibling
-            # ghost "/World/UR20_preview".
+            # `+ "/"` so root="/World/Robot" does not also match the sibling
+            # ghost "/World/Robot_preview".
             if (p == robot_root or p.startswith(robot_root + "/")) and prim.GetName() == prim_name:
                 return prim
         return None
@@ -3832,12 +3825,7 @@ class PipelineWindow:
         import yaml
         from common import config as _config
 
-        robot_cfg_path = (
-            _config.PROJECT_ROOT
-            / "workcell"
-            / "robot"
-            / _config.DEFAULT_ROBOT_CONFIG
-        )
+        robot_cfg_path = _config.robot_asset("curobo_config")
         with open(robot_cfg_path) as f:
             cfg = yaml.safe_load(f)
         kin = cfg["robot_cfg"]["kinematics"]
@@ -4817,7 +4805,8 @@ class PipelineWindow:
         clamp = self._get_field("tilt_clamp", bool)
         shell = (
             f"{self._uv} run --no-sync scripts/core/trajectory/tilt_motion.py "
-            f"--object {obj!r} --trajectory {source_csv!r} --row-index {index} "
+            f"--object {obj!r} --scene {self._scene!r} "
+            f"--trajectory {source_csv!r} --row-index {index} "
             f"--object-position {pos_s} --object-quat {quat_s} "
             f"--pitch-min {float(self._get_field('tilt_pitch_min', float)):.3f} "
             f"--pitch-max {float(self._get_field('tilt_pitch_max', float)):.3f} "
@@ -5089,7 +5078,7 @@ class PipelineWindow:
             "source /opt/ros/jazzy/setup.bash && "
             f"{self._ensure_inspection_controller_cmd()} && "
             f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
-            f"--csv {csv!r} --target controller"
+            f"--csv {csv!r} --target controller --scene {self._scene!r}"
         )
         self._append_log(f"[{tag}] target=real robot")
         self._append_log(f"[{tag}] $ " + shell_cmd)
@@ -5193,11 +5182,15 @@ class PipelineWindow:
 
 def main():
     args = urctl.parse_args()
+
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽고,
+    # 로봇(USD·ghost·관절 이름·시작 자세)도 씬이 고른다.
+    scene_config.apply_cli(args, _cfg_module)
+    if args.usd_path is None:
+        args.usd_path = urctl.robot_usd_path()
     if not args.usd_path.exists():
         sys.exit(f"Robot USD not found: {args.usd_path}")
-
-    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
-    scene_config.apply_cli(args, _cfg_module)
+    print(f"  Robot: {_cfg_module.ROBOT['name']} ({_cfg_module.ROBOT['path']})")
 
     simulation_app = urctl.start_sim(headless=False)
 
@@ -5225,13 +5218,13 @@ def main():
 
     # Physics-free ghost overlay for trajectory preview. Built once offline
     # by scripts/setup/build_ghost_usd.py — referencing it here
-    # should add zero physics state and leave the real /World/UR20
-    # articulation untouched.
-    ghost_usd_path = args.usd_path.parent / GHOST_USD_NAME
+    # should add zero physics state and leave the real robot articulation untouched.
+    ghost_usd_path = _cfg_module.robot_asset("ghost_usd")
     if not ghost_usd_path.exists():
         sys.exit(
             f"Ghost USD not found: {ghost_usd_path}\n"
-            f"Build it first: uv run scripts/setup/build_ghost_usd.py"
+            f"Build it first: uv run scripts/setup/build_ghost_usd.py "
+            f"--robot {_cfg_module.ROBOT['name']}"
         )
     base_link, chain = spawn_preview_ghost(
         usd_path=ghost_usd_path,

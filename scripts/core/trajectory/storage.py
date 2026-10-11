@@ -8,8 +8,8 @@ from .motion import WAYPOINT_KIND_NAMES
 
 
 def save_trajectory_csv(solutions, ee_positions, ee_quaternions, output_path,
-                        robot_name="ur20", dt=1.0, times=None, kinds=None):
-    """Trajectory를 CSV로 저장. joint 컬럼에 robot_name prefix 추가.
+                        robot_name=None, dt=1.0, times=None, kinds=None):
+    """Trajectory를 CSV로 저장. joint 컬럼에 robot_name prefix 추가(기본: 씬이 고른 로봇 이름).
 
     ``kinds`` (행별 출처 라벨)를 주면 ``waypoint_kind`` 컬럼을 덧붙인다 — viewpoint /
     interpolated / planned. 기존 컬럼은 그대로라 읽는 쪽(publish, 앱 로더)은 영향이 없다.
@@ -18,14 +18,11 @@ def save_trajectory_csv(solutions, ee_positions, ee_quaternions, output_path,
     import os
     import tempfile
 
-    JOINT_NAMES = [
-        "shoulder_pan_joint",
-        "shoulder_lift_joint",
-        "elbow_joint",
-        "wrist_1_joint",
-        "wrist_2_joint",
-        "wrist_3_joint",
-    ]
+    from common import config
+
+    if robot_name is None:
+        robot_name = config.ROBOT["name"]
+    JOINT_NAMES = config.ROBOT_JOINT_NAMES
 
     header = ["time"] + [f"{robot_name}-{j}" for j in JOINT_NAMES] + [
         "target-POS_X", "target-POS_Y", "target-POS_Z",

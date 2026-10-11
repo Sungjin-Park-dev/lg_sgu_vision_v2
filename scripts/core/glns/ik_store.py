@@ -59,8 +59,12 @@ def build_settings(*, object_position, object_quat_wxyz, working_distance_m,
     """저장/검증에 쓰는 정규화된 결과-영향 설정 dict — 두 호출자(check_ik / solve.py)가
     동일 dict 를 만들도록 한 곳에 모은다. batch_size 는 결과에 영향이 없어 제외한다(재사용
     조건에서 빼야 불필요한 miss 가 없다). dedup 이 꺼지면 dedup_rad 는 -1(무효)로 정규화해
-    두 쪽이 항상 같은 값을 갖게 한다."""
+    두 쪽이 항상 같은 값을 갖게 한다. 로봇(씬이 고른 프로필)도 넣는다 — 같은 물체·viewpoint
+    라도 다른 로봇의 IK 해는 쓸 수 없다."""
+    from common import config
+
     return {
+        "robot": str(config.ROBOT["name"]),
         "object_position": np.asarray(object_position, dtype=np.float64).reshape(3),
         "object_quat_wxyz": np.asarray(object_quat_wxyz, dtype=np.float64).reshape(4),
         "working_distance_m": float(working_distance_m),
@@ -155,6 +159,10 @@ def load_ik_solutions(path, want_settings: dict) -> tuple[list, list] | None:
             got = {}
             for key in want_settings:
                 if key not in f.attrs:
+                    if key == "robot":          # robot 키 이전 파일은 전부 기본 로봇(UR20)으로 풀었다
+                        from common import config
+                        got[key] = config.DEFAULT_ROBOT
+                        continue
                     return None
                 got[key] = f.attrs[key]
             if not _settings_match(want_settings, got):

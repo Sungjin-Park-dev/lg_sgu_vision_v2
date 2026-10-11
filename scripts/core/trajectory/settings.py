@@ -2,9 +2,6 @@
 
 import numpy as np
 
-from common import config
-
-ROBOT_CONFIG = config.DEFAULT_ROBOT_CONFIG
 NUM_IK_SEEDS = 100
 IK_BATCH_SIZE = 4
 IK_RANDOM_SEED = 123

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -50,15 +51,16 @@ CAMERA_DIR = PROJECT_ROOT / "workcell" / "robot" / "camera"
 OUT_USDC = CAMERA_DIR / "camera.usdc"
 OUT_OBJ = CAMERA_DIR / "camera_body.obj"
 
-ROBOT_USD = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
-GHOST_USD = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_ghost.usd"
+# 어느 로봇의 USD·URDF 를 검증하나 — 로봇 프로필(workcell/robot/profiles/{name}.yaml)이 정한다
+# (--robot, 기본 ur20). robot_files() 참고.
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+from common import robot_profile  # noqa: E402  (numpy + yaml 만)
 
-CUROBO_URDF = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_curobo.urdf"
-
-FLANGE_PRIM = "/Root/UR20/wrist_3_link/flange"
-MOUNT_PRIM = f"{FLANGE_PRIM}/camera_mount"
-CAMERA_BODY_PRIM = f"{MOUNT_PRIM}/camera_body"
-OPTICAL_PRIM = f"{MOUNT_PRIM}/camera_optical_frame"
+# 카메라 prim 은 경로가 아니라 **이름으로** 찾는다(flange/camera_mount/{camera_body,
+# camera_optical_frame}) — 로봇 USD 의 루트 이름(/Root/UR20/...)은 로봇마다 다르다.
+MOUNT_NAME = "camera_mount"
+CAMERA_BODY_NAME = "camera_body"
+OPTICAL_NAME = "camera_optical_frame"
 
 # 카메라가 플랜지에 물린 clocking (deg). USD `camera_mount` 의 xformOp:rotateXYZ 와
 # URDF `camera_mount_joint` 의 rpy 가 이 값의 두 사본이고, verify 가 셋을 맞춰본다.
@@ -225,24 +227,41 @@ def write_usdc(path: Path, verts32: np.ndarray, faces: np.ndarray, normals_fv: n
     print(f"  wrote {path.relative_to(PROJECT_ROOT)} ({path.stat().st_size / 1e6:.1f} MB)")
 
 
-def usd_mount_rpy_deg(stage) -> np.ndarray:
+def robot_files(robot: str) -> tuple[Path, Path, Path]:
+    """로봇 프로필 → (실로봇 USD, ghost USD, cuRobo URDF). URDF 는 cuRobo yml 의 urdf_path 파일명."""
+    import yaml
+
+    profile = robot_profile.load_profile(robot)
+    curobo = yaml.safe_load(open(robot_profile.asset_path(profile, "curobo_config")))
+    urdf = robot_profile.ROBOT_DIR / Path(curobo["robot_cfg"]["kinematics"]["urdf_path"]).name
+    return (robot_profile.asset_path(profile, "usd"),
+            robot_profile.asset_path(profile, "ghost_usd"), urdf)
+
+
+def find_camera_mount(stage):
+    """flange 바로 아래의 camera_mount prim — 하나여야 한다."""
+    found = [p for p in stage.Traverse()
+             if p.GetName() == MOUNT_NAME and p.GetParent().GetName() == "flange"]
+    assert len(found) == 1, f"expected one flange/{MOUNT_NAME} prim, found {[str(p.GetPath()) for p in found]}"
+    return found[0]
+
+
+def usd_mount_rpy_deg(mount) -> np.ndarray:
     """USD `camera_mount` 의 xformOp:rotateXYZ (deg)."""
-    prim = stage.GetPrimAtPath(MOUNT_PRIM)
-    assert prim and prim.IsValid(), f"{MOUNT_PRIM} missing"
-    ops = {op.GetOpName(): op for op in UsdGeom.Xformable(prim).GetOrderedXformOps()}
+    ops = {op.GetOpName(): op for op in UsdGeom.Xformable(mount).GetOrderedXformOps()}
     op = ops.get("xformOp:rotateXYZ")
-    assert op is not None, f"{MOUNT_PRIM}: xformOp:rotateXYZ missing"
+    assert op is not None, f"{mount.GetPath()}: xformOp:rotateXYZ missing"
     return np.asarray(op.Get(), dtype=np.float64)
 
 
-def urdf_mount_rpy_deg() -> np.ndarray:
+def urdf_mount_rpy_deg(curobo_urdf: Path) -> np.ndarray:
     """cuRobo URDF `camera_mount_joint` 의 origin rpy (deg)."""
     import xml.etree.ElementTree as ET
 
-    root = ET.parse(CUROBO_URDF).getroot()
+    root = ET.parse(curobo_urdf).getroot()
     joint = next((j for j in root.findall("joint")
                   if j.get("name") == "camera_mount_joint"), None)
-    assert joint is not None, f"{CUROBO_URDF.name}: camera_mount_joint missing"
+    assert joint is not None, f"{curobo_urdf.name}: camera_mount_joint missing"
     # NB: `joint.find(...) or {}` 는 쓸 수 없다 -- 자식 없는 Element 는 falsy 라
     #     origin 을 찾아놓고도 조용히 버리고 "0 0 0" 을 읽는다.
     origin = joint.find("origin")
@@ -250,15 +269,16 @@ def urdf_mount_rpy_deg() -> np.ndarray:
     return np.rad2deg(np.asarray([float(v) for v in rpy.split()], dtype=np.float64))
 
 
-def verify_composed(usd_path: Path) -> None:
+def verify_composed(usd_path: Path, curobo_urdf: Path) -> None:
     """Assert against the *composed* robot stage. This is the 0c85601 guard.
 
     A broken reference yields an empty Xform, not an error -- the camera just vanishes.
     Assert on raw points, not BBoxCache: ComputeRelativeBound pads by ~6e-5 m.
     """
     stage = Usd.Stage.Open(str(usd_path), load=Usd.Stage.LoadAll)
-    body = stage.GetPrimAtPath(CAMERA_BODY_PRIM)
-    assert body and body.IsValid(), f"{usd_path.name}: {CAMERA_BODY_PRIM} missing"
+    mount = find_camera_mount(stage)
+    body = mount.GetChild(CAMERA_BODY_NAME)
+    assert body and body.IsValid(), f"{usd_path.name}: {mount.GetPath()}/{CAMERA_BODY_NAME} missing"
 
     meshes = [p for p in Usd.PrimRange(body) if p.IsA(UsdGeom.Mesh)]
     assert len(meshes) == 1, f"{usd_path.name}: expected 1 Mesh under camera_body, got {len(meshes)}"
@@ -272,21 +292,21 @@ def verify_composed(usd_path: Path) -> None:
     # The mesh is pre-baked, so mesh-local == camera_mount-local exactly.
     xc = UsdGeom.XformCache()
     rel = (xc.GetLocalToWorldTransform(meshes[0])
-           * xc.GetLocalToWorldTransform(stage.GetPrimAtPath(MOUNT_PRIM)).GetInverse())
+           * xc.GetLocalToWorldTransform(mount).GetInverse())
     assert np.allclose(np.asarray(rel), np.eye(4), atol=1e-9), \
         f"{usd_path.name}: mesh->camera_mount is not identity:\n{np.asarray(rel)}"
 
     # clocking 은 이 스테이지와 URDF 두 곳에 산다. 한쪽만 고치면 계획(cuRobo/URDF)과
     # 화면(USD)이 서로 다른 로봇이 되는데, 어느 쪽도 에러를 내지 않는다 -- 그래서 여기서 맞춰본다.
-    mount_rot = usd_mount_rpy_deg(stage)
+    mount_rot = usd_mount_rpy_deg(mount)
     assert np.allclose(mount_rot, CAMERA_MOUNT_RPY_DEG, atol=1e-6), \
         f"{usd_path.name}: camera_mount rotateXYZ={mount_rot} != {CAMERA_MOUNT_RPY_DEG}"
-    urdf_rot = urdf_mount_rpy_deg()
+    urdf_rot = urdf_mount_rpy_deg(curobo_urdf)
     assert np.allclose(urdf_rot, CAMERA_MOUNT_RPY_DEG, atol=1e-6), \
-        (f"{CUROBO_URDF.name}: camera_mount_joint rpy={urdf_rot} deg != "
+        (f"{curobo_urdf.name}: camera_mount_joint rpy={urdf_rot} deg != "
          f"{CAMERA_MOUNT_RPY_DEG} -- URDF 와 USD 의 clocking 이 어긋났다")
 
-    optical = stage.GetPrimAtPath(OPTICAL_PRIM)
+    optical = mount.GetChild(OPTICAL_NAME)
     assert optical and optical.IsValid(), f"{usd_path.name}: camera_optical_frame missing"
     tx = UsdGeom.Xformable(optical).GetOrderedXformOps()[0].Get().ExtractTranslation()
     assert np.allclose(list(tx), [OPTICAL_FRAME_X, 0, 0], atol=1e-9), \
@@ -305,7 +325,10 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="measure and assert, write nothing")
     ap.add_argument("--verify-only", action="store_true", help="only re-run the composed-stage assertions")
     ap.add_argument("--ghost", action="store_true", help="also verify the flattened ghost USD")
+    ap.add_argument("--robot", default=robot_profile.DEFAULT_ROBOT,
+                    help="robot profile whose USD/URDF to verify (workcell/robot/profiles/<name>.yaml)")
     args = ap.parse_args()
+    robot_usd, ghost_usd, curobo_urdf = robot_files(args.robot)
 
     if not args.verify_only:
         if args.source is None:
@@ -332,9 +355,9 @@ def main() -> None:
         write_usdc(OUT_USDC, verts32, dec.faces, normals_fv)
 
     print(f"[4/4] Verifying composed stage(s)")
-    verify_composed(ROBOT_USD)
+    verify_composed(robot_usd, curobo_urdf)
     if args.ghost:
-        verify_composed(GHOST_USD)
+        verify_composed(ghost_usd, curobo_urdf)
     print("OK")
 
 

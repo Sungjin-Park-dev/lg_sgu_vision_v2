@@ -6,12 +6,50 @@
 기하 값·용어의 정의는 [camera-geometry.md](camera-geometry.md)가 단일 진실원이다.
 이 문서는 **어디에 무엇이 있고 무엇을 같이 고쳐야 하는가**를 다룬다.
 
+## 0. 로봇 프로필 — 씬이 로봇을 고른다
+
+```
+workcell/scenes/{scene}.yaml   robot: ur20            (없으면 ur20)
+        ↓  scene_config.apply_to → config.apply_robot
+workcell/robot/profiles/ur20.yaml                      ← 스키마: scripts/common/robot_profile.py
+        ur_type        ur20                      UR ROS2 드라이버 / ur_moveit_config
+        curobo_config  ur20_with_camera.yml      cuRobo (URDF 는 이 yml 의 urdf_path)
+        xrdf           ur20_with_camera.xrdf     cuMotion(MoveIt)
+        usd            ur20_with_camera.usd      Isaac 실로봇 (스테이지 /World/Robot)
+        ghost_usd      ur20_with_camera_ghost.usd  Isaac 미리보기 (/World/Robot_preview)
+        start_state_deg                          시작(HOME) 자세
+        ↓
+config.ROBOT · ROBOT_JOINT_NAMES · ROBOT_START_STATE   (제자리 갱신 — 별칭이 따라온다)
+```
+
+- 자산은 옮기지 않고 `workcell/robot/` 기준 **파일명**으로 가리킨다(USD 폴더 이동은 코어 MDL
+  상대경로를 깨뜨린다). 관절 이름은 프로필에 없다 — cuRobo yml 의 `cspace.joint_names` 가 소유.
+- `--scene` 이 모든 진입점·서브프로세스·h5 스냅샷을 타므로 로봇도 같이 간다. 로봇은 스냅샷에도
+  실린다 — `verify.py`·trajectory_studio 가 결과를 열면 그 로봇으로 맞춘다(다르면 거부).
+  IK 저장소·스캔 계획에도 로봇이 기록돼 다른 로봇의 결과를 재사용하지 않는다.
+  robot 키 이전의 씬·h5·IK·스캔 계획은 전부 `ur20` 으로 읽는다.
+- 같은 셀을 다른 로봇으로 쓰려면 씬 YAML 사본에 `robot:` 만 바꾼다(배치는 그 파일에서 조정).
+
+### 새 로봇 추가 체크리스트
+
+1. 팔 메시 → `workcell/robot/<model>/{visual,collision}` (URDF 의 `package://ur_description/meshes/<model>/...`
+   이 여기로 풀린다 — `live_ik._make_package_handler`)
+2. `<robot>_with_camera_curobo.urdf` — 팔 기구학 + 아래 §3 카메라 체인
+3. `<robot>_with_camera.yml` / `.xrdf` — cuRobo `build_robot_model`(MorphIt)로 충돌 스피어 피팅
+   (`--export-xrdf`, §6 의 함정 참고)
+4. `<robot>_with_camera.usd` — Isaac URDF Importer, `camera_mount`/`camera_optical_frame` prim 포함
+5. ghost — `uv run --no-sync scripts/setup/build_ghost_usd.py --robot <robot>`
+6. `workcell/robot/profiles/<robot>.yaml`, 그 로봇을 쓰는 씬 YAML
+7. 검증 — `build_camera_mesh.py --verify-only --ghost --robot <robot>`, `check_ik.py --scene <scene>`
+
+⚠️ 카메라·브래킷이 다르면(플랜지→카메라 끝 0.21877m 가 달라지면) §5 체크리스트도 밟는다 —
+`config.TOOL_TO_CAMERA_OPTICAL_OFFSET_M` 등 카메라 상수는 아직 전역이다(로봇별이 아니다).
+
 ## 1. IK·모션플래닝이 실제로 읽는 것
 
 ```
-config.DEFAULT_ROBOT_CONFIG = "ur20_with_camera.yml"        scripts/common/config.py
-        ↓  core/trajectory/settings.py: ROBOT_CONFIG
-        ↓  core/trajectory/robot.py: resolve_robot_config()
+config.ROBOT["curobo_config"] = "ur20_with_camera.yml"      씬 → 로봇 프로필 (§0)
+        ↓  core/trajectory/robot.py: resolve_robot_config()  (인자 없으면 현재 로봇, 호출 시점에 읽음)
            탐색 ① workcell/robot/<name>  ② cuRobo content/configs/robot/<name>
            urdf_path 를 파일명만 취해 workcell/robot/ 절대경로로 재작성
         ↓
@@ -194,7 +232,7 @@ h5 를 고르면(Browse 또는 Show Viewpoints) `_sync_camera_spec_from_h5` 가 
 2. `scripts/setup/build_camera_mesh.py` — `OPTICAL_FRAME_X`
    (안 고치면 `--verify` 가 assert 로 막는다 — 의도된 가드)
 3. `workcell/robot/ur20_with_camera.usd` 의
-   `/Root/UR20/wrist_3_link/flange/camera_mount/camera_optical_frame` 트랜스폼 —
+   `.../wrist_3_link/flange/camera_mount/camera_optical_frame` 트랜스폼(UR20 USD 는 `/Root/UR20/...`) —
    `xformOp:transform` 의 **병진 행만** 바꾼다(회전 basis 는 flange +X → optical +Z 규약).
    그다음 ghost 재생성: `uv run --no-sync scripts/setup/build_ghost_usd.py`
    (ghost 는 산출물이다. 재생성하면 `Flattened_Prototype_NN` 번호가 갈려 바이너리 diff 가
