@@ -31,6 +31,16 @@ from core.reconstruction.sensor import pixel_world_points  # noqa: E402
 from core.reconstruction.segment import OBJECT, classify_pixels  # noqa: E402
 
 
+# 카메라 아이콘 — 현재 카메라(주황)와 저장된 촬영 시점(파랑). 단위 m.
+#   frustum 시야 사각뿔 크기 / line 촬영 방향선 길이 / dot 점 반지름 / axes 좌표축 / shot 저장 시점 사각뿔
+CAMERA_STYLES = {
+    "작은 시야": dict(frustum=0.025, line=0.08, dot=0.0, axes=0.0, label=False, shot=0.02),
+    "점 + 방향선": dict(frustum=0.0, line=0.08, dot=0.006, axes=0.0, label=False, shot=0.012),
+    "큰 시야 (이전)": dict(frustum=0.055, line=0.2, dot=0.0, axes=0.025, label=True, shot=0.035),
+}
+DEFAULT_CAMERA_STYLE = "작은 시야"
+
+
 def read_config(path):
     import yaml
     cfg = yaml.safe_load(Path(path).read_text())
@@ -132,6 +142,8 @@ class ScanUI:
             self.depth_preview = g.add_markdown("depth 대기 중", image_root=ROOT)
             self.show_live = g.add_checkbox("현재 카메라 점군 보기", initial_value=True)
             self.show_camera = g.add_checkbox("현재 카메라 위치·촬영 방향 보기", initial_value=True)
+            self.camera_style = g.add_dropdown("카메라 아이콘", options=tuple(CAMERA_STYLES),
+                                               initial_value=DEFAULT_CAMERA_STYLE)
             self.camera_status = g.add_markdown("카메라 위치 대기 중 — 주황색: 현재 / 파랑: 저장된 촬영 시점")
         with g.add_folder("1. 카메라 장착 보정", expand_by_default=True):
             g.add_markdown("출력한 보드를 고정하고 15개 이상의 다른 자세를 촬영하세요.\n"
@@ -201,6 +213,7 @@ class ScanUI:
         self.show_clouds.on_update(lambda _: self._cloud_visibility())
         self.show_live.on_update(lambda _: self._live_visibility())
         self.show_camera.on_update(lambda _: self._camera_visibility())
+        self.camera_style.on_update(lambda _: self._camera_style_changed())
         self.show_calibration.on_update(lambda _: self._cal_visibility())
         self._draw_roi()
         if self.loaded:
@@ -667,7 +680,7 @@ class ScanUI:
             K = frame["K"]
             h, w = frame["depth"].shape
             self.shot_handles[f"{i}/camera"] = self.server.scene.add_camera_frustum(f"/shots/{i}/camera", fov=float(2*np.arctan(h/(2*K[1, 1]))),
-                                                 aspect=w/h, scale=0.035, wxyz=quat(T),
+                                                 aspect=w/h, scale=self._camera_style()["shot"], wxyz=quat(T),
                                                  position=tuple(T[:3, 3]), color=(60, 150, 230))
 
     def _cloud_visibility(self):
@@ -684,25 +697,45 @@ class ScanUI:
         for handle in self.live_camera_handles.values():
             handle.visible = self.live_camera_valid and self.show_camera.value
 
+    def _camera_style(self):
+        return CAMERA_STYLES.get(self.camera_style.value, CAMERA_STYLES[DEFAULT_CAMERA_STYLE])
+
+    def _camera_style_changed(self):
+        with self.lock:
+            for handle in reversed(list(self.live_camera_handles.values())):   # 자식부터
+                handle.remove()
+            self.live_camera_handles = {}                # 다음 갱신 때 새 모양으로 다시 만든다
+            self.live_camera_valid = False
+            directory = self.loaded or (self.session.directory if self.session else None)
+            if directory is not None and (directory / "plan.npz").exists():
+                self._draw_saved(directory)
+
     def _draw_current_camera(self, frame, T, dt):
         model, color = frame.model, (255, 145, 35)
         fov = float(2*np.arctan(model.height/(2*model.K[1, 1])))
         if not self.live_camera_handles:
-            scene = self.server.scene
-            self.live_camera_handles = {
-                "pose": scene.add_frame("/live/camera", axes_length=.025, axes_radius=.0006),
-                "frustum": scene.add_camera_frustum("/live/camera/frustum", fov=fov,
-                    aspect=model.width/model.height, scale=.055, color=color),
-                "direction": scene.add_spline_catmull_rom("/live/camera/direction",
-                    positions=np.array([[0, 0, 0], [0, 0, .1], [0, 0, .2]], dtype=np.float32),
-                    line_width=2., color=color, segments=2),
-                "label": scene.add_label("/live/camera/label", text="현재 카메라 (depth)",
-                    position=(.015, -.015, 0)),
-            }
+            scene, st = self.server.scene, self._camera_style()
+            line = st["line"]
+            handles = {"pose": scene.add_frame("/live/camera", show_axes=st["axes"] > 0,
+                                               axes_length=st["axes"] or .01, axes_radius=.0006)}
+            if st["frustum"]:
+                handles["frustum"] = scene.add_camera_frustum("/live/camera/frustum", fov=fov,
+                    aspect=model.width/model.height, scale=st["frustum"], color=color)
+            if st["dot"]:
+                handles["dot"] = scene.add_icosphere("/live/camera/dot", radius=st["dot"], color=color,
+                                                     subdivisions=2)
+            handles["direction"] = scene.add_spline_catmull_rom("/live/camera/direction",
+                positions=np.array([[0, 0, 0], [0, 0, line/2], [0, 0, line]], dtype=np.float32),
+                line_width=2., color=color, segments=2)
+            if st["label"]:
+                handles["label"] = scene.add_label("/live/camera/label", text="현재 카메라 (depth)",
+                                                   position=(.015, -.015, 0))
+            self.live_camera_handles = handles
         pose = self.live_camera_handles["pose"]
         pose.wxyz, pose.position = quat(T), tuple(T[:3, 3])
-        self.live_camera_handles["frustum"].fov = fov
-        self.live_camera_handles["frustum"].aspect = model.width/model.height
+        if "frustum" in self.live_camera_handles:
+            self.live_camera_handles["frustum"].fov = fov
+            self.live_camera_handles["frustum"].aspect = model.width/model.height
         self.live_camera_valid = True
         self._camera_visibility()
         x, y, z = T[:3, 3]
