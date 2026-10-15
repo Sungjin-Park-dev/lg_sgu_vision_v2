@@ -8,7 +8,7 @@
 
 제어 경로는 probe_piper_plan.py(agx_arm_ws)와 같다: /plan_kinematic_path → /execute_trajectory →
 MoveIt mock 컨트롤러 → /control/joint_states → PiPER 드라이버. 물체는 충돌 모델에 없다 — 첫 실행은
-저속으로, 비상정지를 손에 두고 본다.
+저속으로, 비상정지를 손에 두고 본다. 충돌 장면은 테이블(--table-z)과 손목 D405 상자만 넣는다.
 
 실행 전제(--execute, 실기): 안내서 5.1 CAN 제어 복구 → 5.2 드라이버(control_enabled:=false) →
 5.4 MoveIt(follow:=true, auto_control_gate:=true). 스캔 앱(수동 촬영)과 동시에 쓰지 않는다.
@@ -43,6 +43,9 @@ STABLE_S, STEP_RAD = 0.5, 0.002
 SYNC_RAD = 0.02
 # 교시 관절값이 URDF 한계를 살짝 넘으면(관절 2·3 이 0 근처) 이만큼 안쪽으로 넣는다
 LIMIT_MARGIN_RAD = 0.002
+# 충돌 장면 — 테이블(윗면 z 는 --table-z), 손목 D405(42×42×23mm)+여유. 물체는 모델에 없다.
+SCENE_TABLE, SCENE_CAMERA = "scan_table", "scan_d405"
+CAMERA_BOX_M = (0.050, 0.050, 0.035)
 
 
 def load_poses(args) -> tuple[np.ndarray, str]:
@@ -138,6 +141,59 @@ class Tour:
             raise RuntimeError("관절 피드백이 들어오지 않습니다 — 드라이버/MoveIt·ROS_DOMAIN_ID 를 확인하세요")
         if not self.plan_client.wait_for_service(timeout_sec=5):
             raise RuntimeError("MoveIt 계획 서비스(/plan_kinematic_path)가 없습니다")
+
+    def setup_scene(self, table_top_z, tool_T_depth):
+        """충돌 장면: 테이블 상자 + 손목 D405 상자(link6 에 붙임). 물체는 넣지 않는다.
+
+        MoveIt 은 장면을 기억한다 — 같은 id 를 지우고 다시 넣는다. RViz 에도 보인다.
+        """
+        from geometry_msgs.msg import Pose
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
+        from moveit_msgs.srv import ApplyPlanningScene
+        from shape_msgs.msg import SolidPrimitive
+
+        def box(oid, frame, T, dims):
+            o = CollisionObject()
+            o.id, o.header.frame_id, o.operation = oid, frame, CollisionObject.ADD
+            o.primitives = [SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[float(d) for d in dims])]
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = (float(v) for v in T[:3, 3])
+            x, y, z, w = Rotation.from_matrix(T[:3, :3]).as_quat()
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (
+                float(x), float(y), float(z), float(w))
+            o.primitive_poses = [pose]
+            return o
+
+        client = self.node.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        if not client.wait_for_service(timeout_sec=5):
+            raise RuntimeError("MoveIt 장면 서비스(/apply_planning_scene)가 없습니다")
+
+        def apply(scene, required=True):
+            fut = client.call_async(ApplyPlanningScene.Request(scene=scene))
+            self.rclpy.spin_until_future_complete(self.node, fut, timeout_sec=5)
+            ok = fut.done() and fut.result() is not None and fut.result().success
+            if required and not ok:
+                raise RuntimeError("MoveIt 충돌 장면 설정 실패")
+
+        clear = PlanningScene(is_diff=True)
+        o = CollisionObject(); o.id, o.header.frame_id, o.operation = SCENE_TABLE, "base_link", CollisionObject.REMOVE
+        clear.world.collision_objects = [o]
+        a = AttachedCollisionObject(link_name="link6")
+        a.object.id, a.object.operation = SCENE_CAMERA, CollisionObject.REMOVE
+        clear.robot_state.attached_collision_objects = [a]
+        clear.robot_state.is_diff = True
+        apply(clear, required=False)                      # 처음엔 지울 것이 없어 실패로 답한다
+
+        scene = PlanningScene(is_diff=True)
+        T = np.eye(4); T[2, 3] = table_top_z - 0.025
+        scene.world.collision_objects = [box(SCENE_TABLE, "base_link", T, [1.5, 1.5, 0.05])]
+        off = np.eye(4); off[2, 3] = -0.010              # depth 광학 프레임(z 앞): 몸통은 렌즈 뒤
+        cam = AttachedCollisionObject(link_name="link6",
+                                      object=box(SCENE_CAMERA, "link6", tool_T_depth @ off, CAMERA_BOX_M))
+        cam.touch_links = ["link6", "link5"]
+        scene.robot_state.attached_collision_objects = [cam]
+        scene.robot_state.is_diff = True
+        apply(scene)
 
     def check_can_execute(self):
         if self.mock:
@@ -248,6 +304,8 @@ def main():
     p.add_argument("--scale", type=float, default=0.1, help="MoveIt 속도·가속 비율 (드라이버 speed_percent 는 별도)")
     p.add_argument("--settle-timeout", type=float, default=180.0,
                    help="실행 후 실제 팔이 멈출 때까지 기다리는 최대 시간 [s] — speed_percent 1% 면 길게")
+    p.add_argument("--table-z", type=float, default=-0.002,
+                   help="충돌 장면의 테이블 윗면 높이 (base_link 기준 m) — 베이스가 테이블 위면 0 바로 아래")
     p.add_argument("--mock", action="store_true",
                    help="MoveIt demo follow:=false(드라이버 없음)로 로직만 시험 — 피드백 = /control/joint_states")
     p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"))
@@ -270,10 +328,13 @@ def main():
 
     tour = Tour("/control/joint_states" if args.mock else "/feedback/joint_states", args.mock)
     log = {"source": source, "execute": args.execute, "mock": args.mock, "scale": args.scale,
+           "table_z": args.table_z,
            "started": datetime.now().isoformat(), "poses": []}
     out = ROOT / "output" / "piper_pose_tour" / f"{datetime.now():%Y%m%d_%H%M%S}.json"
     try:
         tour.preflight()
+        tour.setup_scene(args.table_z, tool_T_depth)
+        print(f"충돌 장면: 테이블 윗면 z={args.table_z:+.3f} m + 손목 D405 상자 (물체는 없음)")
         for k, i in enumerate(order):
             target = np.clip(taught[i], lower + LIMIT_MARGIN_RAD, upper - LIMIT_MARGIN_RAD)
             nudge = float(np.degrees(np.max(np.abs(target - taught[i]))))
