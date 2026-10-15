@@ -8,6 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-piper/
+workcell/calibration/
+docker/.piper-backups/
 env_isaacsim/
 
 # Output artifacts

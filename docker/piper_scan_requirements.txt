@@ -1,0 +1,9 @@
+# Lightweight environment layered on Jazzy's system packages, no Isaac/cuRobo.
+# cv_bridge and system OpenCV 4.6 use NumPy 1.x.
+numpy==1.26.4
+scipy==1.11.4
+viser==0.2.11
+yourdfpy==0.0.60
+trimesh>=4,<5
+open3d==0.19.0
+PyYAML>=6,<7

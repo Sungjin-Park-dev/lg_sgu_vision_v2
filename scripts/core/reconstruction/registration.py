@@ -60,7 +60,10 @@ def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride, obs
 
 def _vee(T: np.ndarray) -> np.ndarray:
     """작은 강체 변환 → [ω, t] (Open3D 정보행렬과 같은 순서: 회전 먼저)."""
-    return np.concatenate([Rotation.from_matrix(T[:3, :3]).as_rotvec(), T[:3, 3]])
+    # Open3D exposes registration transforms as read-only NumPy views. SciPy
+    # 1.11's Cython rotation constructor requests a writable memory buffer.
+    R = np.array(T[:3, :3], dtype=np.float64, order="C", copy=True)
+    return np.concatenate([Rotation.from_matrix(R).as_rotvec(), T[:3, 3]])
 
 
 def _exp(xi: np.ndarray) -> np.ndarray:
