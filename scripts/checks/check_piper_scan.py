@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from core.realscan.calibration import CharucoBoard, check_board_depth, solve_hand_eye, validate_holdout  # noqa: E402
 from core.realscan.capture import (  # noqa: E402
-    CameraFrame, CameraModel, JointHistory, ScanSession, depth_meters, rigid, transform,
+    CameraFrame, CameraModel, JointHistory, ScanSession, atomic_bytes, atomic_json, depth_meters, rigid,
+    transform,
 )
 from core.realscan.piper import PassivePiper, PiperFK  # noqa: E402
 from core.realscan.sources import CalibrationSimSource, DemoSource  # noqa: E402
@@ -293,6 +294,17 @@ class ScanChecks(unittest.TestCase):
                 self.assertTrue((previous/"recon.obj").exists())
             finally:
                 ui.close()
+
+    def test_atomic_writes_are_readable_by_others(self):
+        # Container (root) writes; the host user must still read frames and calibration.
+        with tempfile.TemporaryDirectory() as root:
+            for path, write in ((Path(root)/"a/frame.npz", lambda p: atomic_bytes(p, b"x")),
+                                (Path(root)/"b/capture.json", lambda p: atomic_json(p, {"k": 1}))):
+                write(path)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+                write(path)  # Replacing an existing file keeps the same mode.
+                self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertEqual([p.name for p in Path(root).rglob(".writing-*")], [])
 
     def test_depth_units_and_invalid(self):
         image = np.array([[0, 70, 200, 500]], dtype=np.uint16)

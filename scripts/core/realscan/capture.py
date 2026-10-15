@@ -61,6 +61,9 @@ def atomic_bytes(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".writing-", dir=path.parent)
     try:
+        # mkstemp creates 0600. The container writes as root, so keep data readable
+        # by the host user (viewer, Studio, regression) like np.savez/write_text do.
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "wb") as f:
             f.write(value)
             f.flush()
