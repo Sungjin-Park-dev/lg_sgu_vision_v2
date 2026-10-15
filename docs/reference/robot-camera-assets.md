@@ -30,14 +30,32 @@ config.ROBOT · ROBOT_JOINT_NAMES · ROBOT_START_STATE   (제자리 갱신 — �
   robot 키 이전의 씬·h5·IK·스캔 계획은 전부 `ur20` 으로 읽는다.
 - 같은 셀을 다른 로봇으로 쓰려면 씬 YAML 사본에 `robot:` 만 바꾼다(배치는 그 파일에서 조정).
 
+### 지금 있는 프로필
+
+| 프로필 | 씬 | 팔 URDF·메시 | Isaac USD | 비고 |
+|---|---|---|---|---|
+| `ur20` | `sim_default` | ur_description `ur.urdf.xacro ur_type=ur20` | Isaac 공식 UR20 에셋(`ur20/`) + 카메라 | 원본 |
+| `ur5e` | `sim_ur5e` | 같은 xacro `ur_type=ur5e` (robot_descriptions 캐시, 22f055d) | Isaac 6.0 에셋 서버의 공식 UR5e(`ur5e/`) + 카메라 | 2026-10-11. 카메라는 UR20 과 같다고 가정 |
+
+UR5e 는 아래 체크리스트를 실제로 밟아 만들었고 다음을 확인했다: 같은 xacro 로 다시 만든 UR20 팔이
+`ur20_with_camera_curobo.urdf` 와 조인트·링크 전부 일치, 공식 UR5e 에셋의 링크 pose 가 UR5e URDF 와
+일치(0.000mm), Isaac 에서 `camera_optical_frame` 이 cuRobo FK 와 0.3mm 이내(충돌 없는 자세 10개 —
+셀에 부딪히는 자세는 물리가 팔을 밀어내 수십 도 어긋나니 빼고 잴 것). `sim_ur5e` 의 배치는 아직
+UR20 것이라(0.78m) UR5e 로는 cylinder viewpoint 8/22 만 닿는다 — 배치는 그 씬 파일에서 정한다.
+
 ### 새 로봇 추가 체크리스트
 
 1. 팔 메시 → `workcell/robot/<model>/{visual,collision}` (URDF 의 `package://ur_description/meshes/<model>/...`
-   이 여기로 풀린다 — `live_ik._make_package_handler`)
-2. `<robot>_with_camera_curobo.urdf` — 팔 기구학 + 아래 §3 카메라 체인
-3. `<robot>_with_camera.yml` / `.xrdf` — cuRobo `build_robot_model`(MorphIt)로 충돌 스피어 피팅
-   (`--export-xrdf`, §6 의 함정 참고)
-4. `<robot>_with_camera.usd` — Isaac URDF Importer, `camera_mount`/`camera_optical_frame` prim 포함
+   이 여기로 풀린다 — `live_ik._make_package_handler`). UR 은 robot_descriptions 캐시의 ur_description.
+2. `<robot>_with_camera_curobo.urdf` — 팔 기구학 + 아래 §3 카메라 체인. UR 은 ur_description 의
+   `urdf/ur.urdf.xacro`(`ur_type=<model>`)를 pip xacro 로 돌리고(`$(find ur_description)` 는 경로로 치환)
+   `world` 링크·`base_joint` 를 뺀 뒤, 카메라 링크 2·조인트 2 를 UR20 파일에서 복사한다.
+3. `<robot>_with_camera.yml` / `.xrdf` — cuRobo `build_robot_model`(MorphIt, `--tool-frames
+   camera_optical_frame --export-xrdf --seed 42`)로 팔 스피어 피팅. 카메라가 같으면 camera_link
+   스피어·cspace 는 UR20 것을 옮긴다. 출력의 최상위 `kinematics:` 는 `robot_cfg:` 아래로(§6).
+4. `<robot>_with_camera.usd` — 팔은 Isaac 공식 에셋(에셋 서버 `Isaac/Robots/UniversalRobots/<model>/`,
+   설정 파일까지 받아 `workcell/robot/<model>/`)을 참조하고, `camera_mount` 서브트리는 UR20 USD 에서
+   `Sdf.CopySpec` 으로 옮긴다(공식 에셋이 없으면 Isaac URDF Importer). 링크 pose 가 URDF 와 같은지 확인.
 5. ghost — `uv run --no-sync scripts/setup/build_ghost_usd.py --robot <robot>`
 6. `workcell/robot/profiles/<robot>.yaml`, 그 로봇을 쓰는 씬 YAML
 7. 검증 — `build_camera_mesh.py --verify-only --ghost --robot <robot>`, `check_ik.py --scene <scene>`
