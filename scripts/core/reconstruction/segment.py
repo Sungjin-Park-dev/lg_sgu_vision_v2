@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import config, scene_config
 from common.math_utils import quaternion_to_rotation_matrix
 from core.reconstruction.sensor import pixel_world_points
 
@@ -23,6 +22,8 @@ LABEL_NAMES = {OBJECT: "object", INVALID: "invalid", OUTSIDE: "outside ROI", OBS
 
 
 def _config_obstacles() -> np.ndarray:
+    from common import config, scene_config   # 옛 계획(장애물 미기록)만 — 실물 스캔은 config 를 안 읽는다
+
     rows = [np.concatenate(scene_config.obstacle_obb(obj)) for obj in config.OBSTACLES]
     return np.asarray(rows, dtype=np.float64).reshape(-1, 10)
 

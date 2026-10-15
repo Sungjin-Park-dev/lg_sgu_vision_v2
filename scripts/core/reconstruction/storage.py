@@ -9,6 +9,7 @@
 
 쓰는 쪽(Isaac 의 scan_capture)과 읽는 쪽(복원·뷰어)이 키 이름을 각자 알지 않도록 여기만
 고친다. numpy 만 쓴다 — Isaac 의 Python 도 import 한다(trimesh 는 메시 입출력 함수 안에서만).
+config(씬·로봇 프로필)도 함수 안에서만 읽는다 — 실물 스캔(core/realscan)은 UR 셀 설정 없이 이 규약만 쓴다.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from pathlib import Path
 
 import numpy as np
 
-from common import config, scene_config
 from core.reconstruction.sensor import ScanCameraSpec
 
 # 촬영 한 장(frame_###.npz)에 들어가는 배열.
@@ -31,6 +31,8 @@ FRAME_KEYS = ("depth", "K", "world_T_cam", "q_cmd", "q_meas")
 
 
 def scan_dir(object_name: str, name: str = "default") -> Path:
+    from common import config
+
     return config.get_scan_dir(object_name, name)
 
 
@@ -60,12 +62,16 @@ class ScanPlan:
 
 def config_object_pose() -> np.ndarray:
     """지금 config.TARGET_OBJECT 의 pose (7,) — apply_object_placement / 덮어쓰기 뒤에 부른다."""
+    from common import config
+
     return np.concatenate([np.asarray(config.TARGET_OBJECT["position"], dtype=np.float64),
                            np.asarray(config.TARGET_OBJECT["rotation"], dtype=np.float64)])
 
 
 def snapshot_obstacles() -> tuple[np.ndarray, list]:
     """지금 config.OBSTACLES 의 OBB (M,10) 와 이름 — 플래너·Isaac 이 쓰는 것과 같은 OBB."""
+    from common import config, scene_config
+
     rows, names = [], []
     for obj in config.OBSTACLES:
         pos, quat, dims = scene_config.obstacle_obb(obj)
@@ -171,7 +177,12 @@ def save_frame(directory: Path, index: int, **arrays) -> None:
 
 def list_runs(object_name: str, data_root: Path | None = None) -> list[str]:
     """data/{object}/scan/ 아래 계획이 있는 run 이름들."""
-    base = (Path(data_root) / object_name / "scan") if data_root else config.get_scan_dir(object_name).parent
+    if data_root:
+        base = Path(data_root) / object_name / "scan"
+    else:
+        from common import config
+
+        base = config.get_scan_dir(object_name).parent
     return sorted(p.parent.name for p in base.glob("*/plan.npz"))
 
 
