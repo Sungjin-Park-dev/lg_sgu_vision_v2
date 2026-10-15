@@ -19,11 +19,13 @@ from scipy.spatial.transform import Rotation
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.reconstruction.piper_scan import (  # noqa: E402
-    CalibrationQualityError, CharucoBoard, PiperFK, ScanSession, atomic_bytes, atomic_json,
-    board_spread, calibration_limits, check_board_depth, mean_board_pose, solve_hand_eye, transform, validate_holdout,
+from core.realscan.calibration import (  # noqa: E402
+    CalibrationQualityError, CharucoBoard, board_spread, calibration_limits, check_board_depth,
+    mean_board_pose, solve_hand_eye, validate_holdout,
 )
-from core.reconstruction.piper_camera import CalibrationSimSource, DemoSource, LiveSource  # noqa: E402
+from core.realscan.capture import ScanSession, atomic_bytes, atomic_json, transform  # noqa: E402
+from core.realscan.piper import PiperFK  # noqa: E402
+from core.realscan.sources import CalibrationSimSource, DemoSource, LiveSource  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.sensor import pixel_world_points  # noqa: E402
 from core.reconstruction.segment import OBJECT, classify_pixels  # noqa: E402
@@ -38,6 +40,7 @@ def read_config(path):
         raise ValueError("카메라 측정 범위를 확인하세요")
     cfg["calibration_validation"] = calibration_limits(**cfg.get("calibration_validation",
         {"max_translation_mm": 5., "max_rotation_deg": 1.}))
+    cfg["urdf"] = str(ROOT / cfg["urdf"])          # 상대경로는 리포 기준 (절대경로는 그대로)
     return cfg
 
 

@@ -13,11 +13,12 @@ from scipy.spatial.transform import Rotation
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from core.reconstruction.piper_scan import (  # noqa: E402
-    CameraFrame, CameraModel, CharucoBoard, JointHistory, PassivePiper, PiperFK,
-    ScanSession, check_board_depth, depth_meters, rigid, solve_hand_eye, transform, validate_holdout,
+from core.realscan.calibration import CharucoBoard, check_board_depth, solve_hand_eye, validate_holdout  # noqa: E402
+from core.realscan.capture import (  # noqa: E402
+    CameraFrame, CameraModel, JointHistory, ScanSession, depth_meters, rigid, transform,
 )
-from core.reconstruction.piper_camera import CalibrationSimSource, DemoSource  # noqa: E402
+from core.realscan.piper import PassivePiper, PiperFK  # noqa: E402
+from core.realscan.sources import CalibrationSimSource, DemoSource  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.pipeline import FusionParams, reconstruct  # noqa: E402
 
@@ -323,7 +324,7 @@ class ScanChecks(unittest.TestCase):
 
     def test_moving_camera_preview_does_not_relax_capture_guard(self):
         import threading
-        from core.reconstruction.piper_camera import LiveSource
+        from core.realscan.sources import LiveSource
         source = LiveSource.__new__(LiveSource)  # No ROS/CAN connection.
         source.lock = threading.RLock()
         source.arm = SimpleNamespace(error="")
@@ -383,7 +384,8 @@ class ScanChecks(unittest.TestCase):
         self.assertLess(rms, .2)
 
     def test_fk_measured_values_not_clamped(self):
-        candidates = [Path("/workspace/agx_arm_ws/install/agx_arm_description/share/agx_arm_description/agx_arm_urdf/piper/urdf/piper_description.urdf"),
+        candidates = [ROOT / "workcell/robot/piper/piper_description.urdf",
+                      Path("/workspace/agx_arm_ws/install/agx_arm_description/share/agx_arm_description/agx_arm_urdf/piper/urdf/piper_description.urdf"),
                       ROOT.parent / "agx_arm_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper/urdf/piper_description.urdf"]
         path = next((p for p in candidates if p.exists()), None)
         if path is None:

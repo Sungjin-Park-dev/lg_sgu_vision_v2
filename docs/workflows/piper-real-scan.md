@@ -13,6 +13,17 @@
 
 기존 UR/Isaac Docker 구성과 로봇 프로필은 변경하지 않는다. 스캔 의존성은 별도 `.venv-piper`에 설치하며 기존 Isaac용 `.venv`를 활성화하지 않는다.
 
+| 코드·설정 | 내용 |
+|---|---|
+| `scripts/apps/piper_scan.py` | Viser 앱: 보정·검증·촬영·복원·현재 카메라 표시 |
+| `scripts/core/realscan/capture.py` | 관절 이력·정지 판정·시간 동기화, 카메라 프레임, 촬영 세션(저장) — 로봇 종류 무관 |
+| `scripts/core/realscan/calibration.py` | ChArUco 검출, hand-eye 계산, 별도 자세 검증, 보드 depth 평면 검사 — 로봇 종류 무관 |
+| `scripts/core/realscan/piper.py` | PiPER 전용: joint1~6, URDF FK, CAN 수신 전용 SDK(송신 차단) |
+| `scripts/core/realscan/sources.py` | ROS RealSense + PiPER 수신 / 데모 / 가상 보정 소스 |
+| `scripts/core/reconstruction/` | 물체 영역 분리 → ICP(선택) → TSDF → 메시 — UR/Isaac 스캔과 같은 코드 |
+| `workcell/scans/piper_d405.yaml` | CAN·프레임·토픽·ROI 초기값·촬영/보정 허용 조건 |
+| `workcell/robot/piper/piper_description.urdf` | agx_arm_ros 의 PiPER URDF 사본. **바이트 단위로 고치지 않는다** — 보정 파일이 이 파일의 해시를 기록한다 |
+
 ## 최초 설치
 
 현재 컴퓨터에서는 마운트 연결과 패키지 설치를 완료했다. 컨테이너를 다시 준비할 때만 아래를 실행한다. 마운트 준비는 기존 컨테이너의 이름을 보존한 채 복제본을 만들므로 먼저 드라이버·MoveIt·RViz·카메라를 모두 Ctrl+C로 종료한다.

@@ -12,6 +12,7 @@
 앱에서 (사용자가 쓰는 경로):
   isaac_pipeline "Scan Object" 패널   ROI → 계획(서브프로세스) → 촬영(앱 안, CaptureSession) → 복원(서브프로세스)
   viewpoint_studio "Scan" 패널        스캔 보기 · 다시 복원 · recon.obj 내보내기 (apps/studio_scan.py)
+  apps/piper_scan.py                  PiPER 실물 수동 스캔 — 보정·촬영은 core/realscan, 복원은 여기 pipeline
 
 CLI (단계마다 프로세스가 다르다 — Isaac 의 Python 과 cuRobo 를 섞지 않는 리포 규약):
   scan_plan.py                 (uv, cuRobo)  계획 → plan.npz

@@ -1,4 +1,11 @@
-"""RealSense ROS acquisition and passive PiPER feedback. No ROS control clients."""
+"""실물 스캔의 프레임 소스 — 앱(apps/piper_scan.py)이 같은 인터페이스(sample/preview/color_T_depth)로 쓴다.
+
+  LiveSource             ROS RealSense 수신 + PiPER CAN 수신 전용(piper.PassivePiper). 로봇 제어 클라이언트 없음.
+  DemoSource             합성 구·테이블 RGB-D — ROS/CAN 없이 화면·복원 확인
+  CalibrationSimSource   가상 보드 영상으로 보정부터 복원까지 — 팔 물리·IK 는 흉내 내지 않는다
+
+ROS 모듈은 LiveSource 안에서만 import 한다.
+"""
 from __future__ import annotations
 
 import threading
@@ -7,9 +14,8 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from core.reconstruction.piper_scan import (
-    CameraFrame, CameraModel, JointHistory, PassivePiper, depth_meters, rigid,
-)
+from core.realscan.capture import CameraFrame, CameraModel, JointHistory, depth_meters, rigid
+from core.realscan.piper import PassivePiper
 
 
 def stamp_seconds(stamp):
@@ -255,7 +261,7 @@ class CalibrationSimSource(DemoSource):
     The UI's detector/solver must estimate its own extrinsics from these images.
     """
     def __init__(self, depth_bias_mm=0.0):
-        from core.reconstruction.piper_scan import CharucoBoard
+        from core.realscan.calibration import CharucoBoard
         self.depth_bias_m = float(depth_bias_mm) / 1000
         self.index, self.phase = 0, "calibration"
         self.serial = "SIM-CALIBRATION-NO-HARDWARE"

@@ -3,7 +3,7 @@ version: 1
 can_channel: can0
 base_frame: base_link
 tool_frame: link6
-urdf: /workspace/agx_arm_ws/install/agx_arm_description/share/agx_arm_description/agx_arm_urdf/piper/urdf/piper_description.urdf
+urdf: workcell/robot/piper/piper_description.urdf   # 리포 기준 상대경로 (agx_arm_ws 원본과 바이트 동일)
 min_range_m: 0.07
 max_range_m: 0.50
 roi_center: [0.25, 0.0, 0.08]
