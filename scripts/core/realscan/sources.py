@@ -23,7 +23,10 @@ def stamp_seconds(stamp):
 
 
 class LiveSource:
-    def __init__(self, cfg):
+    def __init__(self, cfg, allow_controllers=False):
+        """allow_controllers: PiPER 드라이버·MoveIt 이 켜져 있어도 연결한다(정해 둔 자세로 이동하며
+        보기·찍기). 기본은 거부 — 수동 촬영은 사람이 팔을 잡고 있으니 다른 프로그램이 명령을 보낼 수
+        없어야 한다. 이 앱은 어느 쪽이든 CAN 을 읽기만 한다."""
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
@@ -35,6 +38,7 @@ class LiveSource:
         from realsense2_camera_msgs.srv import DeviceInfo
 
         self.cfg, self.lock = cfg, threading.RLock()
+        self.allow_controllers = allow_controllers
         self.depth = self.color = None
         self.depth_model = self.color_model = None
         self.serial = ""
@@ -83,6 +87,8 @@ class LiveSource:
             pass
 
     def _check_other_controllers(self):
+        if getattr(self, "allow_controllers", False):
+            return
         names = self.node.get_node_names()
         if any(n.startswith("agx_arm_ctrl") or n == "move_group" for n in names):
             raise ValueError("기존 PiPER 드라이버와 MoveIt을 Ctrl+C로 종료한 뒤 스캔 앱을 실행하세요")

@@ -117,6 +117,9 @@ class ScanUI:
                        "# PiPER 실제 스캔\n교시로 이동 → 정지 → 촬영 → 복원")
         if args.demo:
             g.add_markdown("**데모 데이터입니다. 로봇·카메라에 연결하지 않습니다.**")
+        if getattr(args, "allow_robot_control", False):
+            g.add_markdown("**드라이버·MoveIt 동시 실행 허용** — 팔이 다른 프로그램의 명령으로 움직일 수 "
+                           "있습니다. 이 앱은 관절값을 읽기만 하며, 촬영은 정지 확인 후에만 됩니다.")
         if self.sim:
             g.add_markdown("**가상 보정 → 촬영 → 복원**\n카메라 기하 시뮬레이션입니다. "
                            "PiPER 물리·충돌 시뮬레이션은 포함하지 않습니다.")
@@ -856,6 +859,9 @@ def main():
     p.add_argument("--view-run", help="저장 폴더를 읽어 복원/보기, 로봇 연결 없음")
     p.add_argument("--resume-calibration", help="저장된 보정 원본 폴더를 복구하고 다시 계산")
     p.add_argument("--resume-scan", help="같은 물체·장착 상태에서 저장된 실제 촬영을 이어가기")
+    p.add_argument("--allow-robot-control", action="store_true",
+                   help="PiPER 드라이버·MoveIt 이 켜져 있어도 연결 — 정해 둔 자세로 이동(pose_tour)하며 "
+                        "보기·찍기. 기본은 수동 촬영 안전을 위해 거부")
     args = p.parse_args()
     if args.resume_scan:
         if args.view_run or args.resume_calibration or args.demo or args.sim_calibration:
@@ -894,7 +900,7 @@ def main():
                 source = CalibrationSimSource(args.sim_depth_bias_mm) if args.sim_calibration else DemoSource()
             else:
                 fk = PiperFK(cfg["urdf"], cfg["base_frame"], cfg["tool_frame"])
-                source = LiveSource(cfg)
+                source = LiveSource(cfg, allow_controllers=args.allow_robot_control)
         ui = ScanUI(args, cfg, source, fk)
         if args.sim_auto:
             try:

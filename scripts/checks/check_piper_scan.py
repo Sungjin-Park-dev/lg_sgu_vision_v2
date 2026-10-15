@@ -361,6 +361,15 @@ class ScanChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"CAN"):
             source.preview()
 
+    def test_controller_guard_is_opt_out_only(self):
+        from core.realscan.sources import LiveSource
+        source = LiveSource.__new__(LiveSource)  # No ROS/CAN connection.
+        source.node = SimpleNamespace(get_node_names=lambda: ["agx_arm_ctrl_single_node", "move_group"])
+        with self.assertRaisesRegex(ValueError, "MoveIt"):
+            source._check_other_controllers()        # Default: manual scanning refuses robot control.
+        source.allow_controllers = True
+        source._check_other_controllers()            # --allow-robot-control: connect alongside them.
+
     def test_handeye_direction_and_holdout(self):
         rng = np.random.default_rng(2)
         X = rigid(Rotation.from_rotvec([.15, -.25, .12]).as_matrix(), [.035, .01, .05])
