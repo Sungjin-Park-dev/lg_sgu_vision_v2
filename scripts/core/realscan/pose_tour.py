@@ -11,7 +11,8 @@ MoveIt mock 컨트롤러 → /control/joint_states → PiPER 드라이버. 물�
 저속으로, 비상정지를 손에 두고 본다. 충돌 장면은 테이블(--table-z)과 손목 D405 상자만 넣는다.
 
 실행 전제(--execute, 실기): 안내서 5.1 CAN 제어 복구 → 5.2 드라이버(control_enabled:=false) →
-5.4 MoveIt(follow:=true, auto_control_gate:=true). 스캔 앱(수동 촬영)과 동시에 쓰지 않는다.
+5.4 MoveIt(follow:=true, auto_control_gate:=true). 스캔 앱과 함께 쓸 때(도착마다 보정·촬영 버튼)는
+앱을 --allow-robot-control 로 켠다. 자세 사이에서 끝낼 때는 q — 움직이는 중 Ctrl+C 는 비상정지라 5.6 복구가 필요하다.
 
     # 컨테이너에서 (ROS + agx_arm_ws 를 source 한 뒤, .venv-piper 의 python)
     python scripts/core/realscan/pose_tour.py --from-run data/piper_test/scan/20261014_002105            # 계획만
@@ -91,7 +92,7 @@ class Tour:
             self.node.create_subscription(JointState, "/control/joint_states", self._control, 10)
             self.node.create_subscription(AgxArmStatus, "/feedback/arm_status",
                                           lambda m: setattr(self, "status", m), 10)
-        self.commanded = False                    # 이 실행에서 움직이라고 보낸 적이 있나
+        self.moving = False                       # 실행을 보냈고 아직 정지를 확인하지 못했다
         self.sending = self.handle = None         # 진행 중인 MoveIt 실행 요청 / 실행
         self.plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
         self.exec_client = ActionClient(self.node, ExecuteTrajectory, "/execute_trajectory")
@@ -235,7 +236,7 @@ class Tour:
         """MoveIt 실행 — 끝나면 돌아온다. 중간에 예외(Ctrl+C 포함)가 나면 호출자가 stop() 을 부른다."""
         if not self.exec_client.wait_for_server(timeout_sec=5):
             raise RuntimeError("MoveIt 실행 액션(/execute_trajectory)이 없습니다")
-        self.commanded = True
+        self.moving = True
         self.sending = self.exec_client.send_goal_async(self.ExecuteTrajectory.Goal(trajectory=trajectory))
         self.rclpy.spin_until_future_complete(self.node, self.sending, timeout_sec=5)
         sent, self.sending = self.sending, None
@@ -256,8 +257,11 @@ class Tour:
 
         MoveIt 취소만으로는 부족하다: 실제 팔은 mock 이 이미 보낸 목표를 펌웨어 속도(speed_percent)로
         따라가므로, 저속이면 mock 보다 한참 뒤에서 계속 움직인다. 그래서 (1) 제어 게이트를 닫아 드라이버가
-        mock 을 더는 따르지 않게 하고 (2) 드라이버 /emergency_stop(= 지금 관절값으로 move_j)으로 세운 뒤
+        mock 을 더는 따르지 않게 하고 (2) 드라이버 /emergency_stop 으로 지금 관절값에 세운 뒤
         (3) MoveIt 실행을 취소한다. 물리 비상정지가 여전히 1차 안전장치다.
+        ⚠️ 구형 펌웨어(드라이버 is_switch_seamlessly=False)의 /emergency_stop 은 move_js(MIT 모드)로 세운다 —
+        그 뒤 펌웨어가 move_j 를 받지 않으므로 안내서 5.6 복구(MoveIt·드라이버 재시작)가 필요하다.
+        그래서 팔이 멈춰 있을 때(자세 사이 Enter 대기·계획 중)의 Ctrl+C 에서는 부르지 않는다.
         """
         from std_msgs.msg import String
         from std_srvs.srv import Empty, SetBool
@@ -363,6 +367,7 @@ def main():
             t_exec = time.monotonic() - t0
             if not tour.spin_until(tour.settled, args.settle_timeout):
                 raise RuntimeError(f"{args.settle_timeout:.0f}s 안에 팔이 멈추지 않았습니다")
+            tour.moving = False
             reached = tour.current()
             err = np.degrees(reached - target)
             cam_mm, cam_deg = camera_error(fk, tool_T_depth, reached, taught[i])
@@ -375,10 +380,11 @@ def main():
         reason = "Ctrl+C" if isinstance(exc, KeyboardInterrupt) else str(exc)
         log["aborted"] = reason
         print(f"\n중단: {reason}")
-        if tour.commanded:
+        if tour.moving:
             notes = tour.stop()
             log["stop"] = notes
-            print(f"정지 처리: {', '.join(notes)} — 팔 상태를 눈으로 확인하세요")
+            print(f"정지 처리: {', '.join(notes)} — 팔 상태를 눈으로 확인하세요. "
+                  "계속하려면 안내서 5.6 복구(MoveIt·드라이버 재시작)가 필요합니다")
     finally:
         tour.close()
         done = [r for r in log["poses"] if "camera_err_mm" in r]
