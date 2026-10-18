@@ -111,6 +111,27 @@ docker exec -it ros2-jazzy-piper bash \
 
 원본 이미지·기록과 현재 카메라·URDF·보드 규격의 일치를 확인하고 기록을 불러와 다시 계산한다. 새로운 별도 검증 파일은 이전 파일을 덮어쓰지 않는다. 이미 물체를 촬영한 run은 복구 옵션으로 이어 쓰지 않는다.
 
+### 교시 대신 정해 둔 보정 자세로 (MoveIt)
+
+이미 검증된 보정이 있으면 그 장착값과 보드 위치(`base_T_board`)로 보정 자세를 규칙적으로 만들 수 있다. 보드는 그 보정 때 자리에 다시 놓는다. 손목을 교시보다 넓게 돌려서, 2026-10-18 실기에서 새 보정이 10/14 교시 보정보다 양쪽 날의 샘플 모두에 더 잘 맞았다(학습 퍼짐 4.88 mm/0.95°, 별도 검증 2.13 mm/1.06° — 교시 4.84 mm/1.37°, 3.62 mm/0.58°).
+
+```bash
+# 하드웨어 없이 계산 — 메인 .venv 에서도 돈다 (약 2–3분)
+.venv/bin/python scripts/core/realscan/calib_poses.py --out output/piper_calibration/generated --evaluate
+```
+
+보드를 바라보는 시점 격자(거리 20/24/28 cm × 기울기 0–45° × 방위 × 광축 roll)마다 IK를 풀고, 관절 한계·보드 전체가 영상 안·칸 14 px 이상·테이블 위 6 cm·기존 교시 자세와 비슷한 팔 모양·손목 뻗음 30 cm 이하를 통과한 것 중 손목 회전이 서로 가장 다른 학습 16개와, 학습과 10–25° 다른 검증 4개를 `train.yaml`·`holdout.yaml`로 쓴다. 손목을 33.6 cm까지 뻗은 자세에서 모터 소리가 달라지고 정지 판정이 깜빡여 뻗음 상한을 두었다. 한 자세만 바꾸려면 `--keep-train <train.yaml> --replace 9`처럼 번호(0부터)를 준다. 순서와 나머지 번호는 그대로다.
+
+실행은 드라이버·MoveIt(agx_arm_ws 안내서 5.1–5.4)을 켜고, 스캔 앱을 `--allow-robot-control`로 실행한 뒤 다른 터미널에서:
+
+```bash
+docker exec -it -e ROS_DOMAIN_ID=42 ros2-jazzy-piper bash -lc 'source /opt/ros/jazzy/setup.bash; source /workspace/agx_arm_ws/install/setup.bash; cd /workspace/lg_sgu_vision_v2; .venv-piper/bin/python scripts/core/realscan/pose_tour.py --poses output/piper_calibration/generated/train.yaml --execute'
+```
+
+자세마다 Enter로 보내고, `도착:`이 나오면 **보정 자세 기록**을 누른다. 계산 후 `holdout.yaml`로 같은 방법으로 **별도 RGB·depth 검증 자세 기록**을 누른다. 자세 사이에서 끝낼 때는 `q`를 누른다. 팔이 움직이는 중의 Ctrl+C는 드라이버 비상정지를 부르는데, 이 펌웨어에서는 비상정지가 MIT 모드로 세워 그 뒤 이동 명령을 받지 않으므로 안내서 5.6 복구(MoveIt·드라이버 재시작)가 필요하다.
+
+보정 퍼짐이 약 5 mm 아래로 잘 내려가지 않는 것은 팔 FK 오차 때문으로 보인다 — 자세 집합으로는 줄지 않는다. 한 자세가 크게 튀면(진단의 자세별 편차) 그 자세만 제외하고 하나 더 찍는다.
+
 ## 2. 물체 촬영
 
 보드를 제거하고 5–15 cm 정도의 불투명 물체를 놓는다. 첫 촬영에서는 약 20 cm 거리에서 물체 전체가 보이게 한다. 설정의 유효 depth 범위는 7–50 cm다.
@@ -210,7 +231,8 @@ ssh -N -L 8082:127.0.0.1:8082 sungjin@로봇PC주소
 두 터미널에서 각각 Ctrl+C로 종료한다. 스캔 종료는 모터 전원·교시모드를 바꾸지 않는다. 이후 MoveIt으로 돌아갈 때 기존 PiPER 교시 복구 절차를 따르며, **스캔 촬영을 위해 CAN 제어 복구/이동 명령을 실행할 필요는 없다.**
 
 - 관절 피드백 대기: 전원·CAN 연결·호스트 `can0` 상태를 확인한다. 앱은 피드백 복구를 위해 모터를 켜지 않는다.
-- 기존 드라이버/MoveIt 실행 중: 해당 터미널을 종료한 후 스캔 앱을 다시 실행한다.
+- 기존 드라이버/MoveIt 실행 중: 해당 터미널을 종료한 후 스캔 앱을 다시 실행한다. MoveIt으로 팔을 옮기며 촬영할 때는 앱을 `--allow-robot-control`로 실행한다.
+- 장면 전체가 z축으로 돌아 보임(물체가 ROI에서 옆으로 밀림): joint1 읽기값이 틀어졌을 수 있다. 2026-10-18 약 8.5° 틀어져 있었고 전원을 껐다 켠 뒤 돌아왔다. 보드를 보정 때 자리에 두고 보드가 보이는 자세로 보낸 뒤 `scripts/core/realscan/board_check.py`(읽기 전용, 컨테이너에서 드라이버가 켜진 상태)로 보정 때 보드 위치와 비교한다. 전원을 켤 때마다 한 번 확인하는 것을 권한다.
 - 카메라 대기: 카메라 터미널과 두 프로세스의 ROS domain, `workcell/scans/piper_d405.yaml` 토픽 이름을 확인한다.
 - 보정/검증 실패: 보드 실제 치수·고정 상태·카메라 흔들림·다양한 회전을 확인하고 다시 촬영한다.
 - 포트 사용 중: 기존 스캔 앱을 종료하거나 `--port 8083`을 지정한다.
