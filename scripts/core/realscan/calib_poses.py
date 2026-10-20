@@ -136,12 +136,12 @@ def pick_diverse(pool, count, chosen=()):
     if not chosen and rest:                    # 시작: 가장 덜 기운 정면 시점
         first = min(rest, key=lambda c: (c["view"]["tilt_deg"], c["distance_m"]))
         picked.append(first)
-        rest.remove(first)
+        rest = [c for c in rest if c is not first]   # 값 비교(==)는 numpy 배열에서 모호 — 동일성으로
     while len(picked) < count and rest:
         ref = chosen + picked
         nxt = max(rest, key=lambda c: min(rot_deg(c["tool"], r["tool"]) for r in ref))
         picked.append(nxt)
-        rest.remove(nxt)
+        rest = [c for c in rest if c is not nxt]
     return picked
 
 
@@ -158,7 +158,7 @@ def pick_holdout(pool, count, train, novelty_deg):
     while len(picked) < count and rest:
         nxt = max(rest, key=lambda c: min(rot_deg(c["tool"], r["tool"]) for r in picked))
         picked.append(nxt)
-        rest.remove(nxt)
+        rest = [c for c in rest if c is not nxt]
     return picked
 
 
@@ -168,7 +168,7 @@ def order_by_motion(items, start_q):
     while rest:
         nxt = min(rest, key=lambda c: np.max(np.abs(c["q"] - q)))
         out.append(nxt)
-        rest.remove(nxt)
+        rest = [c for c in rest if c is not nxt]
         q = nxt["q"]
     return out
 
@@ -231,7 +231,8 @@ def main():
     p.add_argument("--holdout-novelty-deg", type=float, nargs=2, default=[10, 25],
                    help="검증 자세 ↔ 가장 가까운 학습 자세의 손목 회전 차이 범위")
     p.add_argument("--keep-train", help="이미 쓴 학습 자세 YAML — 유지하고 --replace 번호만 새로 고른다(번호·순서 유지)")
-    p.add_argument("--replace", default="", help="--keep-train 에서 바꿀 번호(0부터, 쉼표) — 손목 회전이 가장 비슷한 시점으로")
+    p.add_argument("--replace", default="", help="--keep-train 에서 바꿀 번호(1부터 — pose_tour·앱 번호와 같다, 쉼표) "
+                                                 "— 손목 회전이 가장 비슷한 시점으로")
     p.add_argument("--evaluate", action="store_true", help="교시 보정 자세와 hand-eye 오차 비교(가상 잡음)")
     p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"))
     p.add_argument("--calibration", default=str(ROOT / "workcell/calibration/piper_d405.yaml"))
@@ -288,11 +289,13 @@ def main():
         qs = np.radians(yaml.safe_load(Path(args.keep_train).read_text())["poses_deg"])
         train = [{"q": q, "tool": ffk.pose(q), "line": ln,
                   "view": board_view(np.linalg.inv(ffk.pose(q) @ X) @ B, K, size, 0)} for q, ln in zip(qs, raw)]
-        for i in [int(s) for s in args.replace.split(",") if s.strip()]:
+        for i in [int(s) - 1 for s in args.replace.split(",") if s.strip()]:
+            if not 0 <= i < len(train):
+                raise SystemExit(f"--replace 번호는 1~{len(train)} 입니다")
             others = [t for j, t in enumerate(train) if j != i]
             pool = [c for c in feasible if min(rot_deg(c["tool"], t["tool"]) for t in others) > 5]
             new = min(pool, key=lambda c: rot_deg(c["tool"], train[i]["tool"]))
-            print(f"#{i} 교체: 손목 회전 차이 {rot_deg(new['tool'], train[i]['tool']):.1f}°, "
+            print(f"#{i + 1} 교체: 손목 회전 차이 {rot_deg(new['tool'], train[i]['tool']):.1f}°, "
                   f"뻗음 {wrist_reach(ffk.frames(train[i]['q'])) * 100:.1f} → {wrist_reach(ffk.frames(new['q'])) * 100:.1f} cm")
             train[i] = new
     else:
