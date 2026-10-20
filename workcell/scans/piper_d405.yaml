@@ -11,6 +11,15 @@ roi_radius: 0.10
 calibration_validation:
   max_translation_mm: 5.0
   max_rotation_deg: 2.0
+# 작업 좌표·보드 추적용 큰 보드 — 물체를 가운데 올린다. 인쇄: docs/assets/charuco_9x7_25mm.pdf (A4 가로, 100%).
+# 인쇄한 칸이 25 mm 가 아니면 잰 값으로 square_m·marker_m 을 고친다 (marker = square × 0.72).
+scan_board:
+  squares_x: 9
+  squares_y: 7
+  square_m: 0.025
+  marker_m: 0.018
+  dictionary: DICT_4X4_50
+  layout: opencv_4.6_even_row_legacy
 capture_guard:
   stable_s: 0.5
   step_rad: 0.002

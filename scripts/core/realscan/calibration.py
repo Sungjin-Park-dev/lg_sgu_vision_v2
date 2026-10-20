@@ -10,37 +10,64 @@ from scipy.spatial.transform import Rotation
 from core.realscan.capture import rigid, transform
 
 
-class CharucoBoard:
-    def __init__(self):
-        import cv2
-        self.cv = cv2
-        self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        if hasattr(cv2.aruco, "CharucoBoard_create"):
-            self.board = cv2.aruco.CharucoBoard_create(6, 5, 0.020, 0.015, self.dictionary)
-        else:
-            self.board = cv2.aruco.CharucoBoard((6, 5), 0.020, 0.015, self.dictionary)
-        self.spec = {"squares_x": 6, "squares_y": 5, "square_m": 0.020,
+def board_size(spec):
+    """보드 바깥 크기 (가로, 세로) [m]."""
+    return spec["squares_x"]*spec["square_m"], spec["squares_y"]*spec["square_m"]
+
+
+def board_centre_frame(spec):
+    """OpenCV 보드 좌표(모서리 원점, z 는 보드 안쪽) → 작업 좌표(보드 중심 원점, x 긴 변, z 위)."""
+    return np.array([[1., 0, 0, spec["squares_x"]*spec["square_m"]/2],
+                     [0, -1, 0, spec["squares_y"]*spec["square_m"]/2],
+                     [0, 0, -1, 0], [0, 0, 0, 1]])
+
+
+CALIBRATION_BOARD = {"squares_x": 6, "squares_y": 5, "square_m": 0.020,
                      "marker_m": 0.015, "dictionary": "DICT_4X4_50",
                      "layout": "opencv_4.6_even_row_legacy"}
+
+
+class CharucoBoard:
+    def __init__(self, spec=None):
+        import cv2
+        self.cv = cv2
+        self.spec = dict(spec or CALIBRATION_BOARD)
+        s = self.spec
+        self.dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, s["dictionary"]))
+        if (s["squares_x"] * s["squares_y"]) // 2 > self.dictionary.bytesList.shape[0]:
+            raise ValueError(f"{s['dictionary']} 마커가 {s['squares_x']}×{s['squares_y']} 보드에 모자랍니다")
+        size = (s["squares_x"], s["squares_y"])
+        if hasattr(cv2.aruco, "CharucoBoard_create"):
+            self.board = cv2.aruco.CharucoBoard_create(*size, s["square_m"], s["marker_m"], self.dictionary)
+        else:
+            self.board = cv2.aruco.CharucoBoard(size, s["square_m"], s["marker_m"], self.dictionary)
         if hasattr(self.board, "setLegacyPattern"):
             self.board.setLegacyPattern(True)  # Same physical board across OpenCV versions.
 
+    def image(self, px_per_mm=10):
+        """보드만 그린 흑백 영상 — 칸 한 변이 정수 픽셀이 되게 (흐림 없이 인쇄)."""
+        s = self.spec
+        size = tuple(round(s[k] * s["square_m"] * 1000 * px_per_mm) for k in ("squares_x", "squares_y"))
+        return (self.board.draw(size, marginSize=0, borderBits=1) if hasattr(self.board, "draw")
+                else self.board.generateImage(size, marginSize=0, borderBits=1))
+
     def svg(self):
         cv = self.cv
-        image = (self.board.draw((1200, 1000), marginSize=0, borderBits=1)
-                 if hasattr(self.board, "draw")
-                 else self.board.generateImage((1200, 1000), marginSize=0, borderBits=1))
+        s = self.spec
+        w, h = (s[k] * s["square_m"] * 1000 for k in ("squares_x", "squares_y"))
+        square = s["square_m"] * 1000
         # Lossless raster embedded in SVG with explicit millimetres for printing.
         import base64
-        data = base64.b64encode(cv.imencode(".png", image)[1]).decode()
-        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="140mm" height="130mm" '
-                f'viewBox="0 0 140 130"><rect width="140" height="130" fill="white"/>'
-                f'<image x="10" y="10" width="120" height="100" '
+        data = base64.b64encode(cv.imencode(".png", self.image())[1]).decode()
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + 20:g}mm" height="{h + 30:g}mm" '
+                f'viewBox="0 0 {w + 20:g} {h + 30:g}"><rect width="{w + 20:g}" height="{h + 30:g}" fill="white"/>'
+                f'<image x="10" y="10" width="{w:g}" height="{h:g}" '
                 f'href="data:image/png;base64,{data}"/>'
-                f'<path d="M10 118h20m-20-2v4m20-4v4" stroke="black" stroke-width="0.3"/>'
-                f'<text x="35" y="120" font-size="4">20 mm — print 100%</text></svg>')
+                f'<path d="M10 {h + 18:g}h{square:g}m-{square:g}-2v4m{square:g}-4v4" stroke="black" stroke-width="0.3"/>'
+                f'<text x="{square + 15:g}" y="{h + 20:g}" font-size="4">{square:g} mm — print 100%</text></svg>')
 
-    def detect(self, frame):
+    def detect(self, frame, min_corners=6):
+        """RGB → (color_T_board, 재투영 RMS px, 표시 영상). 쓴 코너 수는 self.corners 에 남긴다."""
         cv = self.cv
         if frame.model.distortion_model not in ("plumb_bob", "rational_polynomial", "none"):
             raise ValueError(f"지원하지 않는 RGB 왜곡 모델: {frame.model.distortion_model}")
@@ -57,8 +84,9 @@ class CharucoBoard:
             params.cameraMatrix, params.distCoeffs = frame.model.K, frame.model.D
             corners_c, ids_c, _, _ = cv.aruco.CharucoDetector(self.board, params).detectBoard(gray)
             count = 0 if ids_c is None else len(ids_c)
-        if count < 6:
-            raise ValueError("ChArUco 코너가 6개 이상 보이게 해주세요")
+        self.corners = int(count)
+        if count < min_corners:
+            raise ValueError(f"ChArUco 코너가 {min_corners}개 이상 보이게 해주세요 (지금 {count}개)")
         points = (self.board.chessboardCorners if hasattr(self.board, "chessboardCorners")
                   else self.board.getChessboardCorners())[ids_c.reshape(-1)]
         ok, rvec, tvec = cv.solvePnP(points, corners_c, frame.model.K, frame.model.D)
@@ -143,13 +171,18 @@ def mean_board_pose(poses):
 def check_board_depth(frame, color_T_board, color_T_depth, *, board_size=(.12, .10),
                       border_m=.012, stride=3, min_range_m=.07, max_range_m=.50,
                       min_valid_fraction=.35, min_points=100,
-                      max_offset_mm=3., max_p95_mm=5., max_normal_deg=3.):
+                      max_offset_mm=3., max_p95_mm=5., max_normal_deg=3., ignore_nearer_m=None):
     """Compare raw rectified depth against an independently RGB-detected board.
 
     Select pixels geometrically inside the projected board, never by residual.
     This tests plane-normal/offset agreement, not all six extrinsic degrees of
     freedom: translations along an infinite plane are unobservable here.
     Returned points/residuals include failures for honest diagnostic rendering.
+
+    ignore_nearer_m: depth points more than this in front of the RGB board plane (towards the camera)
+    cannot be the board — open gripper fingers or a hand in view. They are dropped and counted as
+    occluded_points. Points behind the plane and small offsets are never dropped, so a depth bias still
+    fails. Default None drops nothing (wrist calibration validation).
     """
     import cv2
     depth_T_board = np.linalg.inv(transform(color_T_depth)) @ transform(color_T_board)
@@ -177,11 +210,21 @@ def check_board_depth(frame, color_T_board, color_T_depth, *, board_size=(.12, .
     # Row-vector form of board_T_depth. z is signed distance to RGB board plane.
     board_points = (points - depth_T_board[:3, 3]) @ depth_T_board[:3, :3]
     residual_mm = board_points[:, 2] * 1000
+    occluded = 0
+    if ignore_nearer_m is not None:
+        front = residual_mm < -ignore_nearer_m * 1000   # board +z points away from the camera
+        occluded = int(front.sum())
+        points, residual_mm = points[~front], residual_mm[~front]
+        count, projected_count = count - occluded, projected_count - occluded
+        fraction = count / max(projected_count, 1)
     report = {"passed": False, "points": count, "projected_points": projected_count,
               "valid_fraction": float(fraction), "limits": {
                   "min_valid_fraction": min_valid_fraction, "min_points": min_points,
                   "max_offset_mm": max_offset_mm, "max_p95_mm": max_p95_mm,
                   "max_normal_deg": max_normal_deg}}
+    if ignore_nearer_m is not None:
+        report["occluded_points"] = occluded
+        report["limits"]["ignore_nearer_m"] = ignore_nearer_m
     reasons = []
     if count < min_points:
         reasons.append(f"유효 depth 점 부족: {count}/{min_points}")
