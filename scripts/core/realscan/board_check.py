@@ -6,10 +6,14 @@
 장착이 둘 다 정상이다. 2026-10-18: joint1 읽기값이 8.5° 틀어져 있어 회전 차이 −8.5° 로 나왔고,
 전원을 껐다 켠 뒤 +0.5° 로 돌아왔다 — 전원을 켤 때마다 한 번 돌려 볼 것.
 
+--scan-board 는 물체 스캔용 큰 보드(설정 scan_board)를 찾아 작업 좌표(보드 중심, x 긴 변, z 위)의 base 위치를
+잰다 — 보드를 옮기거나 돌린 뒤 scan_poses.py --work-frame 에 넣을 값(--save-frame). 물체가 올라가 있어도 된다.
+
 구독만 한다(/feedback/joint_states, RGB·CameraInfo). 드라이버가 켜져 있어야 한다.
 
     # 컨테이너에서 (ROS + agx_arm_ws 를 source 한 뒤, .venv-piper 의 python)
     python scripts/core/realscan/board_check.py
+    python scripts/core/realscan/board_check.py --scan-board --save-frame output/piper_scan_poses/frame.json
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from core.realscan.calibration import CharucoBoard  # noqa: E402
+from core.realscan.calibration import CharucoBoard, board_centre_frame  # noqa: E402
 from core.realscan.capture import CameraFrame, CameraModel, transform  # noqa: E402
 from core.realscan.piper import JOINT_NAMES, PiperFK  # noqa: E402
 
@@ -37,6 +41,9 @@ def main():
     p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"))
     p.add_argument("--calibration", default=str(ROOT / "workcell/calibration/piper_d405.yaml"))
     p.add_argument("--image", help="검출 표시 영상을 이 경로에 PNG 로 저장")
+    p.add_argument("--scan-board", action="store_true",
+                   help="설정의 scan_board 로 작업 좌표(보드 중심, z 위)의 base 위치를 잰다 (보정 보드 비교 대신)")
+    p.add_argument("--save-frame", help="--scan-board: base_T_world 를 이 JSON 에 저장 — scan_poses.py --work-frame")
     args = p.parse_args()
 
     import cv2
@@ -83,9 +90,23 @@ def main():
     print(f"관절 [deg] {np.degrees(q).round(2).tolist()} (측정 중 움직임 {motion:.3f}°)")
     if motion > math.degrees(cfg["capture_guard"]["step_rad"]):     # 앱의 촬영 정지 판정과 같은 기준
         print("⚠️ 팔이 움직이는 중입니다 — 멈춘 뒤 다시 실행하세요")
-    C, rms, annotated = CharucoBoard().detect(CameraFrame(time.time(), st["img"], st["model"]))
+    board = CharucoBoard(cfg["scan_board"]) if args.scan_board else CharucoBoard()
+    C, rms, annotated = board.detect(CameraFrame(time.time(), st["img"], st["model"]))
     if args.image:
         cv2.imwrite(args.image, cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+    if args.scan_board:
+        W = fk.pose(q) @ X @ C @ board_centre_frame(board.spec)
+        print(f"스캔 보드 재투영 {rms:.2f}px · 코너 {board.corners}개")
+        print(f"작업 좌표 원점(보드 중심) base 기준 {W[:3, 3].round(4).tolist()} m · 긴 변 방향 "
+              f"{math.degrees(math.atan2(W[1, 0], W[0, 0])):.1f}° · 기울기 {math.degrees(math.acos(min(1., abs(W[2, 2])))):.1f}°")
+        if args.save_frame:
+            import json
+            out = Path(args.save_frame)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"base_T_world": W.tolist(), "board": board.spec, "q": q.tolist(),
+                                       "reprojection_px": rms, "corners": board.corners}, indent=1))
+            print(f"→ {out}")
+        return
     B = fk.pose(q) @ X @ C
     centre = np.array([0.06, 0.05, 0.0])            # 6×5칸 × 20mm 보드의 가운데
     c0, c1 = B0[:3, :3] @ centre + B0[:3, 3], B[:3, :3] @ centre + B[:3, 3]

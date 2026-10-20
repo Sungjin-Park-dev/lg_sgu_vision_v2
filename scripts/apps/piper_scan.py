@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PiPER wrist D405: read-only hand-eye calibration, manual capture and TSDF viewer."""
+"""Wrist RGB-D (PiPER+D405, UR+D435f via --config): read-only hand-eye calibration, manual capture, TSDF viewer."""
 from __future__ import annotations
 
 import argparse
@@ -20,12 +20,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from core.realscan.calibration import (  # noqa: E402
-    CalibrationQualityError, CharucoBoard, board_spread, calibration_limits, check_board_depth,
-    mean_board_pose, solve_hand_eye, validate_holdout,
+    CalibrationQualityError, CharucoBoard, board_centre_frame, board_size, board_spread, calibration_limits,
+    check_board_depth, mean_board_pose, solve_hand_eye, validate_holdout,
 )
 from core.realscan.capture import ScanSession, atomic_bytes, atomic_json, transform  # noqa: E402
 from core.realscan.piper import PiperFK  # noqa: E402
-from core.realscan.sources import CalibrationSimSource, DemoSource, LiveSource  # noqa: E402
+from core.realscan.sources import CalibrationSimSource, DemoSource, LiveSource, UrLiveSource  # noqa: E402
+from core.realscan.ur import UrFK  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.sensor import pixel_world_points  # noqa: E402
 from core.reconstruction.segment import OBJECT, classify_pixels  # noqa: E402
@@ -39,6 +40,12 @@ CAMERA_STYLES = {
     "큰 시야 (이전)": dict(frustum=0.055, line=0.2, dot=0.0, axes=0.025, label=True, shot=0.035),
 }
 DEFAULT_CAMERA_STYLE = "작은 시야"
+# 보드 추적: 이보다 코너가 적게 보이면 그 장은 저장하지 않는다 (한쪽에 몰린 몇 개로는 깊이 방향이 흔들린다)
+TRACK_MIN_CORNERS = 10
+# 작업 좌표 설정의 depth 평면 검사: 보드 면보다 이만큼 넘게 카메라 쪽인 점은 가림(벌어진 그리퍼 손가락)으로 뺀다
+BOARD_OCCLUDER_M = 0.03
+# --allow-robot-control 일 때 여는 촬영 서비스 (std_srvs/Trigger) — pose_tour --capture 가 부른다
+CAPTURE_SERVICE = "/piper_scan/capture"
 
 
 def read_config(path):
@@ -51,6 +58,11 @@ def read_config(path):
     cfg["calibration_validation"] = calibration_limits(**cfg.get("calibration_validation",
         {"max_translation_mm": 5., "max_rotation_deg": 1.}))
     cfg["urdf"] = str(ROOT / cfg["urdf"])          # 상대경로는 리포 기준 (절대경로는 그대로)
+    cfg.setdefault("robot", "piper")
+    cfg.setdefault("label", "PiPER")
+    if cfg["robot"] not in ("piper", "ur5e"):
+        raise ValueError(f"지원하지 않는 robot: {cfg['robot']}")
+    cfg["name"] = Path(path).stem                  # 보정 파일 workcell/calibration/{name}.yaml
     return cfg
 
 
@@ -61,6 +73,10 @@ def json_signature(value):
 def quat(T):
     q = Rotation.from_matrix(T[:3, :3]).as_quat()
     return tuple(q[[3, 0, 1, 2]])
+
+
+def apply(T, p):
+    return T[:3, :3] @ np.asarray(p, dtype=float) + T[:3, 3]
 
 
 def image_markdown(image):
@@ -81,18 +97,21 @@ class ScanUI:
         self.worker = ThreadPoolExecutor(max_workers=1)
         self.busy = False
         self.board = CharucoBoard()
+        # 작업 좌표·보드 추적용 보드 — 물체를 가운데 올리는 큰 보드(설정 scan_board). 가상 장면엔 보정 보드뿐.
+        self.scan_board = (CharucoBoard(cfg["scan_board"]) if cfg.get("scan_board") and not self.sim
+                           else self.board)
         self.samples, self.holdouts = [], []
         self.depth_checks, self.cal_handles, self.depth_handles = [], [], []
         self.candidate = self.calibration = None
+        self.calibration_pending = False  # 파일에서 읽은 보정 — 현재 카메라·URDF 와 맞는지 아직 모름
         self.fixed_boards = []
         self.identity_locked = None
         self.last_annotated = None
         self.annotated_until = 0.0
         self.calibration_dir = ROOT / "workcell" / "calibration"
-        self.calibration_path = self.calibration_dir / "piper_d405.yaml"
         if self.sim:
             self.calibration_dir /= "simulation"
-            self.calibration_path = self.calibration_dir / "piper_d405.yaml"
+        self.calibration_path = self.calibration_dir / f"{cfg['name']}.yaml"
         self.cal_record_dir = self.calibration_dir / "samples" / args.run
         self.log_text = "카메라와 관절 피드백을 확인하세요. 촬영 중에는 팔을 멈추세요."
         self.session = None
@@ -101,30 +120,40 @@ class ScanUI:
             self.session = ScanSession(ROOT / "data", args.object, args.run,
                                        {"min_range_m": cfg["min_range_m"], "max_range_m": cfg["max_range_m"],
                                         "source": ("synthetic_calibration" if self.sim else
-                                                   "synthetic_demo" if args.demo else "piper_real"),
+                                                   "synthetic_demo" if args.demo else f"{cfg['robot']}_real"),
                                         **({"pose_source": "virtual_camera_trajectory",
                                             "robot_kinematics": "not_simulated"} if self.sim else {})},
-                                       resume=bool(getattr(args, "resume_scan", None)))
+                                       resume=bool(getattr(args, "resume_scan", None)),
+                                       robot=cfg["robot"], world_frame=cfg["base_frame"])
         self.mesh = None
         self.mesh_handle = None
         self.shot_handles = {}
         self.live_camera_handles = {}
         self.live_camera_valid = False
         self._roi_busy = False
+        # 작업 좌표 — 뷰어·ROI·제외 영역·촬영 자세·복원 결과의 기준. 기본은 로봇 base, 보드로 바꿀 수 있다.
+        self.world_frame, self.base_T_world = cfg["base_frame"], np.eye(4)
+        self.world_handles = []
         self.server = viser.ViserServer(host=args.host, port=args.port)
         self.server.gui.configure_theme(control_layout="collapsible", control_width="large")
         self.server.scene.set_up_direction("+z")
-        self.server.scene.add_frame("/base_link", axes_length=0.05, axes_radius=0.001)
+        # 로봇 base 기준으로 그리는 것(보정 보드·depth 검증)은 이 부모들 아래 — 작업 좌표가 바뀌면 함께 옮긴다.
+        self.base_handles = [self.server.scene.add_frame("/base_link", axes_length=0.05, axes_radius=0.001),
+                             self.server.scene.add_frame("/calibration", show_axes=False),
+                             self.server.scene.add_frame("/depth_check", show_axes=False)]
+
+        viewer = cfg.get("viewer", {"position": (0.65, -0.50, 0.40), "look_at": (0.25, 0, 0.07)})
 
         @self.server.on_client_connect
         def connected(client):
-            client.camera.position = (0.65, -0.50, 0.40)
-            client.camera.look_at = (0.25, 0, 0.07)
+            world_T_base = np.linalg.inv(self.base_T_world)
+            client.camera.position = tuple(apply(world_T_base, viewer["position"]))
+            client.camera.look_at = tuple(apply(world_T_base, viewer["look_at"]))
             client.camera.up_direction = (0, 0, 1)
 
         g = self.server.gui
-        g.add_markdown("# PiPER 가상 스캔\n가상 보정 → 촬영 → 복원" if self.sim else
-                       "# PiPER 실제 스캔\n교시로 이동 → 정지 → 촬영 → 복원")
+        g.add_markdown(f"# {cfg['label']} 가상 스캔\n가상 보정 → 촬영 → 복원" if self.sim else
+                       f"# {cfg['label']} 실제 스캔\n교시로 이동 → 정지 → 촬영 → 복원")
         if args.demo:
             g.add_markdown("**데모 데이터입니다. 로봇·카메라에 연결하지 않습니다.**")
         if getattr(args, "allow_robot_control", False):
@@ -170,6 +199,12 @@ class ScanUI:
         with g.add_folder("2. 물체 촬영", expand_by_default=True):
             self.object_name = g.add_text("물체 이름", initial_value=args.object)
             self.new_scan_button = g.add_button("새 촬영 시작 (기존 결과 유지)")
+            self.board_frame_button = g.add_button("보드로 작업 좌표 설정 (촬영 전)")
+            self.frame_status = g.add_markdown(self._frame_text())
+            self.track_board = g.add_checkbox("보드 추적: 매 장 보드로 카메라 위치 재기", initial_value=False)
+            g.add_markdown("물체를 보드 **가운데**에 두고, 찍을 때마다 보드 코너가 "
+                           f"{TRACK_MIN_CORNERS}개 이상 보이게 하세요. 팔 FK·손목 보정·클램프 오차가 "
+                           "복원에 들어가지 않습니다. 보드 작업 좌표에서만 켤 수 있습니다.")
             self.roi = g.add_vector3("ROI 중심 [m]", initial_value=tuple(cfg["roi_center"]), step=0.005)
             self.radius = g.add_number("ROI 반경 [m]", initial_value=cfg["roi_radius"], min=0.005,
                                        max=0.5, step=0.005)
@@ -186,7 +221,7 @@ class ScanUI:
             self.voxel = g.add_number("TSDF voxel [mm]", initial_value=1.0, min=0.2, max=5.0, step=0.2)
             self.icp = g.add_checkbox("ICP 자세 보정", initial_value=False)
             self.recon_button = g.add_button("촬영 프레임으로 복원")
-            self.recon_status = g.add_markdown("PLY·OBJ는 로봇 base_link 좌표로 저장됩니다.")
+            self.recon_status = g.add_markdown("PLY·OBJ는 작업 좌표로 저장됩니다.")
             self.show_clouds = g.add_checkbox("촬영 점군 보기", initial_value=True)
         self.roi_handle = self.server.scene.add_transform_controls("/roi_gizmo", scale=0.07,
                                                                    position=tuple(self.roi.value),
@@ -208,6 +243,7 @@ class ScanUI:
         self.toggle_sample.on_click(lambda _: self._action(self._toggle_sample))
         self.capture_button.on_click(lambda _: self._action(self.capture))
         self.new_scan_button.on_click(lambda _: self._action(self._new_scan))
+        self.board_frame_button.on_click(lambda _: self._action(self._set_board_frame))
         self.roi_centre_button.on_click(lambda _: self._action(self._centre_roi))
         self.recon_button.on_click(lambda _: self._action(self._start_reconstruction))
         self.show_clouds.on_update(lambda _: self._cloud_visibility())
@@ -218,6 +254,8 @@ class ScanUI:
         self._draw_roi()
         if self.loaded:
             plan = storage.load_plan(self.loaded)
+            self._world_from(plan.meta)
+            self.track_board.value = plan.meta.get("camera_pose") == "board"
             self.roi.value, self.radius.value = tuple(plan.roi_center), plan.roi_radius
             self._draw_saved(self.loaded)
             self.capture_status.content = f"저장 프레임 {len(storage.load_frames(self.loaded))}장"
@@ -240,7 +278,7 @@ class ScanUI:
                 if cal.get("depth_validation", {}).get("passed") is not True:
                     raise ValueError("RGB·depth 검증이 없는 이전 보정값입니다. 새 보정을 진행하세요")
                 transform(cal["tool_T_depth"])
-                self.calibration = cal
+                self.calibration, self.calibration_pending = cal, True
                 self.cal_status.content = "저장된 보정값 로드 — 카메라와 URDF 일치 확인 대기 중"
             except Exception as exc:
                 self.cal_status.content = f"보정값 로드 실패: {exc}"
@@ -249,7 +287,34 @@ class ScanUI:
             self._action(self._cal_solve)
         if getattr(args, "resume_scan", None):
             self._restore_scan()
+        if getattr(args, "settings_from", None):
+            self._settings_from(Path(args.settings_from).resolve())
+        self.capture_service = None
+        if getattr(args, "allow_robot_control", False) and hasattr(source, "node"):
+            from std_srvs.srv import Trigger
+            # pose_tour --capture 가 도착·정지 후 부른다 — 촬영 버튼과 같다(이 앱은 여전히 로봇 명령이 없다)
+            self.capture_service = source.node.create_service(Trigger, CAPTURE_SERVICE, self._remote_capture)
         self._controls(False)
+
+    def _remote_capture(self, _request, response):
+        """촬영 서비스 요청 — 버튼과 같은 capture() 를 하고 결과를 한 줄로 돌려준다."""
+        with self.lock:
+            response.success, response.message = False, "복원 중 — 촬영할 수 없습니다"
+            if self.busy:
+                return response
+            try:
+                self.capture()
+            except Exception as exc:
+                self.operation.content = f"**확인 필요:** {exc}"
+                response.message = str(exc)
+                return response
+            r = self.session.records[-1]
+            response.success = True
+            response.message = f"{len(self.session.records)}장 저장" + (
+                f" · 코너 {r['board_corners']} · 재투영 {r['board_reprojection_px']:.2f}px · "
+                f"팔로 계산한 위치와 차이 {r['robot_vs_board_mm']:.1f} mm" if r.get("camera_pose") == "board"
+                else " · 카메라 위치: 팔 FK")
+        return response
 
     def _action(self, action):
         with self.lock:
@@ -275,6 +340,96 @@ class ScanUI:
             return self.source.tool_pose()
         return self.source.T.copy() if self.args.demo else self.fk.pose(q)
 
+    def _camera_pose(self, q):
+        """depth 카메라의 작업 좌표 자세."""
+        return np.linalg.inv(self.base_T_world) @ self._tool_pose(q) @ transform(self.calibration["tool_T_depth"])
+
+    def _frame_label(self):
+        return "보드" if self.world_frame == "board" else self.world_frame
+
+    def _frame_text(self):
+        if self.world_frame == "board":
+            s = self.scan_board.spec
+            return (f"작업 좌표: **보드** ({s['squares_x']}×{s['squares_y']}칸 {s['square_m']*1000:g} mm) — "
+                    "원점 보드 중심, x 긴 변, z 위(보드 윗면 0). "
+                    "ROI·제외 영역은 이 좌표입니다. 보드·로봇 베이스를 옮기면 다시 설정하세요.")
+        return f"작업 좌표: **{self.world_frame}** (로봇 base) — 보드가 보이면 위 버튼으로 바꿀 수 있습니다."
+
+    def _set_world(self, name, base_T_world, board=None):
+        """작업 좌표를 바꾼다. 화면의 ROI·제외 영역 숫자는 그대로 두고 새 좌표의 값으로 읽는다.
+
+        board: 작업 좌표를 잡은 보드 규격 — 보드 추적은 같은 보드여야 한다.
+        """
+        previous, self.base_T_world = self.base_T_world, transform(base_T_world)
+        self.world_frame = name
+        if self.session is not None:
+            self.session.meta["world_frame"] = name
+            for key in ("base_T_world", "board"):
+                self.session.meta.pop(key, None)
+            if name != self.cfg["base_frame"]:
+                self.session.meta["base_T_world"] = self.base_T_world.tolist()
+            if board is not None:
+                self.session.meta["board"] = board
+        world_T_base = np.linalg.inv(self.base_T_world)
+        for handle in self.base_handles:
+            handle.wxyz, handle.position = quat(world_T_base), tuple(world_T_base[:3, 3])
+        for handle in reversed(self.world_handles):
+            handle.remove()
+        self.world_handles = []
+        if name == "board":
+            self.world_handles = [self.server.scene.add_frame("/work_frame", axes_length=.04, axes_radius=.0008),
+                *self._board_geometry("/work_frame/board", np.linalg.inv(board_centre_frame(self.scan_board.spec)),
+                                      (230, 90, 200), .12, board_size(self.scan_board.spec))]
+        # 접속한 화면이 같은 장면을 계속 보도록 시점도 같은 변환으로 옮긴다.
+        change = world_T_base @ previous
+        for client in self.server.get_clients().values():
+            try:
+                position, look_at = client.camera.position, client.camera.look_at
+            except AssertionError:  # 아직 시점을 보내지 않은 화면
+                continue
+            client.camera.position = tuple(apply(change, position))
+            client.camera.look_at = tuple(apply(change, look_at))
+        self.frame_status.content = self._frame_text()
+
+    def _world_from(self, meta):
+        self._set_world(meta.get("world_frame", self.cfg["base_frame"]), meta.get("base_T_world", np.eye(4)),
+                        meta.get("board"))
+
+    def _set_board_frame(self):
+        self._check_calibration()
+        if self.session.records:
+            raise ValueError("촬영한 run 의 좌표는 바꿀 수 없습니다 — 새 촬영을 시작한 뒤 설정하세요")
+        color, color_q, _ = self.source.sample("color")
+        identity = self.identity()
+        spec = self.scan_board.spec
+        board_T, rms, annotated = self.scan_board.detect(color)
+        self.last_annotated, self.annotated_until = annotated, time.monotonic() + 2.0
+        depth, _, _, _ = self._paired_depth(color, color_q, identity)
+        report, _, _ = check_board_depth(depth, board_T, identity["color_T_depth"], board_size=board_size(spec),
+                                         ignore_nearer_m=BOARD_OCCLUDER_M, **self._depth_params())
+        if not report["passed"]:
+            raise ValueError("보드 RGB·depth 확인 실패: " + "; ".join(report["reasons"]) +
+                             " — 물체를 올리기 전에 보드만 보이게 설정하세요")
+        base_T_board = self._tool_pose(color_q) @ transform(self.calibration["tool_T_color"]) @ board_T
+        self._set_world("board", base_T_board @ board_centre_frame(spec), spec)
+        self.track_board.value = True       # 보드 작업 좌표의 기본 — 끄면 팔 FK 자세로 찍는다
+        centre = self.base_T_world[:3, 3]
+        yaw = np.rad2deg(np.arctan2(self.base_T_world[1, 0], self.base_T_world[0, 0]))
+        detail = (f"재투영 {rms:.2f}px · 코너 {self.scan_board.corners}개 · depth 평면 거리 {report['offset_mm']:.1f} mm · "
+                  f"각도 {report['normal_error_deg']:.1f}°"
+                  + (f" · 보드 앞 가림 {report['occluded_points']}점 제외(그리퍼 등)" if report["occluded_points"] else "")
+                  + "\n"
+                  f"보드 중심 {self.cfg['base_frame']} 기준 x {centre[0]:.3f} / y {centre[1]:.3f} / z {centre[2]:.3f} m · "
+                  f"긴 변 방향 {yaw:.0f}°")
+        if "base_T_board" in self.calibration and self.calibration.get("board") == spec:
+            reference = transform(self.calibration["base_T_board"])
+            moved_mm = np.linalg.norm(base_T_board[:3, 3] - reference[:3, 3]) * 1000
+            moved_deg = np.rad2deg(Rotation.from_matrix(reference[:3, :3].T @ base_T_board[:3, :3]).magnitude())
+            detail += f"\n보정 때 보드 위치와 차이 {moved_mm:.1f} mm / {moved_deg:.2f}°"
+        self.frame_status.content = self._frame_text() + "\n" + detail
+        self.operation.content = ("보드 기준 작업 좌표로 바꿨습니다(보드 추적 켜짐). 물체를 보드 가운데에 올리고, "
+                                  "ROI 중심과 바닥 제외 높이를 이 좌표로 맞추세요.")
+
     def _active_samples(self):
         return [s for s in self.samples if not s.get("excluded", False)]
 
@@ -283,6 +438,22 @@ class ScanUI:
             raise ValueError("현재 보정값과 촬영 당시 보정값이 다릅니다. 결과 보기 모드를 사용하세요")
         plan = storage.load_plan(self.session.directory)
         self.session.meta.update(plan.meta)
+        self._apply_plan_settings(plan)
+        self._draw_saved(self.session.directory)
+        self.capture_status.content = f"**촬영 원본 {len(self.session.records)}장 복구**\n`{self.session.directory}`"
+        tag = "icp" if (self.session.directory / "recon_icp.ply").exists() else ""
+        mesh = storage.load_recon(self.session.directory, tag=tag)
+        if mesh is not None:
+            self.icp.value = tag == "icp"
+            self._draw_mesh(mesh)
+            self.show_live.value = self.show_clouds.value = False
+            self.recon_status.content = f"**저장 복원 결과 로드** · {len(mesh.faces)}개 면\n`{self.session.directory}`"
+        self.operation.content = "원본 촬영과 ROI를 복구했습니다. 같은 물체·카메라 장착 상태에서 이어가세요."
+
+    def _apply_plan_settings(self, plan):
+        """저장된 run 의 작업 좌표·ROI·테이블·추가 제외 영역을 화면 설정에 넣는다 — 촬영 원본은 건드리지 않는다."""
+        self._world_from(plan.meta)  # 숫자는 그 run 의 작업 좌표 값이다
+        self.track_board.value = plan.meta.get("camera_pose") == "board"
         self.roi.value, self.radius.value = tuple(plan.roi_center), float(plan.roi_radius)
         for name, row in zip(plan.obstacle_names, plan.obstacles):
             if not np.allclose(row[3:7], [1,0,0,0]):
@@ -295,16 +466,12 @@ class ScanUI:
                 self.support_pos.value, self.support_dims.value = tuple(row[:3]), tuple(row[7:])
             else:
                 raise ValueError("현재 UI에서 복구할 수 없는 장애물입니다")
-        self._draw_saved(self.session.directory)
-        self.capture_status.content = f"**촬영 원본 {len(self.session.records)}장 복구**\n`{self.session.directory}`"
-        tag = "icp" if (self.session.directory / "recon_icp.ply").exists() else ""
-        mesh = storage.load_recon(self.session.directory, tag=tag)
-        if mesh is not None:
-            self.icp.value = tag == "icp"
-            self._draw_mesh(mesh)
-            self.show_live.value = self.show_clouds.value = False
-            self.recon_status.content = f"**저장 복원 결과 로드** · {len(mesh.faces)}개 면\n`{self.session.directory}`"
-        self.operation.content = "원본 촬영과 ROI를 복구했습니다. 같은 물체·카메라 장착 상태에서 이어가세요."
+
+    def _settings_from(self, directory):
+        self._apply_plan_settings(storage.load_plan(directory))
+        self.track_board.value = self.world_frame == "board"   # 새 run — 보드 작업 좌표면 보드 추적이 기본
+        self.operation.content = (f"ROI·테이블·추가 제외 설정을 `{directory.parent.parent.name}/{directory.name}` 에서 "
+                                  "불러왔습니다. 촬영은 새 run 으로 저장됩니다.")
 
     def _write_samples(self):
         atomic_json(self.cal_record_dir / "samples.json", {"identity": self.identity_locked,
@@ -483,12 +650,21 @@ class ScanUI:
         if json_signature(self.calibration["identity"]) != json_signature(self.identity()):
             raise ValueError("보정 당시 카메라·내부 파라미터·URDF와 다릅니다. 다시 보정하세요")
 
+    def _saved_calibration_text(self):
+        c = self.calibration
+        holdout, depth = c["holdout_report"], c["depth_validation"]
+        return (f"**저장된 보정 사용 중** · {c['created_at'][:16].replace('T', ' ')}\n"
+                f"별도 검증 {holdout['translation_max_mm']:.1f} mm / {holdout['rotation_max_deg']:.2f}° · "
+                f"depth 거리 {depth['max_abs_offset_mm']:.1f} mm · P95 {depth['max_p95_abs_mm']:.1f} mm\n"
+                f"`{self.calibration_path.relative_to(ROOT)}` — 카메라 장착을 바꾸면 다시 보정하세요")
+
     def _cal_visibility(self):
         for handle in self.cal_handles + self.depth_handles:
             handle.visible = self.show_calibration.value
 
-    def _board_geometry(self, name, T, color, opacity=.04):
-        corners = np.array([[0, 0, 0], [.12, 0, 0], [.12, .10, 0], [0, .10, 0]], dtype=np.float32)
+    def _board_geometry(self, name, T, color, opacity=.04, size=(.12, .10)):
+        w, h = size
+        corners = np.array([[0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0]], dtype=np.float32)
         outline = np.concatenate([np.linspace(corners[i], corners[(i+1) % 4], 40) for i in range(4)])
         return [self.server.scene.add_frame(name, wxyz=quat(T), position=tuple(T[:3, 3]),
                                            axes_length=.015, axes_radius=.0005),
@@ -524,8 +700,9 @@ class ScanUI:
             "| 자세 번호 | 회전 편차 [°] |\n|---|---|\n"+rows)
         self._cal_visibility()
 
-    def _record_depth_check(self, color, color_q, color_T_board, identity):
-        depth, q, dt = self.source.sample("depth")
+    def _paired_depth(self, color, color_q, identity):
+        """RGB 기록과 짝지은 depth — 같은 카메라 설정·짧은 시간 차이·팔 정지를 확인한다."""
+        depth, q, dt = self.source.sample("depth", near=color.stamp)
         if (json_signature(self.identity()) != json_signature(identity)
                 or json_signature(depth.model.record()) != json_signature(identity["depth"])):
             raise ValueError("RGB·depth 기록 사이에 카메라 설정이 변경되었습니다")
@@ -534,8 +711,15 @@ class ScanUI:
             raise ValueError("RGB와 depth 프레임의 시간 차이가 큽니다. 정지한 상태에서 다시 기록하세요")
         if np.max(np.abs(q-color_q)) > self.cfg["capture_guard"]["step_rad"]:
             raise ValueError("RGB·depth 기록 사이에 팔이 움직였습니다")
-        params = {**self.cfg.get("depth_validation", {}),
-                  "min_range_m": self.cfg["min_range_m"], "max_range_m": self.cfg["max_range_m"]}
+        return depth, q, dt, frame_dt
+
+    def _depth_params(self):
+        return {**self.cfg.get("depth_validation", {}),
+                "min_range_m": self.cfg["min_range_m"], "max_range_m": self.cfg["max_range_m"]}
+
+    def _record_depth_check(self, color, color_q, color_T_board, identity):
+        depth, q, dt, frame_dt = self._paired_depth(color, color_q, identity)
+        params = self._depth_params()
         report, points, residual = check_board_depth(depth, color_T_board, identity["color_T_depth"], **params)
         X = transform(self.candidate["tool_T_color"])
         world_T_depth = self._tool_pose(q) @ X @ transform(identity["color_T_depth"])
@@ -590,8 +774,9 @@ class ScanUI:
         self._check_calibration()
         run = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         meta = {k:v for k,v in self.session.meta.items() if k in (
-            "min_range_m", "max_range_m", "source", "pose_source", "robot_kinematics")}
-        session = ScanSession(ROOT / "data", self.object_name.value, run, meta)
+            "min_range_m", "max_range_m", "source", "pose_source", "robot_kinematics", "base_T_world", "board")}
+        session = ScanSession(ROOT / "data", self.object_name.value, run, meta,
+                              robot=self.cfg["robot"], world_frame=self.world_frame)
         for handle in self.shot_handles.values():
             handle.remove()
         self.shot_handles.clear()
@@ -599,6 +784,7 @@ class ScanUI:
             self.mesh_handle.remove()
         self.mesh = self.mesh_handle = None
         self.session = session
+        self.track_board.value = self.world_frame == "board"
         self.args.object, self.args.run = self.object_name.value, run
         self.args.resume_scan = self.args.resume_calibration = None
         self.cal_record_dir = self.calibration_dir / "samples" / run
@@ -621,16 +807,60 @@ class ScanUI:
 
     def capture(self):
         self._check_calibration()
-        frame, q, dt = self.source.sample("depth")
-        T = self._tool_pose(q) @ transform(self.calibration["tool_T_depth"])
+        track = bool(self.track_board.value)
+        if self.session.records and track != (self.session.meta.get("camera_pose") == "board"):
+            raise ValueError("이 run 은 보드 추적을 " + ("끄고" if track else "켜고") +
+                             " 찍었습니다 — 바꾸려면 새 촬영을 시작하세요")
         boxes, names = self._obstacles()
+        if track:
+            frame, q, T, detail = self._tracked_capture()
+            self.session.meta["camera_pose"] = "board"
+        else:
+            frame, q, dt = self.source.sample("depth")
+            T, detail = self._camera_pose(q), {"sync_error_s": dt}
+            self.session.meta.pop("camera_pose", None)
         index = self.session.save(frame, q, T, self.calibration, self.roi.value, self.radius.value,
-                                  boxes, names, {"sync_error_s": dt, "device": self.source.device})
-        self.capture_status.content = f"**{index + 1}장 저장** — 권장 8–12개 시점\n`{self.session.directory}`"
+                                  boxes, names, {**detail, "device": self.source.device})
+        tracked = (f"카메라 위치: **보드 추적** · 코너 {detail['board_corners']}개 · "
+                   f"재투영 {detail['board_reprojection_px']:.2f}px\n"
+                   f"팔로 계산한 위치와 차이 {detail['robot_vs_board_mm']:.1f} mm / "
+                   f"{detail['robot_vs_board_deg']:.2f}° (팔·손목 보정·클램프 오차)\n" if track else
+                   "카메라 위치: **팔 FK** (보드 추적 꺼짐)\n")
+        self.capture_status.content = (f"**{index + 1}장 저장** — 권장 8–12개 시점\n{tracked}"
+                                       f"`{self.session.directory}`")
         self._draw_saved(self.session.directory)
         self.operation.content = "저장 완료. 겹치는 부분이 보이도록 다른 시점으로 옮겨 정지하세요."
         if self.args.demo:
             self.source.advance()
+
+    def _tracked_capture(self):
+        """보드 추적 촬영 — depth 카메라 자세를 같은 순간 RGB 의 보드에서 잰다(팔 FK·손목 보정·클램프와 무관).
+
+        팔로 계산한 자세는 비교용으로만 남긴다. 그 차이가 팔·장착 오차다.
+        """
+        if self.world_frame != "board":
+            raise ValueError("보드 추적은 보드 작업 좌표에서만 됩니다 — 먼저 '보드로 작업 좌표 설정'")
+        spec = self.scan_board.spec
+        if self.session.meta.get("board") != spec:
+            raise ValueError("작업 좌표를 잡은 보드와 지금 설정의 스캔 보드가 다릅니다 — 새 촬영에서 작업 좌표를 다시 설정하세요")
+        color, color_q, _ = self.source.sample("color")
+        identity = self.identity()
+        try:
+            color_T_board, rms, annotated = self.scan_board.detect(color, min_corners=TRACK_MIN_CORNERS)
+        except ValueError as exc:
+            raise ValueError(f"보드 추적: {exc} — 보드가 더 보이는 자세에서 다시 찍으세요 (저장 안 함)")
+        self.last_annotated, self.annotated_until = annotated, time.monotonic() + 2.0
+        depth, q, dt, frame_dt = self._paired_depth(color, color_q, identity)
+        world_T_board = np.linalg.inv(board_centre_frame(spec))
+        T = world_T_board @ np.linalg.inv(color_T_board) @ transform(identity["color_T_depth"])
+        robot_T = self._camera_pose(q)
+        delta = np.linalg.inv(robot_T) @ T
+        return depth, q, T, {
+            "camera_pose": "board", "sync_error_s": dt, "color_depth_sync_s": frame_dt,
+            "board_corners": self.scan_board.corners, "board_reprojection_px": rms,
+            "robot_world_T_cam": robot_T.tolist(),
+            "robot_vs_board_mm": float(np.linalg.norm(T[:3, 3] - robot_T[:3, 3]) * 1000),
+            "robot_vs_board_deg": float(np.rad2deg(Rotation.from_matrix(delta[:3, :3]).magnitude()))}
 
     def _centre_roi(self):
         self._check_calibration()
@@ -645,8 +875,7 @@ class ScanUI:
         z = float(np.median(values))
         K = frame.model.K
         p = np.array([(x-K[0, 2])*z/K[0, 0], (y-K[1, 2])*z/K[1, 1], z])
-        T = self._tool_pose(q) @ transform(self.calibration["tool_T_depth"])
-        self.roi.value = tuple(T[:3, :3] @ p + T[:3, 3])
+        self.roi.value = tuple(apply(self._camera_pose(q), p))
 
     def _roi_changed(self):
         self._roi_busy = True
@@ -740,7 +969,7 @@ class ScanUI:
         self._camera_visibility()
         x, y, z = T[:3, 3]
         distance = np.linalg.norm(T[:3, 3] - np.asarray(self.roi.value))
-        self.camera_status.content = (f"**현재 depth 카메라** · base_link 기준 [m]\n"
+        self.camera_status.content = (f"**현재 depth 카메라** · {self._frame_label()} 기준 [m]\n"
             f"x {x:.3f} / y {y:.3f} / z {z:.3f}\n"
             f"ROI 중심까지 {distance*100:.1f} cm · 시간 차이 {dt*1000:.1f} ms\n"
             "주황색: 현재 위치·촬영 방향 / 파랑: 저장된 촬영 시점")
@@ -774,7 +1003,10 @@ class ScanUI:
                                  FusionParams(voxel_mm=voxel), icp=use_icp,
                                  log=lambda text: setattr(self.recon_status, "content", text))
             report = {**recon_report(FusionParams(voxel_mm=voxel), result, use_icp),
-                      "world_frame": "base_link", "source": plan.meta.get("source", "unknown")}
+                      "world_frame": plan.meta.get("world_frame", "base_link"),
+                      "camera_pose": plan.meta.get("camera_pose", "robot"),
+                      **{k: plan.meta[k] for k in ("base_T_world",) if k in plan.meta},
+                      "source": plan.meta.get("source", "unknown")}
             tag = "icp" if use_icp else ""
             path = storage.save_recon(directory, result.mesh, report, tag=tag)
             result.mesh.export(str(path.with_suffix(".obj")))
@@ -809,6 +1041,11 @@ class ScanUI:
         self.cal_accept.disabled = not real_capture or len(self.holdouts) < 3 or already_shot
         self.capture_button.disabled = not ready or self.busy or self.loaded is not None
         self.roi_centre_button.disabled = self.capture_button.disabled
+        self.board_frame_button.disabled = self.capture_button.disabled or already_shot
+        if self.world_frame != "board" and self.track_board.value:
+            self.track_board.value = False
+        self.track_board.disabled = (self.busy or self.source is None or self.loaded is not None
+                                     or already_shot or self.world_frame != "board")
         directory = self.loaded or (self.session.directory if self.session else None)
         self.recon_button.disabled = self.busy or directory is None or not (directory / "plan.npz").exists()
         for field in (self.roi, self.radius, self.table_enabled, self.table_z, self.support_enabled,
@@ -844,8 +1081,7 @@ class ScanUI:
             try:
                 frame, q, dt = self.source.preview("depth")
                 self._check_calibration()
-                T = self._tool_pose(q) @ transform(self.calibration["tool_T_depth"])
-                self._draw_current_camera(frame, T, dt)
+                self._draw_current_camera(frame, self._camera_pose(q), dt)
             except Exception as exc:
                 self.live_camera_valid = False
                 self._camera_visibility()
@@ -853,14 +1089,18 @@ class ScanUI:
             try:
                 frame, q, dt = self.source.sample("depth")
                 self._check_calibration()
-                T = self._tool_pose(q) @ transform(self.calibration["tool_T_depth"])
+                if self.calibration_pending:
+                    self.calibration_pending = False
+                    self.cal_status.content = self._saved_calibration_text()
+                T = self._camera_pose(q)
                 pts = pixel_world_points(frame.pixels, frame.model.K, T, stride=5)
                 valid = np.isfinite(pts).all(axis=-1) & (frame.pixels[::5, ::5] >= self.cfg["min_range_m"]) & (frame.pixels[::5, ::5] <= self.cfg["max_range_m"])
                 if np.any(valid):
                     self.live_cloud = self.server.scene.add_point_cloud(
                         "/live/points", points=pts[valid].astype(np.float32),
                         colors=(110, 130, 150), point_size=0.0015, visible=self.show_live.value)
-                self.status.content = f"**촬영 가능** · {self.source.serial}\n시간 차이 {dt*1000:.1f}ms · base_link 좌표"
+                self.status.content = (f"**촬영 가능** · {self.source.serial}\n시간 차이 {dt*1000:.1f}ms · "
+                                       f"{self._frame_label()} 좌표" + (" · 보드 추적" if self.track_board.value else ""))
                 self._controls(True)
             except Exception as exc:
                 if hasattr(self, "live_cloud"):
@@ -879,7 +1119,8 @@ class ScanUI:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"))
+    p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"),
+                   help="장비 설정 — Summit UR5e+D435f 는 workcell/scans/ur5e_d435f.yaml")
     p.add_argument("--object", default="piper_test")
     p.add_argument("--run", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
     p.add_argument("--port", type=int, default=8082)
@@ -892,10 +1133,17 @@ def main():
     p.add_argument("--view-run", help="저장 폴더를 읽어 복원/보기, 로봇 연결 없음")
     p.add_argument("--resume-calibration", help="저장된 보정 원본 폴더를 복구하고 다시 계산")
     p.add_argument("--resume-scan", help="같은 물체·장착 상태에서 저장된 실제 촬영을 이어가기")
+    p.add_argument("--settings-from", help="저장된 run 폴더의 ROI·테이블·추가 제외 설정으로 시작 — 촬영은 새 run(--object)으로")
     p.add_argument("--allow-robot-control", action="store_true",
                    help="PiPER 드라이버·MoveIt 이 켜져 있어도 연결 — 정해 둔 자세로 이동(pose_tour)하며 "
-                        "보기·찍기. 기본은 수동 촬영 안전을 위해 거부")
+                        "보기·찍기. 촬영 서비스 /piper_scan/capture 도 연다(pose_tour --capture). "
+                        "기본은 수동 촬영 안전을 위해 거부")
     args = p.parse_args()
+    if args.settings_from:
+        if args.resume_scan or args.view_run:
+            p.error("--settings-from 은 새 촬영용입니다 — --resume-scan/--view-run 과 함께 쓰지 않습니다")
+        if not (Path(args.settings_from) / "plan.npz").exists():
+            p.error("--settings-from 폴더에 plan.npz 가 없습니다 — 촬영을 한 번 이상 한 run 이어야 합니다")
     if args.resume_scan:
         if args.view_run or args.resume_calibration or args.demo or args.sim_calibration:
             p.error("실제 촬영 복구는 결과 보기/보정 복구/가상 모드와 함께 사용할 수 없습니다")
@@ -926,14 +1174,19 @@ def main():
     if args.demo_frames and args.sim_calibration:
         p.error("가상 보정 자동 실행에는 --demo-frames 대신 --sim-auto를 사용하세요")
     cfg = read_config(args.config)
+    if args.allow_robot_control and cfg["robot"] != "piper":
+        p.error("--allow-robot-control 은 PiPER 전용입니다 — UR 은 RTDE 출력만 읽으므로 필요 없습니다")
     source = fk = ui = None
     try:
         if not args.view_run:
             if args.demo:
                 source = CalibrationSimSource(args.sim_depth_bias_mm) if args.sim_calibration else DemoSource()
-            else:
+            elif cfg["robot"] == "piper":
                 fk = PiperFK(cfg["urdf"], cfg["base_frame"], cfg["tool_frame"])
                 source = LiveSource(cfg, allow_controllers=args.allow_robot_control)
+            else:
+                fk = UrFK(cfg["urdf"], cfg["base_frame"], cfg["tool_frame"])
+                source = UrLiveSource(cfg)
         ui = ScanUI(args, cfg, source, fk)
         if args.sim_auto:
             try:
@@ -953,7 +1206,7 @@ def main():
                 print("Simulation validation stopped:", exc, flush=True)
         for _ in range(args.demo_frames):
             ui.capture()
-        print(f"PiPER Scan: http://{args.host}:{args.port} (Ctrl+C로 종료)", flush=True)
+        print(f"{cfg['label']} Scan: http://{args.host}:{args.port} (Ctrl+C로 종료)", flush=True)
         while True:
             ui.update()
             time.sleep(0.5)
