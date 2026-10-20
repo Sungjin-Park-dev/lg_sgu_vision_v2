@@ -53,8 +53,9 @@ def _frame_cloud(frame, pose, spec, roi_c, roi_r, margin_m, voxel_m, stride, obs
                                   margin_m, stride=stride, obstacles=obstacles)
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[labels == OBJECT] - roi_c))
     pcd = pcd.voxel_down_sample(voxel_m)
-    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=4.0 * voxel_m, max_nn=30))
-    pcd.orient_normals_towards_camera_location(pose[:3, 3] - roi_c)
+    if len(pcd.points):                                # 물체가 안 보인 프레임은 빈 채로 — 간선에서 빠진다
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=4.0 * voxel_m, max_nn=30))
+        pcd.orient_normals_towards_camera_location(pose[:3, 3] - roi_c)
     return pcd
 
 
