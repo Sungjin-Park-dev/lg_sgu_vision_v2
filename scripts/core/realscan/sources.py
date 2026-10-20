@@ -1,13 +1,15 @@
 """실물 스캔의 프레임 소스 — 앱(apps/piper_scan.py)이 같은 인터페이스(sample/preview/color_T_depth)로 쓴다.
 
-  LiveSource             ROS RealSense 수신 + PiPER CAN 수신 전용(piper.PassivePiper). 로봇 제어 클라이언트 없음.
+  LiveSource             ROS2 RealSense 수신 + PiPER CAN 수신 전용(piper.PassivePiper). 로봇 제어 클라이언트 없음.
+  UrLiveSource           Summit ROS1 RealSense 수신(ros1) + UR RTDE 출력 수신(ur.RtdeReader). 로봇 제어 없음.
   DemoSource             합성 구·테이블 RGB-D — ROS/CAN 없이 화면·복원 확인
   CalibrationSimSource   가상 보드 영상으로 보정부터 복원까지 — 팔 물리·IK 는 흉내 내지 않는다
 
-ROS 모듈은 LiveSource 안에서만 import 한다.
+ROS2 모듈은 LiveSource 안에서만 import 한다.
 """
 from __future__ import annotations
 
+from collections import deque
 import threading
 import time
 
@@ -20,6 +22,22 @@ from core.realscan.piper import PassivePiper
 
 def stamp_seconds(stamp):
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def camera_model(kind, width, height, K, D, R, P, frame, distortion_model):
+    """CameraInfo 필드 → CameraModel. depth(image_rect_raw)는 rectified 투영 내부값을 쓴다."""
+    K, D = np.array(K, dtype=float).reshape(3, 3), np.array(D, dtype=float)
+    if kind == "depth":
+        P = np.array(P, dtype=float).reshape(3, 4)
+        if P[0, 0] > 0:
+            K = P[:, :3]
+        if not np.allclose(np.array(R, dtype=float).reshape(3, 3), np.eye(3), atol=1e-5):
+            raise ValueError("depth CameraInfo의 비단위 rectification은 현재 지원하지 않습니다")
+        D = np.zeros(5)
+    if (K[0, 0] <= 0 or K[1, 1] <= 0 or not np.isfinite(K).all()
+            or width <= 0 or height <= 0 or not frame):
+        raise ValueError("잘못된 CameraInfo")
+    return CameraModel(width, height, K, D, frame, "none" if kind == "depth" else distortion_model)
 
 
 class LiveSource:
@@ -110,21 +128,8 @@ class LiveSource:
 
     def _info(self, msg, kind):
         try:
-            K = np.array(msg.k).reshape(3, 3)
-            D = np.array(msg.d)
-            if kind == "depth":
-                # image_rect_raw: use the rectified projection intrinsics.
-                P = np.array(msg.p).reshape(3, 4)
-                if P[0, 0] > 0:
-                    K = P[:, :3]
-                if not np.allclose(np.array(msg.r).reshape(3, 3), np.eye(3), atol=1e-5):
-                    raise ValueError("depth CameraInfo의 비단위 rectification은 현재 지원하지 않습니다")
-                D = np.zeros(5)
-            if (K[0, 0] <= 0 or K[1, 1] <= 0 or not np.isfinite(K).all()
-                    or msg.width <= 0 or msg.height <= 0 or not msg.header.frame_id):
-                raise ValueError("잘못된 CameraInfo")
-            model = CameraModel(msg.width, msg.height, K, D, msg.header.frame_id,
-                                "none" if kind == "depth" else msg.distortion_model)
+            model = camera_model(kind, msg.width, msg.height, msg.k, msg.d, msg.r, msg.p,
+                                 msg.header.frame_id, msg.distortion_model)
             with self.lock:
                 setattr(self, f"{kind}_model", model)
         except Exception as exc:
@@ -167,7 +172,8 @@ class LiveSource:
         return rigid(Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix(),
                      [tf.translation.x, tf.translation.y, tf.translation.z])
 
-    def sample(self, kind):
+    def sample(self, kind, near=None):
+        """near: 짝지을 프레임 시각(UrLiveSource 만 씀). 여기서는 늘 최신 프레임."""
         return self._sample(kind, stationary=True)
 
     def preview(self, kind="depth"):
@@ -198,6 +204,172 @@ class LiveSource:
         self.thread.join(timeout=2)
         self.node.destroy_node()
         self.rclpy.try_shutdown()
+
+
+class UrLiveSource:
+    """Summit 위 UR + 손목 RealSense. 관절은 UR RTDE 출력(ur.RtdeReader), 카메라는 Summit 의 ROS1
+    RealSense 를 ros1 최소 클라이언트로 읽는다 — 둘 다 수신만 하고 로봇에 쓰는 경로가 없다.
+
+    무선 대역 때문에 계속 받는 것은 depth 원본·RGB JPEG(미리보기)·CameraInfo 뿐이다. 보정에 쓰는 RGB
+    원본은 sample('color') 때 요청 시각 뒤에 찍힌 프레임을 새로 받아 오고(보통 0.5–1 s, 가끔 3 s),
+    그와 짝지을 depth 는 sample('depth', near=RGB 시각) 이 최근 depth 중 가장 가까운 것을 준다.
+    """
+    DEPTH_BUFFER_S = 4.0  # 원본 uint16 으로 보관 — 15 fps 에서 약 50 MB
+
+    def __init__(self, cfg):
+        from core.realscan import ros1
+        from core.realscan.ur import RtdeReader
+        self.cfg, self.ros1, self.lock = cfg, ros1, threading.RLock()
+        self.master, self.topics = cfg["ros1_master"], cfg["camera_topics"]
+        self.depth = self.color = None
+        self.depth_model = self.color_model = None
+        self.serial, self.device = "", {}
+        self.extrinsics = None
+        self.camera_error = ""
+        self.recent_depth = deque()
+        self.history = JointHistory(**cfg["capture_guard"])
+        self.closed = False
+        self.stop = threading.Event()
+        self.streams, self.arm = [], None
+        try:
+            self.streams = [ros1.TopicStream(self.master, self.topics[f"{kind}_info"],
+                                             lambda m, kind=kind: self._info(m, kind))
+                            for kind in ("depth", "color")]
+            self.streams += [ros1.TopicStream(self.master, self.topics["depth"], self._depth),
+                             ros1.TopicStream(self.master, self.topics["color_preview"], self._color_preview)]
+            threading.Thread(target=self._setup, daemon=True).start()
+            self.arm = RtdeReader(cfg["rtde_host"], cfg["rtde_port"], self.history, cfg.get("rtde_hz", 125.0))
+        except BaseException:
+            self.close()
+            raise
+
+    def _setup(self):
+        """latched extrinsics 와 device_info 는 카메라 노드가 뜰 때까지 1초마다 다시 묻는다."""
+        while not self.stop.is_set() and (self.extrinsics is None or not self.serial):
+            try:
+                if self.extrinsics is None:
+                    self.extrinsics = self.ros1.decode_extrinsics(
+                        self.ros1.fetch(self.master, self.topics["extrinsics"]))
+                device = self.ros1.decode_device_info(
+                    self.ros1.call_service(self.master, self.topics["device_info"]))
+                with self.lock:
+                    self.device, self.serial = device, device.get("serial_number", "")
+            except Exception as exc:
+                self.camera_error = f"카메라 정보 대기: {exc}"
+            if self.extrinsics is None or not self.serial:
+                self.stop.wait(1.0)
+
+    def _waiting(self, what):
+        return self.camera_error or next((s.error for s in self.streams if s.error), "") or what
+
+    def _info(self, message, kind):
+        try:
+            info = self.ros1.decode_camera_info(message)
+            model = camera_model(kind, info["width"], info["height"], info["K"], info["D"], info["R"],
+                                 info["P"], info["frame"], info["distortion_model"])
+            with self.lock:
+                setattr(self, f"{kind}_model", model)
+        except Exception as exc:
+            self.camera_error = str(exc)
+            with self.lock:
+                setattr(self, f"{kind}_model", None)
+                setattr(self, kind, None)
+
+    def _depth(self, message):
+        try:
+            stamp, frame, encoding, pixels = self.ros1.decode_image(message)
+            with self.lock:
+                model = self.depth_model
+            if model is None:
+                return
+            if frame != model.frame or pixels.shape != (model.height, model.width):
+                raise ValueError("depth 이미지와 CameraInfo가 일치하지 않습니다")
+            item = CameraFrame(stamp, depth_meters(pixels, encoding), model)
+            with self.lock:
+                self.depth = item
+                self.recent_depth.append((stamp, pixels, encoding, model))
+                while stamp - self.recent_depth[0][0] > self.DEPTH_BUFFER_S:
+                    self.recent_depth.popleft()
+                self.camera_error = ""
+        except Exception as exc:
+            self.camera_error = str(exc)
+            with self.lock:
+                self.depth = None
+
+    def _color_preview(self, message):
+        import cv2
+        try:
+            stamp, frame, _, data = self.ros1.decode_compressed(message)
+            with self.lock:
+                model = self.color_model
+            if model is None:
+                return
+            bgr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None or frame != model.frame or bgr.shape[:2] != (model.height, model.width):
+                raise ValueError("RGB 미리보기와 CameraInfo가 일치하지 않습니다")
+            with self.lock:
+                self.color = CameraFrame(stamp, bgr[..., ::-1].copy(), model)
+        except Exception as exc:
+            self.camera_error = str(exc)
+
+    def _fresh_color(self):
+        with self.lock:
+            model = self.color_model
+        if model is None:
+            raise ValueError(self._waiting("RGB CameraInfo 대기 중"))
+        requested = time.time()
+        message = self.ros1.fetch(self.master, self.topics["color"], timeout=5.0,
+                                  accept=lambda m: self.ros1.message_stamp(m) >= requested)
+        stamp, frame, encoding, pixels = self.ros1.decode_image(message)
+        if frame != model.frame or pixels.shape[:2] != (model.height, model.width):
+            raise ValueError("RGB 이미지와 CameraInfo가 일치하지 않습니다")
+        if encoding == "bgr8":
+            pixels = pixels[..., ::-1].copy()
+        elif encoding != "rgb8":
+            raise ValueError(f"지원하지 않는 RGB 인코딩: {encoding}")
+        return CameraFrame(stamp, pixels, model)
+
+    def color_T_depth(self):
+        if self.extrinsics is None:
+            raise ValueError(self._waiting("RealSense depth→RGB extrinsics 대기 중"))
+        return self.extrinsics.copy()
+
+    def sample(self, kind, near=None):
+        return self._sample(kind, near, stationary=True)
+
+    def preview(self, kind="depth"):
+        """Read a moving pose for display only; captures must use sample()."""
+        return self._sample(kind, None, stationary=False)
+
+    def _sample(self, kind, near, *, stationary):
+        if self.arm.error:
+            raise ValueError(self.arm.error)
+        with self.lock:
+            serial = self.serial
+        if not serial:
+            raise ValueError(self._waiting("RealSense device_info와 카메라 일련번호 대기 중"))
+        if kind == "color" and stationary:
+            frame = self._fresh_color()
+        else:
+            with self.lock:
+                frame = getattr(self, kind)
+                if kind == "depth" and near is not None and self.recent_depth:
+                    stamp, pixels, encoding, model = min(self.recent_depth, key=lambda r: abs(r[0] - near))
+                    frame = CameraFrame(stamp, depth_meters(pixels, encoding), model)
+        if frame is None:
+            raise ValueError(self._waiting(f"{kind} 프레임 대기 중"))
+        q, dt = (self.history.at_rest if stationary else self.history.at_time)(frame.stamp)
+        return frame, q, dt
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop.set()
+        if self.arm is not None:
+            self.arm.close()
+        for stream in self.streams:
+            stream.close()
 
 
 class DemoSource:
@@ -241,7 +413,7 @@ class DemoSource:
         self.depth = CameraFrame(time.time(), d, self.depth_model)
         self.color = CameraFrame(self.depth.stamp, rgb, self.color_model)
 
-    def sample(self, kind):
+    def sample(self, kind, near=None):
         self._render()
         return getattr(self, kind), np.zeros(6), 0.0
 

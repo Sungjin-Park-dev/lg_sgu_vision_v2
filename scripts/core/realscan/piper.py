@@ -1,40 +1,18 @@
 """AgileX PiPER 전용 — 관절 이름, URDF FK(yourdfpy), CAN 수신 전용 SDK 연결. 로봇 제어 없음."""
 from __future__ import annotations
 
-from pathlib import Path
-import hashlib
 import threading
 import time
 
-import numpy as np
-
-from core.realscan.capture import transform
+from core.realscan.capture import UrdfFK
 
 
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 7))
 
 
-class PiperFK:
+class PiperFK(UrdfFK):
     def __init__(self, urdf, base_frame="base_link", tool_frame="link6"):
-        from yourdfpy import URDF
-        self.path = Path(urdf)
-        self.hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
-        self.robot = URDF.load(str(self.path), load_meshes=False,
-                               load_collision_meshes=False, build_collision_scene_graph=False)
-        if tuple(self.robot.actuated_joint_names) != JOINT_NAMES:
-            raise ValueError("PiPER joint1–joint6 URDF가 필요합니다")
-        self.base_frame, self.tool_frame = base_frame, tool_frame
-        self.lock = threading.Lock()
-        self.pose(np.zeros(6))
-
-    def pose(self, q):
-        q = np.asarray(q, dtype=float)
-        if q.shape != (6,) or not np.isfinite(q).all():
-            raise ValueError("유효한 측정 관절값이 필요합니다")
-        with self.lock:
-            # Measured teach poses must not be clamped or normalized to UR limits.
-            self.robot.update_cfg(dict(zip(JOINT_NAMES, q)))
-            return transform(self.robot.get_transform(self.tool_frame, self.base_frame))
+        super().__init__(urdf, JOINT_NAMES, base_frame, tool_frame, "PiPER joint1–joint6 URDF가 필요합니다")
 
 
 class PassivePiper:

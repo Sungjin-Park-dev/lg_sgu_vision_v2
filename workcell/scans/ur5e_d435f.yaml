@@ -1,0 +1,45 @@
+# Summit 위 UR5e + 손목 D435f 수동 실제 스캔(펜던트 프리드라이브로 이동). 읽기만 한다:
+#   관절   UR RTDE 출력 — 우리 PC 에서 `ssh -N -L 30004:192.168.0.210:30004 robot@192.168.50.165` 터널
+#   카메라 Summit 의 ROS1 RealSense(realsense2_camera rs_camera.launch camera:=wrist_cam) — ROS1 설치 불필요
+# 보정 파일은 workcell/calibration/ur5e_d435f.yaml (이 파일 이름을 따른다).
+version: 1
+robot: ur5e
+label: UR5e
+rtde_host: 127.0.0.1
+rtde_port: 30004
+rtde_hz: 125
+ros1_master: http://192.168.50.165:11311
+base_frame: base_link
+tool_frame: tool0
+urdf: workcell/scans/ur5e_summit.urdf     # 공장 보정 운동학(ur5e_summit_kinematics.yaml)으로 생성
+min_range_m: 0.20                         # D435 848x480 최소 거리 ≈ 0.195 m
+max_range_m: 0.80
+roi_center: [0.50, 0.0, 0.0]              # 처음 값일 뿐 — 앱의 '화면 중앙 물체에 ROI 놓기'로 잡는다
+roi_radius: 0.10
+calibration_validation:
+  max_translation_mm: 5.0
+  max_rotation_deg: 2.0
+capture_guard:
+  stable_s: 0.5
+  step_rad: 0.002
+  max_age_s: 3.0                          # 무선으로 새로 받는 RGB 원본은 찍힌 뒤 0.5–1 s(가끔 3 s)에 도착
+  sync_s: 0.1
+depth_validation:
+  border_m: 0.012
+  stride: 3
+  min_valid_fraction: 0.35
+  min_points: 100
+  max_offset_mm: 3.0
+  max_p95_mm: 5.0
+  max_normal_deg: 3.0
+camera_topics:
+  depth: /brl_robot/wrist_cam/depth/image_rect_raw
+  depth_info: /brl_robot/wrist_cam/depth/camera_info
+  color: /brl_robot/wrist_cam/color/image_raw
+  color_preview: /brl_robot/wrist_cam/color/image_raw/compressed
+  color_info: /brl_robot/wrist_cam/color/camera_info
+  extrinsics: /brl_robot/wrist_cam/extrinsics/depth_to_color
+  device_info: /brl_robot/wrist_cam/realsense2_camera/device_info
+viewer:
+  position: [1.10, -0.90, 0.70]
+  look_at: [0.50, 0.0, 0.0]

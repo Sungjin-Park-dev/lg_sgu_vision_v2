@@ -1,7 +1,7 @@
 """실물 스캔의 촬영 기본 요소 — 로봇·카메라 종류와 무관하다(PiPER 전용은 piper.py).
 
-강체 변환 검증, depth 단위 변환, 원자적 저장, 관절 이력(정지 판정·시간 동기화), 카메라 모델·
-프레임, 촬영 세션(ScanSession → data/{object}/scan/{run}, core.reconstruction.storage 규약).
+강체 변환 검증, depth 단위 변환, 원자적 저장, URDF FK, 관절 이력(정지 판정·시간 동기화), 카메라
+모델·프레임, 촬영 세션(ScanSession → data/{object}/scan/{run}, core.reconstruction.storage 규약).
 
 All transforms map the named right-hand frame into the left-hand frame.
 The scan world is the robot base frame; camera frames are OpenCV/ROS optical.
@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import json
 import os
 import re
@@ -72,6 +73,31 @@ def atomic_bytes(path, value):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+class UrdfFK:
+    """측정 관절값의 URDF FK(yourdfpy). hash 는 보정 identity 에 들어가는 URDF 바이트의 sha256."""
+    def __init__(self, urdf, joint_names, base_frame, tool_frame, mismatch_message):
+        from yourdfpy import URDF
+        self.path = Path(urdf)
+        self.hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        self.robot = URDF.load(str(self.path), load_meshes=False,
+                               load_collision_meshes=False, build_collision_scene_graph=False)
+        self.joint_names = tuple(joint_names)
+        if tuple(self.robot.actuated_joint_names) != self.joint_names:
+            raise ValueError(mismatch_message)
+        self.base_frame, self.tool_frame = base_frame, tool_frame
+        self.lock = threading.Lock()
+        self.pose(np.zeros(len(self.joint_names)))
+
+    def pose(self, q):
+        q = np.asarray(q, dtype=float)
+        if q.shape != (len(self.joint_names),) or not np.isfinite(q).all():
+            raise ValueError("유효한 측정 관절값이 필요합니다")
+        with self.lock:
+            # Measured teach poses must not be clamped or normalized to joint limits.
+            self.robot.update_cfg(dict(zip(self.joint_names, q)))
+            return transform(self.robot.get_transform(self.tool_frame, self.base_frame))
 
 
 class JointHistory:
@@ -158,19 +184,20 @@ def safe_name(value):
 
 class ScanSession:
     """Compatible measured dataset; no simulated scene or ground-truth pose."""
-    def __init__(self, root, object_name, run_name, metadata, *, resume=False):
+    def __init__(self, root, object_name, run_name, metadata, *, resume=False, robot="piper",
+                 world_frame="base_link"):
         self.directory = Path(root) / safe_name(object_name) / "scan" / safe_name(run_name)
         if self.directory.exists() and not resume:
             raise FileExistsError(f"기존 run을 덮어쓰지 않습니다: {self.directory}")
-        self.meta = {**metadata, "object": object_name, "robot": "piper",
-                     "source": metadata.get("source", "piper_real"),
-                     "capture_mode": "manual", "world_frame": "base_link"}
+        self.meta = {**metadata, "object": object_name, "robot": robot,
+                     "source": metadata.get("source", f"{robot}_real"),
+                     "capture_mode": "manual", "world_frame": world_frame}
         self.records = []
         self.profile = None
         self.calibration = None
         if resume:
             capture = json.loads((self.directory / "capture.json").read_text())
-            if (capture["object"] != object_name or capture["robot"] != "piper"
+            if (capture["object"] != object_name or capture["robot"] != robot
                     or capture["source"] != self.meta["source"]):
                 raise ValueError("촬영 원본의 물체·로봇·실제/가상 구분이 현재 설정과 다릅니다")
             for key in ("min_range_m", "max_range_m"):
