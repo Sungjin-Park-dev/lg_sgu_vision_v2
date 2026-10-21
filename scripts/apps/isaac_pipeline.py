@@ -1850,11 +1850,13 @@ class PipelineWindow:
                 self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
                 self._fields["glns_dedup_rad"] = self._row(
                     "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
-                # 현재 base 관절값과 같은 2π 구간의 IK 해만 후보로 쓴다. 한 방향을 두 값
-                # (θ, θ±360°)으로 쓸 수 있는데 현재 구간 쪽만 남기면 어떤 자세도 잃지 않으면서
-                # 베이스가 헛도는 한 바퀴가 애초에 후보에 없다. 끄면 두 구간을 다 쓴다.
-                self._fields["glns_base_section"] = self._checkbox_row(
-                    "same base section as now", True)
+                # base 가 그 지점 쪽을 보는 IK 해만 쓴다. UR 은 손목 위치 하나에 base 해가
+                # 둘(지점을 보는 분기 / 반대쪽을 보고 팔을 베이스 위로 넘기는 분기)이라, 뒤의
+                # 분기가 뽑히면 base 가 반대쪽으로 돈다. 끄면 두 분기를 다 후보로 쓴다.
+                # (현재 base 에 가장 가까운 2π 표현으로 맞추는 것은 항상 한다 — 자세를 잃지
+                #  않는 표현 선택일 뿐이라 켜고 끌 이유가 없다.)
+                self._fields["glns_front_reach"] = self._checkbox_row(
+                    "face the viewpoint (no reach-over)", True)
                 self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
                 self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
                 with ui.HStack(height=28, spacing=6):
@@ -2250,14 +2252,15 @@ class PipelineWindow:
             toks += ["--dedup-rad", str(float(self._get_field("glns_dedup_rad", float)))]
         toks += ["--num-seeds", str(max(1, int(self._get_field("glns_num_seeds", int))))]
         toks += ["--ik-seed", str(IK_RANDOM_SEED)]
-        if self._get_field("glns_base_section", bool):
-            # 저장 IK 재사용 조건에는 안 들어간다(파일은 전체 해를 담고, 필터는 읽을 때 건다).
-            # NB: --base-section-ref=<v> (등호). 음수면 argparse 가 옵션으로 오인한다.
-            try:
-                base_now = float(self._sim_executor.current_joints()[0])
-                toks.append(f"--base-section-ref={base_now:.6f}")
-            except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 필터 없이 진행
-                self._append_log(f"[ik] no current joint state, base section not pinned: {exc}")
+        # 저장 IK 재사용 조건에는 안 들어간다(파일은 전체 해를 담고, 아래 둘은 읽을 때 건다).
+        # NB: --base-ref=<v> (등호). 음수면 argparse 가 옵션으로 오인한다.
+        try:
+            base_now = float(self._sim_executor.current_joints()[0])
+            toks.append(f"--base-ref={base_now:.6f}")
+        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 표현 고정 없이 진행
+            self._append_log(f"[ik] no current joint state, base representation not pinned: {exc}")
+        if self._get_field("glns_front_reach", bool):
+            toks += ["--front-reach-deg", "90"]
         return toks
 
     def _on_load_object(self):

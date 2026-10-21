@@ -32,7 +32,8 @@ from core.glns.candidates import (  # noqa: E402
     _collision_filter_representatives,
     _joint_limits_and_periods,
     _solve_pose_variant_candidates,
-    pin_base_section,
+    keep_front_reach,
+    pin_base_to_current,
 )
 from core.glns.ik_store import (  # noqa: E402
     build_settings,
@@ -121,11 +122,14 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(dedup=True)
     parser.add_argument("--dedup-rad", type=float, default=PT.CANDIDATE_DEDUP_RAD,
                         help=f"[dedup] L∞ 관절 임계 rad (default: {PT.CANDIDATE_DEDUP_RAD})")
-    # 첫 값이 음수일 수 있으니 호출자는 --base-section-ref=<v> (등호) 로 넘긴다.
-    parser.add_argument("--base-section-ref", type=float, default=None,
-                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 후보의 base 를 이 값이 "
-                             "속한 2π 구간의 등가로 다시 표현하고, base 를 비주기 관절로 다뤄 그 "
-                             "구간 안에서만 푼다")
+    # 첫 값이 음수일 수 있으니 호출자는 --base-ref=<v> (등호) 로 넘긴다.
+    parser.add_argument("--base-ref", "--base-section-ref", dest="base_ref", type=float, default=None,
+                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 후보의 base 를 이 값에 "
+                             "가장 가까운 2π 등가로 다시 표현하고, base 를 비주기 관절로 다뤄 그 표현 "
+                             "안에서만 푼다")
+    parser.add_argument("--front-reach-deg", type=float, default=None,
+                        help="주면 base 가 그 지점 방향에서 이 각도 안을 보는 IK 후보만 쓴다(팔을 "
+                             "베이스 위로 넘겨 반대쪽에서 닿는 분기 제외). 보통 90")
     parser.add_argument("--ik-solutions", type=Path, default=None,
                         help="이 저장 IK 파일(ik/{N}/<시각>.h5)을 쓴다. 증강·dedup·seed 옵션은 파일 것을 "
                              "따르고, 물체 pose·작업거리가 지금과 다르면 멈춘다. 없으면 설정이 맞는 최신 "
@@ -321,14 +325,14 @@ def main() -> int:
     world = PT.build_collision_world(args.object)
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
-    if args.base_section_ref is not None:
-        # base 구간을 현재 자세로 고정한다: 후보는 아래에서 그 구간의 등가로 다시 표현하고,
-        # 여기서 base 를 비주기로 바꿔 dedup·비용·unwrap 이 base 의 2π 등가를 아예 만들지
-        # 않게 한다 — 그래야 구간 안에서 "가까워 보이지만 실제로는 한 바퀴" 인 비용이 없다.
+    if args.base_ref is not None:
+        # base 표현을 현재 자세 기준으로 고정한다: 후보는 아래에서 현재 base 에 가장 가까운
+        # 등가로 다시 표현하고, 여기서 base 를 비주기로 바꿔 dedup·비용·unwrap 이 base 의 2π
+        # 등가를 아예 만들지 않게 한다 — 그래야 "가까워 보이지만 실제로는 한 바퀴" 인 비용이 없다.
         joint_periods = joint_periods.copy()
         joint_periods[0] = 0.0
-        print(f"  Base section pinned to the one containing "
-              f"{np.rad2deg(args.base_section_ref):.1f} deg (base treated as non-periodic)")
+        print(f"  Base pinned to the 2pi equivalents nearest the current base "
+              f"{np.rad2deg(args.base_ref):.1f} deg (base treated as non-periodic)")
     periodic_names = [
         name for name, period in zip(
             robot_cfg["robot_cfg"]["kinematics"]["cspace"]["joint_names"], joint_periods)
@@ -423,11 +427,16 @@ def main() -> int:
                               ik_settings, source_viewpoints=source_path,
                               object_name=args.object)
             print(f"  Saved IK for reuse -> {ik_path}")
-    if args.base_section_ref is not None:
-        representatives_raw, candidate_metadata_raw, base_moved, base_removed = pin_base_section(
-            representatives_raw, candidate_metadata_raw, args.base_section_ref, robot_cfg)
-        print(f"  Base section pin: re-expressed {base_moved} candidates into the current 2pi "
-              f"section, dropped {base_removed} (no in-limit equivalent)")
+    if args.base_ref is not None:
+        representatives_raw, candidate_metadata_raw, base_moved, base_removed = pin_base_to_current(
+            representatives_raw, candidate_metadata_raw, args.base_ref, robot_cfg)
+        print(f"  Base pin: re-expressed {base_moved} candidates to the nearest 2pi equivalent, "
+              f"dropped {base_removed} (no in-limit equivalent)")
+    if args.front_reach_deg is not None:
+        representatives_raw, candidate_metadata_raw, front_removed, front_lost = keep_front_reach(
+            representatives_raw, candidate_metadata_raw, args.front_reach_deg)
+        print(f"  Front-reach filter ({args.front_reach_deg:g} deg): removed {front_removed} "
+              f"reach-over candidates; {front_lost} viewpoint(s) lost reachability")
     candidate_counts_raw = np.asarray(
         [len(reps) for reps in representatives_raw], dtype=np.int32,
     )
@@ -702,8 +711,9 @@ def main() -> int:
         "joint_upper_rad": joint_upper.astype(float).tolist(),
         "joint_periods_rad": joint_periods.astype(float).tolist(),
         "joint_unwrapped": True,
-        "base_section_ref_rad": (None if args.base_section_ref is None
-                                 else float(args.base_section_ref)),
+        "base_ref_rad": None if args.base_ref is None else float(args.base_ref),
+        "front_reach_deg": (None if args.front_reach_deg is None
+                            else float(args.front_reach_deg)),
         "delaunay_expand_hops": int(args.delaunay_expand_hops),
         "graph_edge_count": int(len(graph_edges)),
         "glns_mode": args.glns_mode,

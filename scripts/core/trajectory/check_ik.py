@@ -41,7 +41,8 @@ from core.trajectory import (  # noqa: E402
     build_collision_world,
 )
 from core.glns.candidates import (
-    pin_base_section,  # noqa: E402
+    keep_front_reach,  # noqa: E402
+    pin_base_to_current,  # noqa: E402
     _build_pose_variants,
     _collision_filter_representatives,
     _joint_limits_and_periods,
@@ -87,10 +88,13 @@ def _parse_args() -> argparse.Namespace:
                         help="[--tilt-augment] tilt magnitudes (default: 5 10)")
     parser.add_argument("--tilt-azimuths", type=int, default=8,
                         help="[--tilt-augment] evenly spaced tilt azimuths (default: 8)")
-    # 첫 값이 음수일 수 있으니 호출자는 --base-section-ref=<v> (등호) 로 넘긴다.
-    parser.add_argument("--base-section-ref", type=float, default=None,
-                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 해의 base 를 이 값이 "
-                             "속한 2π 구간의 등가로 다시 표현해 센다(저장 파일은 정규화된 원본)")
+    # 첫 값이 음수일 수 있으니 호출자는 --base-ref=<v> (등호) 로 넘긴다.
+    parser.add_argument("--base-ref", "--base-section-ref", dest="base_ref", type=float, default=None,
+                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 해의 base 를 이 값에 "
+                             "가장 가까운 2π 등가로 다시 표현해 센다(저장 파일은 정규화된 원본)")
+    parser.add_argument("--front-reach-deg", type=float, default=None,
+                        help="주면 base 가 그 지점 방향에서 이 각도 안을 보는 IK 해만 도달 가능으로 "
+                             "센다(팔을 베이스 위로 넘겨 반대쪽에서 닿는 분기 제외). 보통 90")
     # Dedup — on by default, matching glns/solve.py.
     parser.add_argument("--no-dedup", dest="dedup", action="store_false",
                         help="keep all IK solutions instead of removing near-duplicates")
@@ -191,13 +195,20 @@ def main() -> None:
     removed = _collision_filter_representatives(representatives, robot_cfg, world_config, metadata)
     # base 구간 고정은 **보는 눈**만 바꾼다: 도달성 집계는 재표현한 집합으로, 저장은 정규화된
     # 원본으로. 저장 파일이 로봇의 현재 구간에 묶이면 로봇이 옮겨갈 때마다 IK 를 다시 풀어야 한다.
-    reps_view, base_moved, base_removed = representatives, 0, 0
-    if args.base_section_ref is not None:
-        reps_view, _meta_view, base_moved, base_removed = pin_base_section(
-            representatives, metadata, args.base_section_ref, robot_cfg)
-        print(f"  Base section pin (ref {np.rad2deg(args.base_section_ref):.1f} deg): "
-              f"re-expressed {base_moved} candidates into that 2pi section, "
-              f"dropped {base_removed} (no in-limit equivalent)")
+    reps_view, meta_view = representatives, metadata
+    base_moved = base_removed = front_removed = front_lost = 0
+    if args.base_ref is not None:
+        reps_view, meta_view, base_moved, base_removed = pin_base_to_current(
+            reps_view, meta_view, args.base_ref, robot_cfg)
+        print(f"  Base pin (current {np.rad2deg(args.base_ref):.1f} deg): re-expressed "
+              f"{base_moved} candidates to the nearest 2pi equivalent, dropped {base_removed} "
+              f"(no in-limit equivalent)")
+    if args.front_reach_deg is not None:
+        reps_view, meta_view, front_removed, front_lost = keep_front_reach(
+            reps_view, meta_view, args.front_reach_deg)
+        print(f"  Front-reach filter (base within {args.front_reach_deg:g} deg of each viewpoint's "
+              f"direction): removed {front_removed} reach-over candidates; {front_lost} viewpoint(s) "
+              f"lost reachability")
     success_counts = np.asarray([len(r) for r in reps_view], dtype=np.int32)
     reachable = success_counts > 0
     reachable_count = int(reachable.sum())
@@ -223,10 +234,13 @@ def main() -> None:
         "reachable": reachable.astype(bool).tolist(),
         "reachable_count": reachable_count,
         "total_ik_success": total,
-        "base_section_ref_rad": (None if args.base_section_ref is None
-                                 else float(args.base_section_ref)),
-        "base_section_moved": int(base_moved),
-        "base_section_removed": int(base_removed),
+        "base_ref_rad": None if args.base_ref is None else float(args.base_ref),
+        "base_pin_moved": int(base_moved),
+        "base_pin_removed": int(base_removed),
+        "front_reach_deg": (None if args.front_reach_deg is None
+                            else float(args.front_reach_deg)),
+        "front_reach_removed": int(front_removed),
+        "front_reach_lost_viewpoints": int(front_lost),
         "created_at": time.time(),
     }
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
