@@ -19,25 +19,22 @@ def _linf(a, b) -> float:
     return float(np.max(np.abs(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64))))
 
 
-def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
-    """방문 순서 + 성분별 방향 결정. 반환 [(성분_index, reversed_bool), ...].
+def rank_component_orders(endpoints, *, strategy="optimized", limit=12):
+    """seam 거리(joint L∞ 합)가 작은 순으로 (방문 순서+방향) 후보 목록. 각 원소 [(성분_index, reversed_bool), …].
 
-    ``optimized``: component 간 seam 거리(joint L∞)를 최소화한다. 작은 K(≤6)는 정확
-    brute-force, 큰 K는 모든 시작 component/방향을 비교하는 greedy를 쓴다.
-    ``fixed``: 입력 순서·원방향 그대로.
-
-    ``home_q`` 는 기존 호출자 호환을 위해 남겨두며 최적화에 쓰지 않는다. 현재 로봇 자세와의
-    관계는 여기서 다루지 않는다 — IK 단계의 base 구간 고정(candidates.pin_base_section)이
-    후보를 현재 구간의 표현으로 맞추고, 검사 순서는 GLNS 가 정한 그대로 둔다.
+    첫 원소가 최선 추정이지만 **추정일 뿐이다** — L∞ 는 계획 가능성을 모른다(실측 sample/75:
+    추정 1위 seam 이 어떤 경로로도 안 풀리고, 2위(성분을 거꾸로 돌아 입구에서 넘기기)는 풀렸다).
+    그래서 join_components 는 이 목록을 차례로 시도한다. 작은 K(≤6)는 전수 나열, 큰 K 는
+    greedy 시작점·방향별 후보. ``fixed`` 는 입력 순서·원방향 하나뿐.
     """
     K = len(endpoints)
     if K <= 1 or strategy == "fixed":
-        return [(i, False) for i in range(K)]
+        return [[(i, False) for i in range(K)]]
     ends = [(np.asarray(e0, np.float64), np.asarray(e1, np.float64)) for (e0, e1) in endpoints]
+    scored = []
     if K <= 6:
         d_btw = [[[[_linf(ends[a][sa], ends[b][sb]) for sb in (0, 1)]
                    for b in range(K)] for sa in (0, 1)] for a in range(K)]
-        best, best_cost = None, float("inf")
         for perm in itertools.permutations(range(K)):
             for bits in itertools.product((0, 1), repeat=K):
                 cost = 0.0
@@ -45,33 +42,34 @@ def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
                     a, b = perm[j], perm[j + 1]
                     # exit(a)=side(0 if reversed else 1), entry(b)=side(1 if reversed else 0)
                     cost += d_btw[a][0 if bits[a] else 1][b][1 if bits[b] else 0]
-                if cost < best_cost - 1e-12:
-                    best_cost, best = cost, (perm, bits)
-        perm, bits = best
-        return [(k, bool(bits[k])) for k in perm]
-    # Larger K: remove HOME anchoring by trying every component/orientation as
-    # the greedy chain's start and retaining the shortest viewpoint-only chain.
-    best_order, best_cost = None, float("inf")
-    for first in range(K):
-        for first_rev in (False, True):
-            order = [(first, first_rev)]
-            remaining = set(range(K)) - {first}
-            cur = ends[first][0 if first_rev else 1]
-            cost = 0.0
-            while remaining:
-                bk, brev, bd = None, False, float("inf")
-                for k in sorted(remaining):
-                    for rev in (False, True):
-                        d = _linf(cur, ends[k][1 if rev else 0])
-                        if d < bd:
-                            bd, bk, brev = d, k, rev
-                order.append((bk, brev))
-                cost += bd
-                cur = ends[bk][0 if brev else 1]
-                remaining.remove(bk)
-            if cost < best_cost - 1e-12:
-                best_order, best_cost = order, cost
-    return best_order
+                scored.append((cost, [(k, bool(bits[k])) for k in perm]))
+    else:
+        # Larger K: greedy chain from every component/orientation as the start.
+        for first in range(K):
+            for first_rev in (False, True):
+                order = [(first, first_rev)]
+                remaining = set(range(K)) - {first}
+                cur = ends[first][0 if first_rev else 1]
+                cost = 0.0
+                while remaining:
+                    bk, brev, bd = None, False, float("inf")
+                    for k in sorted(remaining):
+                        for rev in (False, True):
+                            d = _linf(cur, ends[k][1 if rev else 0])
+                            if d < bd:
+                                bd, bk, brev = d, k, rev
+                    order.append((bk, brev))
+                    cost += bd
+                    cur = ends[bk][0 if brev else 1]
+                    remaining.remove(bk)
+                scored.append((cost, order))
+    scored.sort(key=lambda x: x[0])
+    return [order for _cost, order in scored[:limit]]
+
+
+def choose_component_order(endpoints, home_q=None, *, strategy="optimized"):
+    """최선 추정 순서 하나 (rank_component_orders 의 첫 원소). ``home_q`` 는 호환용, 미사용."""
+    return rank_component_orders(endpoints, strategy=strategy, limit=1)[0]
 
 
 def plan_seams_batched(pairs, *, robot_cfg, world_config, wd_m,
@@ -137,42 +135,72 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     계획해 실제로 짧은 쪽을 채택해야 한다 — L∞ 는 경로 길이의 대리값이 못 된다.
     """
     home = np.asarray(home_q, dtype=np.float64)
-    order = choose_component_order([(c["entry"], c["exit"]) for c in included], home,
-                          strategy=order_strategy)
+    orders = rank_component_orders([(c["entry"], c["exit"]) for c in included],
+                                   strategy=order_strategy)
 
-    oriented = []
-    for idx, rev in order:
-        c = included[idx]
-        traj, mask = c["final_traj"], c["final_is_transit"]
-        kinds_c = c.get("final_kinds")
-        if kinds_c is None:
-            kinds_c = np.full(len(traj), PT.WAYPOINT_INTERPOLATED, dtype=np.int8)
-        kinds_c = np.asarray(kinds_c, dtype=np.int8)
-        if rev:
-            traj, mask = traj[::-1].copy(), mask[::-1].copy()
-            kinds_c = kinds_c[::-1].copy()      # 라벨은 행에 붙어 있으므로 같이 뒤집는다
-        oriented.append({"cid": c["cid"], "traj": traj, "mask": mask, "kinds": kinds_c,
-                         "entry": traj[0], "exit": traj[-1]})
+    def _orient(order):
+        out = []
+        for idx, rev in order:
+            c = included[idx]
+            traj, mask = c["final_traj"], c["final_is_transit"]
+            kinds_c = c.get("final_kinds")
+            if kinds_c is None:
+                kinds_c = np.full(len(traj), PT.WAYPOINT_INTERPOLATED, dtype=np.int8)
+            kinds_c = np.asarray(kinds_c, dtype=np.int8)
+            if rev:
+                traj, mask = traj[::-1].copy(), mask[::-1].copy()
+                kinds_c = kinds_c[::-1].copy()      # 라벨은 행에 붙어 있으므로 같이 뒤집는다
+            out.append({"cid": c["cid"], "traj": traj, "mask": mask, "kinds": kinds_c,
+                        "entry": traj[0], "exit": traj[-1], "rev": rev})
+        return out
 
-    # seam pairs(방문 순서): [front HOME?] inter-comp… [back HOME?]
-    pairs, labels = [], []
-    if home_bracket:
-        pairs.append((home, oriented[0]["entry"]))
-        labels.append(f"HOME→comp{oriented[0]['cid']}")
-    for j in range(len(oriented) - 1):
-        pairs.append((oriented[j]["exit"], oriented[j + 1]["entry"]))
-        labels.append(f"comp{oriented[j]['cid']}→comp{oriented[j + 1]['cid']}")
-    if home_bracket:
-        pairs.append((oriented[-1]["exit"], home))
-        labels.append(f"comp{oriented[-1]['cid']}→HOME")
+    def _pairs(oriented):
+        # seam pairs(방문 순서): [front HOME?] inter-comp… [back HOME?]
+        pairs, labels = [], []
+        if home_bracket:
+            pairs.append((home, oriented[0]["entry"]))
+            labels.append(f"HOME→comp{oriented[0]['cid']}")
+        for j in range(len(oriented) - 1):
+            pairs.append((oriented[j]["exit"], oriented[j + 1]["entry"]))
+            labels.append(f"comp{oriented[j]['cid']}→comp{oriented[j + 1]['cid']}")
+        if home_bracket:
+            pairs.append((oriented[-1]["exit"], home))
+            labels.append(f"comp{oriented[-1]['cid']}→HOME")
+        return pairs, labels
 
-    seam_results = plan_seams_batched(
-        pairs, robot_cfg=robot_cfg, world_config=world_config, wd_m=wd_m,
-        enable_via_ladder=enable_via_ladder, motion_planner=motion_planner,
-    )
-    for lbl, (seg, _route) in zip(labels, seam_results):
-        if seg is None:
-            raise SeamFailure(lbl)
+    # 순서 추정(L∞)은 계획 가능성을 모른다. 1위가 막히면 다음 순서·방향으로 간다 — 같은
+    # 끝점 쌍은 한 번만 계획한다(순서가 달라도 seam 은 끝점 쌍으로 정해진다).
+    seam_cache: dict = {}
+
+    def _key(q_from, q_to):
+        return (tuple(np.round(q_from, 6)), tuple(np.round(q_to, 6)))
+
+    chosen = None
+    for attempt, order in enumerate(orders, start=1):
+        oriented = _orient(order)
+        pairs, labels = _pairs(oriented)
+        todo = [(i, pr) for i, pr in enumerate(pairs) if _key(*pr) not in seam_cache]
+        if todo:
+            planned = plan_seams_batched(
+                [pr for _i, pr in todo], robot_cfg=robot_cfg, world_config=world_config,
+                wd_m=wd_m, enable_via_ladder=enable_via_ladder, motion_planner=motion_planner,
+            )
+            for (_i, pr), res in zip(todo, planned):
+                seam_cache[_key(*pr)] = res
+        seam_results = [seam_cache[_key(*pr)] for pr in pairs]
+        failed = [lbl for lbl, (seg, _route) in zip(labels, seam_results) if seg is None]
+        desc = " -> ".join(f"comp{o['cid']}{'(rev)' if o['rev'] else ''}" for o in oriented)
+        if not failed:
+            if attempt > 1:
+                print(f"  order attempt {attempt}/{len(orders)}: {desc} - all seams planned")
+            chosen = (oriented, pairs, labels, seam_results)
+            break
+        print(f"  order attempt {attempt}/{len(orders)}: {desc} - seam failed: "
+              f"{', '.join(failed)}" + (" - trying the next order" if attempt < len(orders) else ""))
+    if chosen is None:
+        raise SeamFailure(f"no component order/direction could be bridged "
+                          f"({len(orders)} tried, via-home included)")
+    oriented, pairs, labels, seam_results = chosen
 
     seam_trajs = [
         resample_seam(q_from, q_to, seg, robot_cfg=robot_cfg, world_config=world_config,
@@ -205,6 +233,7 @@ def join_components(included, home_q, *, robot_cfg, world_config, wd_m,
     )
     return {
         "order": [o["cid"] for o in oriented],
+        "order_desc": " -> ".join(f"comp{o['cid']}{'(rev)' if o['rev'] else ''}" for o in oriented),
         "labels": labels,
         "seam_routes": [r for _seg, r in seam_results],
         "n_seams": len(pairs),

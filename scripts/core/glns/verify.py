@@ -551,8 +551,7 @@ def main() -> int:
                 print("=" * 64)
                 return 2
             hb = args.home_bracket
-            seq = (["HOME"] if hb else []) + [f"comp{c}" for c in jr["order"]] + \
-                  (["HOME"] if hb else [])
+            seq = (["HOME"] if hb else []) + [jr["order_desc"]] + (["HOME"] if hb else [])
             print(f"  order({args.order}): {' -> '.join(seq)}")
             print(f"  seams {jr['n_seams']}: routes={jr['seam_routes']}")
             g = jr["gate"]
