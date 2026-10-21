@@ -27,11 +27,12 @@ data/{물체}/mesh/source.obj                              ← 준비물
       ↓
 data/{물체}/viewpoint/{N}/viewpoints.h5           ← Viewpoint Studio
       ↓
-data/{물체}/ik/{N}/{옵션}_{시각}.h5                      ← Solve IK
+data/{물체}/ik/{N}/{시각}.h5                      ← Solve IK
       ↓
 data/{물체}/trajectory/{N}/solution_{시각}.h5            ← 방문 순서
       ↓
-data/{물체}/trajectory/{N}/trajectory_{시각}.csv (+ .npz) ← 실행 경로
+data/{물체}/trajectory/{N}/scan_{시각}.csv (+ .npz)       ← 검사 경로
+data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv         ← tilt 경로
       ↓
 Isaac 미리보기  또는  실제 로봇
 ```
@@ -633,6 +634,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 
 | 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
+| `IK solutions (h5)` | 비어 있음 | 어느 IK 해로 풀지. 비우면 `Solve IK` 옵션에 맞는 가장 최근 파일(없으면 새로 푼다). `Browse...`로 직접 고르거나 `Latest`로 최신을 넣는다. `Check and Save IK`가 끝나면 방금 저장한 파일이 자동으로 들어간다. 고른 파일은 자기 옵션(roll/tilt/dedup/seed)을 가져오고, 물체 위치가 지금과 다르면 생성이 멈추고 이유를 로그에 쓴다 |
 | `--delaunay-expand-hops` | 2 | 어느 정도 떨어진 지점끼리 이어도 되는지. 키우면 더 좋은 순서를 찾을 수 있지만 느려진다 |
 | `--max-candidates-per-viewpoint` | 32 | 한 지점당 고려할 팔 자세 후보 수 |
 
@@ -699,10 +701,10 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 **화면 · 상태 줄 읽는 법**
 
 ```
-t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv
+t=2.14s / 6.31s  (wp 140/411)  playing: move_to_start_20260916_143012.csv
                                         └ 지금 고스트가 트는 파일
 
-CSV path: .../trajectory/74/trajectory.csv
+CSV path: .../trajectory/74/scan_20260916_143012.csv
           └ Execute Scan 이 실행할 파일
 ```
 
@@ -779,11 +781,11 @@ CSV path: .../trajectory/74/trajectory.csv
 | --- | --- |
 | 물체 메시 | `data/{물체}/mesh/source.obj` |
 | Viewpoint | `data/{물체}/viewpoint/{N}/viewpoints.h5` |
-| IK 해 | `data/{물체}/ik/{N}/{옵션}_{시각}.h5` — 옵션은 `nominal`/`roll`/`tilt`/`rolltilt`(+`_nodedup`) |
+| IK 해 | `data/{물체}/ik/{N}/{시각}.h5` — 이름은 저장 시각뿐이고, 어떤 옵션(roll/tilt/dedup/seed)과 물체 위치로 푼 것인지는 파일 안에 적혀 있다 |
 | 방문 순서 | `data/{물체}/trajectory/{N}/solution_{시각}.h5` |
-| 검사 경로 | `data/{물체}/trajectory/{N}/trajectory_{시각}.csv` |
-| Tilt 경로 | `data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}_{시각}.csv` |
-| 이동 경로 | `data/{물체}/trajectory/{N}/home_move_*.csv` |
+| 검사 경로 | `data/{물체}/trajectory/{N}/scan_{시각}.csv` |
+| Tilt 경로 | `data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv` — `행`은 기준 궤적에서 중심으로 고른 행 번호 |
+| 이동 경로 | `data/{물체}/trajectory/{N}/move_to_start_{시각}.csv`, `move_to_home_{시각}.csv` |
 | 워크셀 정의 | `workcell/scenes/{이름}.yaml` |
 
 ### 경로 파일 안에 무엇이 들어 있나

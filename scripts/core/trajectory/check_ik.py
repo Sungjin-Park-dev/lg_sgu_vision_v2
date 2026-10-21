@@ -12,8 +12,9 @@ It runs the SAME pipeline glns/solve.py feeds into GTSP — pose augmentation
      by the object placement and the augmentation/dedup settings they were solved
      with, so Generate Trajectory (solve.py) can reuse them instead of re-solving.
 
-Augmentation/dedup are opt-in flags; the save path encodes them under
-``data/{object}/ik/{N}/<nominal|roll|tilt|rolltilt>[_nodedup].h5`` so modes coexist.
+Augmentation/dedup are opt-in flags. The file is saved as
+``data/{object}/ik/{N}/{YYYYMMDD_HHMMSS}.h5`` (never overwritten); the options and the
+object pose live in its attrs, which is what readers match against.
 """
 
 from __future__ import annotations
@@ -239,9 +240,7 @@ def main() -> None:
     # 덮어쓰지 않는다 — 스탬프를 붙여 새 파일로. solve.py 는 설정이 맞는 최신 파일을 찾는다.
     save_path = (
         Path(args.save_ik) if args.save_ik
-        else ik_solutions_path(h5_path, roll_augment=args.roll_augment,
-                               tilt_augment=args.tilt_augment, dedup=args.dedup,
-                               stamp=config.run_stamp())
+        else ik_solutions_path(h5_path, stamp=config.run_stamp())
     )
     n_saved = save_ik_solutions(
         save_path, representatives, metadata, settings,

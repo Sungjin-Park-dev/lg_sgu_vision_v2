@@ -38,7 +38,10 @@ from core.glns.ik_store import (  # noqa: E402
     build_settings,
     find_ik_solutions,
     ik_solutions_path,
+    load_ik_solutions,
+    read_ik_settings,
     save_ik_solutions,
+    settings_match,
 )
 from core.glns.problem import (  # noqa: E402
     build_gtsp_problem,
@@ -123,6 +126,10 @@ def _parse_args() -> argparse.Namespace:
                         help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 후보의 base 를 이 값이 "
                              "속한 2π 구간의 등가로 다시 표현하고, base 를 비주기 관절로 다뤄 그 "
                              "구간 안에서만 푼다")
+    parser.add_argument("--ik-solutions", type=Path, default=None,
+                        help="이 저장 IK 파일(ik/{N}/<시각>.h5)을 쓴다. 증강·dedup·seed 옵션은 파일 것을 "
+                             "따르고, 물체 pose·작업거리가 지금과 다르면 멈춘다. 없으면 설정이 맞는 최신 "
+                             "파일, 그것도 없으면 새로 푼다")
     parser.add_argument("--no-ik-reuse", action="store_true",
                         help="저장된 IK(ik_*.h5) 재사용을 끄고 항상 새로 계산한다")
     parser.add_argument("--max-candidates-per-viewpoint", type=int,
@@ -329,6 +336,36 @@ def main() -> int:
     ]
     print(f"  Periodic joint lifting enabled: {periodic_names}")
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
+    if args.ik_solutions is not None:
+        # 사용자가 고른 IK 파일이 옵션의 진실이다: 증강·dedup·seed 는 파일 것을 따른다. 물체
+        # pose 와 작업거리만은 지금 요청과 같아야 한다 — 물체를 옮긴 뒤의 옛 해로 풀면 안 된다.
+        if args.no_ik_reuse:
+            raise SystemExit("--ik-solutions and --no-ik-reuse contradict each other")
+        stored = read_ik_settings(args.ik_solutions)
+        if stored is None:
+            raise SystemExit(f"--ik-solutions {args.ik_solutions}: missing or not an IK solutions file")
+        want_pose = {"object_position": config.TARGET_OBJECT["position"],
+                     "object_quat_wxyz": config.TARGET_OBJECT["rotation"],
+                     "working_distance_m": float(source["wd_m"])}
+        if not settings_match(want_pose, stored):
+            raise SystemExit(
+                f"--ik-solutions {args.ik_solutions}: it was solved for a different object pose "
+                f"or working distance (file: pos {np.round(stored['object_position'], 4).tolist()}, "
+                f"now: {np.round(want_pose['object_position'], 4).tolist()}). "
+                "Run Check and Save IK again for the current placement.")
+        args.roll_augment = bool(stored["roll_augment"])
+        args.roll_step_deg = float(stored["roll_step_deg"])
+        args.tilt_augment = bool(stored["tilt_augment"])
+        args.tilt_angles_deg = [float(x) for x in np.atleast_1d(stored["tilt_angles_deg"])]
+        args.tilt_azimuths = int(stored["tilt_azimuths"])
+        args.dedup = bool(stored["dedup"])
+        if args.dedup:
+            args.dedup_rad = float(stored["dedup_rad"])
+        args.num_seeds = int(stored["num_seeds"])
+        args.ik_seed = int(stored["ik_seed"])
+        print(f"  IK options taken from the picked file: roll={args.roll_augment} "
+              f"tilt={args.tilt_augment} dedup={args.dedup} seeds={args.num_seeds} "
+              f"({args.ik_solutions})")
     lock_nominal_wrist3 = not (args.roll_augment or args.tilt_augment)
     # Check-and-Save-IK 가 같은 물체 pose·증강·dedup 으로 저장해둔 IK 가 있으면 그대로 쓰고,
     # 아니면 새로 계산해 그 자리에 저장한다(다음 실행/모드가 재사용). ik_store 가 진실이다.
@@ -343,12 +380,16 @@ def main() -> int:
         lock_nominal_wrist3=lock_nominal_wrist3,
     )
     # 저장은 항상 새 스탬프 파일로(덮어쓰기 없음). 재사용은 설정이 맞는 **가장 최근** 파일.
-    ik_path = ik_solutions_path(source_path, roll_augment=args.roll_augment,
-                                tilt_augment=args.tilt_augment, dedup=args.dedup,
-                                stamp=config.run_stamp())
-    found = None if args.no_ik_reuse else find_ik_solutions(
-        source_path, roll_augment=args.roll_augment, tilt_augment=args.tilt_augment,
-        dedup=args.dedup, want_settings=ik_settings)
+    ik_path = ik_solutions_path(source_path, stamp=config.run_stamp())
+    if args.ik_solutions is not None:
+        picked = load_ik_solutions(args.ik_solutions, ik_settings)
+        if picked is None:
+            raise SystemExit(f"--ik-solutions {args.ik_solutions}: unreadable or corrupt")
+        found = (picked, args.ik_solutions)
+        print(f"  Using the IK solutions file you picked: {args.ik_solutions}")
+    else:
+        found = None if args.no_ik_reuse else find_ik_solutions(
+            source_path, want_settings=ik_settings)
     loaded, ik_path_used = (found if found is not None else (None, None))
     if loaded is not None and len(loaded[0]) != n_viewpoints:
         print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path_used})")

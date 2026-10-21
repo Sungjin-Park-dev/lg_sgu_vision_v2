@@ -19,14 +19,14 @@ import), GLNS 에서 충돌-free 였던 자세는 여기서도 충돌-free 다 �
 viewpoint component 간 seam 거리(joint L∞)로만 최적화하고 ``_stitch_pieces``로
 봉합한다. HOME 접근/복귀는 기본적으로 별도 계획하며, ``--home-bracket``을 명시한
 경우에만 양 끝에 붙인다. seam 은 절대 조용히 드롭하지 않고 실패 시 hard-error
-(``trajectory.csv/.npz`` 미생성). 각 성분의 resample/drop 은 성분 내부로 한정돼
+(``scan_*.csv/.npz`` 미생성). 각 성분의 resample/drop 은 성분 내부로 한정돼
 (``interpolate_and_resample`` 의 "최장 run keep" 이 성분 경계를 넘지 못함).
 
 실행:
     uv run --no-sync scripts/core/glns/verify.py \
         --result data/sample/trajectory/74/solution.h5 [--join] [--order optimized]
 
-**출력은 joined 하나다** — ``trajectory.csv`` + ``trajectory.npz``
+**출력은 joined 하나다** — ``scan_<시각>.csv`` + ``scan_<시각>.npz``
 (joints/ee_positions/is_transit/times/meta)로, ``trajectory_studio.py`` 가 transit 포함 실제
 motion 을 재생한다. 성분별 중간 궤적은 메모리에만 두고 파일로 남기지 않는다(표로만 보고).
 viewpoint 1개짜리 성분도 join 에 포함한다 — 예전에는 건너뛰어 조용히 빠졌다.
@@ -92,7 +92,7 @@ def _parse_args() -> argparse.Namespace:
                              "드롭(viewpoint skip). graph-direct 만으로 도는지 확인용")
     parser.add_argument("--join", action=argparse.BooleanOptionalAction, default=True,
                         help="충돌-free 성분들을 seam transit으로 하나의 연속 "
-                             "scan 궤적(trajectory.csv)으로 연결 (default: on)")
+                             "scan 궤적(scan_*.csv)으로 연결 (default: on)")
     parser.add_argument("--order", choices=("optimized", "fixed"), default="optimized",
                         help="성분 방문 순서: optimized(seam 거리 최소) / fixed(id 순서). default optimized")
     parser.add_argument("--home-bracket", action=argparse.BooleanOptionalAction,
@@ -109,9 +109,9 @@ def _parse_args() -> argparse.Namespace:
                         help="with --home-transitions-only, plan both legs or only "
                              "HOME→start / end→HOME (default: both)")
     parser.add_argument("--tag", type=str, default=None,
-                        help="산출물 이름 접미사 — trajectory_<tag>.csv/.npz 로 쓴다. 보통 해 파일과 "
+                        help="산출물 이름 접미사 — scan_<tag>.csv/.npz 로 쓴다. 보통 해 파일과 "
                              "같은 실행 스탬프(YYYYMMDD_HHMMSS)를 넘겨 덮어쓰지 않게 한다. "
-                             "없으면 trajectory.csv (덮어씀)")
+                             "없으면 scan.csv (덮어씀)")
     PT.add_timing_cli_arguments(parser)
     args = parser.parse_args()
     if not args.result.exists():
@@ -361,8 +361,8 @@ def main() -> int:
     world_config = PT.build_collision_world(object_name)
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 
-    # 스캔 산출물 이름 — --tag 가 있으면 trajectory_<tag>, 없으면 trajectory (덮어씀).
-    joined_stem = f"trajectory_{args.tag}" if args.tag else "trajectory"
+    # 스캔 산출물 이름 — --tag 가 있으면 scan_<tag>(보통 tag = 실행 시각), 없으면 scan (덮어씀).
+    joined_stem = f"scan_{args.tag}" if args.tag else "scan"
 
     scan_joints = None
     if args.home_transitions_only:
@@ -507,7 +507,7 @@ def main() -> int:
               "preserve the GLNS path (scan-edge collision / transit failure).")
     print("=" * 64)
 
-    # --- 성분 연결: 하나의 연속 실행 궤적(trajectory.csv) ---
+    # --- 성분 연결: 하나의 연속 실행 궤적(scan_<시각>.csv) ---
     if args.join:
         print("JOIN COMPONENTS -> single continuous trajectory")
         print("-" * 64)

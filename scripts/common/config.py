@@ -459,16 +459,17 @@ def get_solution_path(object_name: str, num_viewpoints: int,
 def get_trajectory_artifact_path(object_name: str, num_viewpoints: int,
                                  role: str | None = None, suffix: str = ".csv",
                                  stamp: str | None = None) -> Path:
-    """실행 궤적 산출물 경로.
+    """실행 궤적 산출물 경로 — 이름이 곧 "무엇을 하는 경로인지 + 언제 만들었는지" 다.
 
-    명명 규칙은 ``{역할}[_{세부}][_{스탬프}]`` 이고 백엔드 토큰은 없다 — 생산자가 GLNS
-    하나뿐이다.
+    명명 규칙은 ``{역할}[_{세부}]_{스탬프}`` 이고 백엔드 토큰은 없다 — 생산자가 GLNS 하나뿐이다.
 
-        role=None                 → trajectory.csv        (스캔 궤적)
-        role='home_to_start'      → trajectory_home_to_start.csv
-        role='tilt_vp0060', stamp → trajectory_tilt_vp0060_20260916_143012.csv
+        role=None,  stamp         → scan_20260916_143012.csv            (검사 경로)
+        role='tilt_row0060', stamp → tilt_row0060_20260916_143012.csv   (그 행을 중심으로 한 tilt)
+        role='move_to_start', stamp → move_to_start_20260916_143012.csv (Plan to Start)
+
+    stamp 를 안 주면 ``{역할}.csv`` (덮어씀) — trajectory_studio 같은 고정 이름 호출자용.
     """
-    name = "trajectory" if not role else f"trajectory_{role}"
+    name = role or "scan"
     if stamp:
         name = f"{name}_{stamp}"
     return get_trajectory_path(object_name, num_viewpoints, f"{name}{suffix}")

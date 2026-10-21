@@ -4,10 +4,10 @@
 Trajectory, glns/solve.py)이 그대로 재사용하기 위한 공유 포맷/경로/검증이다. 저장 대상은
 solve.py 가 GTSP 에 넣기 직전의 원시 후보(증강→IK→dedup→충돌필터 이후)와 같은 모양이다.
 
-경로는 ``data/{object}/ik/{N}/`` (mesh·viewpoint·trajectory 와 같은 층) 밑에 옵션
-(roll/tilt/dedup)을 파일명으로 반영해 모드끼리 덮어쓰지 않게 하고(``ik/{N}/<...>.h5``),
-유효성은 파일 안 attrs 로 판정한다 — **물체 pose 와 증강·dedup·IK 설정이 전부 일치**해야
-재사용하고, 다르면 miss 로 보고 재계산한다.
+경로는 ``data/{object}/ik/{N}/{YYYYMMDD_HHMMSS}.h5`` (mesh·viewpoint·trajectory 와 같은 층).
+이름은 저장 시각뿐이다 — 옵션(roll/tilt/dedup/seed)과 물체 pose 는 파일 안 attrs 에 있고,
+유효성도 거기서 판정한다. 자동 재사용은 **물체 pose 와 증강·dedup·IK 설정이 전부 일치**하는
+가장 최근 파일이고, 사용자가 파일을 직접 고르면 그 파일의 옵션을 따른다(물체 pose 만 맞으면 된다).
 """
 
 from __future__ import annotations
@@ -31,49 +31,67 @@ _VARIANT_DTYPE = "U16"
 _FLOAT_ATOL = 1e-6
 
 
-def augmentation_suffix(*, roll_augment: bool, tilt_augment: bool, dedup: bool) -> str:
-    """옵션 조합을 파일명 접미사로 — 모드가 서로 다른 파일을 갖도록."""
-    aug = "".join(part for part, on in (("roll", roll_augment), ("tilt", tilt_augment)) if on)
-    name = aug or "nominal"
-    return name if dedup else f"{name}_nodedup"
-
-
-def ik_solutions_path(source_viewpoints, *, roll_augment: bool, tilt_augment: bool,
-                      dedup: bool, stamp: str | None = None) -> Path:
-    """저장 IK 경로 — ``data/{object}/ik/{N}/<옵션>[_<스탬프>].h5``.
-
-    소스 ``data/{object}/viewpoint/{N}/viewpoints*.h5`` 에서 object 루트와 N 을 딴다.
-    ``stamp`` 를 주면 덮어쓰지 않는다 — 같은 옵션으로 다시 풀어도 이전 해가 남는다.
-    읽는 쪽은 find_ik_solutions() 로 **설정이 맞는 가장 최근 파일**을 고른다.
-    """
+def ik_dir_for(source_viewpoints) -> Path:
+    """소스 ``data/{object}/viewpoint/{N}/viewpoints*.h5`` → ``data/{object}/ik/{N}``."""
     src = Path(source_viewpoints)
     n_dir = src.parent                       # data/{object}/viewpoint/{N}
     object_root = n_dir.parent.parent        # data/{object}
-    suffix = augmentation_suffix(roll_augment=roll_augment, tilt_augment=tilt_augment,
-                                 dedup=dedup)
-    name = f"{suffix}_{stamp}.h5" if stamp else f"{suffix}.h5"
-    return object_root / "ik" / n_dir.name / name
+    return object_root / "ik" / n_dir.name
 
 
-def find_ik_solutions(source_viewpoints, *, roll_augment: bool, tilt_augment: bool,
-                      dedup: bool, want_settings: dict):
-    """설정이 맞는 저장 IK 중 **가장 최근** 것 → ((representatives, metadata), path) 또는 None.
+def ik_solutions_path(source_viewpoints, *, stamp: str | None = None) -> Path:
+    """저장 IK 경로 — ``data/{object}/ik/{N}/{stamp}.h5``. 덮어쓰지 않는다(시각이 이름)."""
+    from common import config
+    return ik_dir_for(source_viewpoints) / f"{stamp or config.run_stamp()}.h5"
 
-    후보는 ``<옵션>_*.h5``(스탬프본)와 ``<옵션>.h5``(스탬프 이전 파일) 전부이고 mtime 내림차순
-    으로 본다. 설정이 다른 파일(물체 pose 가 바뀐 옛 해 등)은 load_ik_solutions 가 None 을
+
+def list_ik_solutions(source_viewpoints) -> list[Path]:
+    """그 viewpoint 세트의 저장 IK 파일 전부, 최근 것부터. 옛 이름(<옵션>_<시각>.h5)도 포함."""
+    d = ik_dir_for(source_viewpoints)
+    files = [f for f in d.glob("*.h5") if not f.name.endswith(".tmp")] if d.is_dir() else []
+    files.sort(key=lambda f: f.stat().st_mtime_ns, reverse=True)
+    return files
+
+
+def find_ik_solutions(source_viewpoints, *, want_settings: dict):
+    """설정이 전부 맞는 저장 IK 중 **가장 최근** 것 → ((representatives, metadata), path) 또는 None.
+
+    설정이 다른 파일(물체 pose 가 바뀐 옛 해, 다른 증강 옵션 등)은 load_ik_solutions 가 None 을
     돌려주므로 건너뛴다 — 최신이라고 무조건 쓰지 않는다.
     """
-    base = ik_solutions_path(source_viewpoints, roll_augment=roll_augment,
-                             tilt_augment=tilt_augment, dedup=dedup)
-    stem = base.stem
-    candidates = list(base.parent.glob(f"{stem}_*.h5")) + ([base] if base.exists() else [])
-    candidates = [c for c in candidates if not c.name.endswith(".tmp")]
-    candidates.sort(key=lambda c: c.stat().st_mtime_ns, reverse=True)
-    for path in candidates:
+    for path in list_ik_solutions(source_viewpoints):
         loaded = load_ik_solutions(path, want_settings)
         if loaded is not None:
             return loaded, path
     return None
+
+
+def read_ik_settings(path) -> dict | None:
+    """저장 IK 파일의 설정 attrs(build_settings 의 키 전부). 없거나 포맷이 다르면 None."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with h5py.File(path, "r") as f:
+            if f.attrs.get("format") != STORE_FORMAT:
+                return None
+            got = {}
+            for key in SETTINGS_KEYS:
+                if key not in f.attrs:
+                    return None
+                v = f.attrs[key]
+                got[key] = (np.asarray(v, dtype=np.float64) if isinstance(v, np.ndarray)
+                            else v.item() if hasattr(v, "item") else v)
+    except OSError:
+        return None
+    return got
+
+
+SETTINGS_KEYS = ("object_position", "object_quat_wxyz", "working_distance_m",
+                 "roll_augment", "roll_step_deg", "tilt_augment", "tilt_angles_deg",
+                 "tilt_azimuths", "dedup", "dedup_rad", "num_seeds", "ik_seed",
+                 "lock_nominal_wrist3")
+POSE_KEYS = ("object_position", "object_quat_wxyz", "working_distance_m")
 
 
 def build_settings(*, object_position, object_quat_wxyz, working_distance_m,
@@ -99,6 +117,11 @@ def build_settings(*, object_position, object_quat_wxyz, working_distance_m,
         "ik_seed": int(ik_seed),
         "lock_nominal_wrist3": bool(lock_nominal_wrist3),
     }
+
+
+def settings_match(want: dict, got: dict) -> bool:
+    """``want`` 의 키마다 ``got`` 이 같은 값인지 (pose 는 허용오차, quaternion 은 부호 무시)."""
+    return _settings_match(want, got)
 
 
 def _settings_match(want: dict, got: dict) -> bool:

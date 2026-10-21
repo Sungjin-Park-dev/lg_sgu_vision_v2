@@ -56,8 +56,10 @@ uv run scripts/apps/isaac_pipeline.py
 ```text
 mesh/source.obj
   → viewpoint/{N}/viewpoints.h5
-  → ik/{N}/{옵션}_{시각}.h5              (Solve IK — 덮어쓰지 않음)
+  → ik/{N}/{시각}.h5              (Solve IK — 덮어쓰지 않음)
   → trajectory/{N}/solution_{시각}.h5    (GLNS solve — 같은 생성은 같은 시각)
-  → trajectory/{N}/trajectory_{시각}.csv|npz   (GLNS verify)
+  → trajectory/{N}/scan_{시각}.csv|npz          (GLNS verify — 검사 경로)
+  → trajectory/{N}/tilt_row{행}_{시각}.csv|npz (Generate Tilt Motion)
+  → trajectory/{N}/move_to_start_{시각}.csv   (Plan to Start / HOME)
   → Isaac preview 또는 ROS2 실행
 ```

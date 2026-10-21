@@ -38,7 +38,7 @@ def _joint_acc_per_node(dq, dt):
     return np.abs(np.diff(vj, axis=0)) / ((dt[:-1] + dt[1:]) / 2.0)[:, None]
 
 
-def _limit_joint_acceleration(joints, dt_min, a_lim, max_iter=100):
+def _limit_joint_acceleration(joints, dt_min, a_lim, max_iter=300):
     """관절별 가속도 상한을 만족하도록 구간 시간을 늘린다 → (dt, 노드 속도).
 
     경로 위 속도 프로파일이다. 구간 길이는 관절 L∞(가장 많이 도는 관절), 속도 상한은

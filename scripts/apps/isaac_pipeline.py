@@ -13,7 +13,7 @@ an Omni UI window whose panels follow the order of the work:
     F) Execute trajectory on Isaac UR20 or real robot       (subprocess)
 
 B is split out from D because it is a separate, reusable step: its output
-(data/{object}/ik/{N}/*.h5) is keyed by the candidate options, and D reuses that
+(data/{object}/ik/{N}/<stamp>.h5) carries its options in attrs, and D reuses that
 file only when the options still match. Speed sits between them because it
 changes nothing about IK and everything about what D writes.
 
@@ -87,6 +87,7 @@ WAYPOINT_KIND_COLOR = {
 WAYPOINT_KIND_COLOR_UNKNOWN = 0xFF8888CC   # 라벨 없는 옛 CSV / 읽기 실패
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
+IK_H5_PATH_RE = re.compile(r"IK_SOLUTIONS_H5 (\S+)")      # check_ik.py 가 저장 경로를 찍는 줄
 
 
 def rotvec_to_quat(rv) -> np.ndarray:
@@ -1002,6 +1003,9 @@ class PipelineWindow:
         # 방금 만든 tilt CSV 로 바뀌어(생성 결과를 바로 재생하는 동작) 다음 tilt 의 기준이
         # 스캔이 아니라 직전 tilt 가 돼버린다.
         self._tilt_base_csv_model = ui.SimpleStringModel("")
+        # Generate 가 쓸 IK 해 파일. 비우면 solve 가 Solve IK 옵션에 맞는 최신 파일을 고르고
+        # (없으면 새로 푼다), 채우면 그 파일만 쓴다. Check and Save IK 가 방금 쓴 파일로 채운다.
+        self._ik_h5_model = ui.SimpleStringModel("")
 
         # ONE editable camera spec (mm) shared by both inspection cameras. 프리뷰 고스트와
         # 실 로봇은 같은 물리 카메라의 두 표현이라, 스펙이 갈리면 프리뷰가 실제와 다른 화각을
@@ -1874,6 +1878,19 @@ class PipelineWindow:
                 # 입력은 위 두 패널이 정한다: viewpoint h5("Load Object & Viewpoints"),
                 # IK 후보 옵션("Solve IK"), 시간 매김("Motion Speed"). 물체 pose 는 스테이지의
                 # 살아있는 기즈모 값이다.
+                # 어느 IK 해로 풀지는 여기서 고른다. IK 파일은 스탬프로 쌓이므로(ik/{N}/<옵션>_<시각>.h5)
+                # "최신" 이 늘 원하는 것은 아니다 — 물체를 옮기기 전 것을 다시 쓰고 싶을 수도 있다.
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("IK solutions (h5)", width=140)
+                    self._lock(ui.StringField(model=self._ik_h5_model))
+                    self._lock(ui.Button("Browse...", width=90, clicked_fn=self._on_browse_ik_h5))
+                    self._lock(ui.Button("Latest", width=70, clicked_fn=self._on_pick_latest_ik))
+                ui.Label(
+                    "Empty = the newest saved file whose options and object pose match the "
+                    "Solve IK settings (solves IK afresh if there is none). A picked file "
+                    "brings its own options; only the object pose must still match, or "
+                    "Generate stops. Check and Save IK fills this with the file it just wrote.",
+                    height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
                 with ui.CollapsableFrame("Scan options (GLNS)", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 4)
@@ -2882,6 +2899,15 @@ class PipelineWindow:
 
         def on_line(line: str):
             self._append_log(line)
+            m = IK_H5_PATH_RE.search(line)
+            if m:
+                saved = m.group(1)
+                if not Path(saved).is_absolute():
+                    saved = str(PROJECT_ROOT / saved)
+                # 방금 푼 해가 다음 Generate 의 입력이 되는 것이 자연스럽다. 이전 선택은 덮는다 —
+                # 새로 풀었다는 것은 그걸 쓰겠다는 뜻이다.
+                self._ik_h5_model.set_value(saved)
+                self._append_log(f"[ik] Generate will use: {saved}")
 
         def on_exit(rc: int):
             cancelled = self._ik_runner.cancelled
@@ -3757,6 +3783,16 @@ class PipelineWindow:
         augment = (f" {' '.join(self._ik_candidate_tokens())}"
                    f" --ik-batch-size {self._ik_batch()}"
                    f" --max-candidates-per-viewpoint {max_candidates}")
+        ik_pick = self._ik_h5_model.get_value_as_string().strip()
+        if ik_pick:
+            if not Path(ik_pick).exists():
+                self._append_log(f"[generate] IK solutions file not found: {ik_pick}")
+                return
+            augment += f" --ik-solutions {ik_pick!r}"
+            self._append_log(f"[generate] IK solutions: {ik_pick}")
+        else:
+            self._append_log("[generate] IK solutions: newest saved file matching the Solve IK "
+                             "settings (fresh solve if none)")
         from common import config as _config
 
         # 해와 궤적은 한 폴더에 살고 **같은 스탬프**를 나눠 갖는다 — 덮어쓰지 않는다.
@@ -3843,7 +3879,9 @@ class PipelineWindow:
         # 계획 산출물은 자기가 브래킷하는 스캔 궤적 옆에 둔다. 스캔 CSV 가 없으면(return 만
         # 가능) h5 경로에서 물체/viewpoint 수를 읽어 같은 레이아웃 자리를 만들고, 그것도
         # 없으면 물체 폴더까지만. 어느 경우든 data/{object}/ 밖으로 나가지 않는다.
-        name = f"home_move_{transition}.csv"
+        # 이름 = 역할 + 시각. approach 는 "현재 → 스캔 시작", return 은 "현재 → HOME".
+        role = "move_to_start" if transition == "approach" else "move_to_home"
+        name = f"{role}_{_config.run_stamp()}.csv"
         if csv and Path(csv).parent.is_dir():
             return target_q, Path(csv).parent / name
         _, n_vp = self._parse_h5_meta(self._h5_path_model.get_value_as_string().strip())
@@ -4421,11 +4459,13 @@ class PipelineWindow:
         """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙 + 실행 스탬프(덮어쓰기 없음)."""
         from common import config as _config
 
-        role = f"tilt_vp{index:04d}"
+        # 중심은 기준 궤적의 **행**이다(viewpoint 행일 수도, 보간·플래닝 행일 수도 있다) — 이름도
+        # 그렇게 말한다. 어느 기준 궤적의 행인지는 npz meta 의 base_trajectory 가 남긴다.
+        role = f"tilt_row{index:04d}"
         stamp = _config.run_stamp()
         if n_vp is not None:
             return _config.get_trajectory_artifact_path(obj, n_vp, role=role, stamp=stamp)
-        return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}_{stamp}.csv"
+        return _config.DATA_ROOT / obj / "trajectory" / f"{role}_{stamp}.csv"
 
     def _on_generate_tilt(self):
         """스캔 궤적의 한 행을 중심으로 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
@@ -4596,6 +4636,35 @@ class PipelineWindow:
         start_dir = self._start_dir_for(self._csv_path_model, "trajectory")
         self._open_file_picker("Select trajectory CSV", self._csv_path_model,
                                "CSV (*.csv)", ".csv", start_dir)
+
+    def _on_browse_ik_h5(self):
+        """Generate 가 쓸 IK 해 파일을 고른다 (data/{object}/ik/{N}/)."""
+        start_dir = self._start_dir_for(self._ik_h5_model, "ik")
+        self._open_file_picker("Select IK solutions .h5", self._ik_h5_model,
+                               "HDF5 (*.h5)", ".h5", start_dir)
+
+    def _on_pick_latest_ik(self):
+        """이 viewpoint 세트의 가장 최근 IK 파일(ik/{N}/<시각>.h5)을 칸에 넣는다.
+
+        디렉터리 규칙은 ik_store 가 소유한다 — 파일로 불러 쓴다(core.glns 패키지를 import
+        하면 cuRobo 가 딸려온다). 물체 pose 가 맞는지는 solve 가 열어서 확인한다.
+        """
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[ik] pick a viewpoints .h5 first")
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ik_store_for_app", PROJECT_ROOT / "scripts" / "core" / "glns" / "ik_store.py")
+        ik_store = importlib.util.module_from_spec(spec)
+        sys.modules["ik_store_for_app"] = ik_store
+        spec.loader.exec_module(ik_store)
+        files = ik_store.list_ik_solutions(h5)
+        if not files:
+            self._append_log(f"[ik] no saved IK in {ik_store.ik_dir_for(h5)} - run Check and Save IK")
+            return
+        self._ik_h5_model.set_value(str(files[0]))
+        self._append_log(f"[ik] latest: {files[0]}")
 
     def _on_browse_tilt_base(self):
         """Tilt 의 기준 궤적을 고른다 — Preview/Execute 의 CSV 칸은 건드리지 않는다."""
