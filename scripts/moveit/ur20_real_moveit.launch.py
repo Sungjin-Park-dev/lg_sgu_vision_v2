@@ -45,6 +45,7 @@ sys.path.insert(0, MOVEIT_DIR)
 import moveit_assets            # noqa: E402  (리포 자산 → MoveIt 형식 파생)
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
 PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
+MOCK_UPDATE_RATE_YAML = os.path.join(MOVEIT_DIR, 'ur_config', 'ur20_mock_update_rate.yaml')
 # robot_description for move_group / cuMotion. 기구학·카메라 기하는 workcell 의 URDF 가
 # 소유한다 — cuRobo/Isaac/viser 와 같은 파일이라 카메라를 옮겨도 자동으로 따라온다.
 # (여기 description 의 ros2_control 은 무의미하다. 실행은 ur_robot_driver 의 컨트롤러
@@ -97,22 +98,30 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     moveit_assets.prepare_initial_positions()
 
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
+    use_mock = str(context.perform_substitution(
+        LaunchConfiguration('use_mock_hardware'))).lower() not in ('false', '0')
+    ur_control_args = {
+        'ur_type': ur_type,
+        'robot_ip': LaunchConfiguration('robot_ip'),
+        'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
+        'launch_rviz': 'false',
+        # 드라이버가 scaled 를 켜 둔 채 뜨지 않게 한다. 어느 컨트롤러를 켤지는 아래
+        # mode_gate 가 앱의 /looksgood/mode 를 보고 정한다 — 앱이 말하기 전엔 아무것도
+        # 실로봇을 못 움직인다.
+        'activate_joint_controller': 'false',
+        # ur_control → ur_rsp 로 내려가는 launch configuration. 우리 래퍼가 드라이버
+        # xacro 를 포함하면서 initial_positions_file 만 바꾼다.
+        'description_file': moveit_assets.START_POSE_XACRO,
+    }
+    if use_mock:
+        # mock 은 실로봇의 500 Hz RTDE 주기를 맞출 이유가 없다 — 125 Hz 로 내려 RT 권한 없는
+        # 컨테이너에서 "Overrun detected" 가 쏟아지지 않게 한다(ur20_mock_update_rate.yaml).
+        # 실로봇은 드라이버 기본(500 Hz)을 쓴다.
+        ur_control_args['update_rate_config_file'] = MOCK_UPDATE_RATE_YAML
     ur_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ur_robot_driver'), 'launch', 'ur_control.launch.py')),
-        launch_arguments={
-            'ur_type': ur_type,
-            'robot_ip': LaunchConfiguration('robot_ip'),
-            'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
-            'launch_rviz': 'false',
-            # 드라이버가 scaled 를 켜 둔 채 뜨지 않게 한다. 어느 컨트롤러를 켤지는 아래
-            # mode_gate 가 앱의 /looksgood/mode 를 보고 정한다 — 앱이 말하기 전엔 아무것도
-            # 실로봇을 못 움직인다.
-            'activate_joint_controller': 'false',
-            # ur_control → ur_rsp 로 내려가는 launch configuration. 우리 래퍼가 드라이버
-            # xacro 를 포함하면서 initial_positions_file 만 바꾼다.
-            'description_file': moveit_assets.START_POSE_XACRO,
-        }.items(),
+        launch_arguments=ur_control_args.items(),
     )
     mode_gate = ExecuteProcess(
         cmd=['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mode_gate.py'),

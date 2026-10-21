@@ -19,6 +19,16 @@ services:
     ipc: host
     stdin_open: true
     tty: true
+    # ros2_control 의 controller_manager 는 500 Hz(2 ms) 루프를 FIFO 실시간 우선순위로 돌리려
+    # 한다. 기본 docker 권한(SYS_NICE 없음, rtprio 0)에서는 "Could not enable FIFO RT
+    # scheduling policy" 로 포기하고 일반 스레드로 돌다가, 머신이 바쁘면(Isaac Sim 렌더링,
+    # 다른 사용자 스택) 선점당해 "Overrun detected … missed its desired rate of 500 Hz" 가
+    # 쏟아진다. mock 에서는 경고일 뿐이지만 실로봇에서는 RTDE 주기를 놓치는 일이므로 권한을 준다.
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      memlock: -1
     environment:
       DISPLAY: ${DISPLAY:-:1}
       # host 네트워크라 같은 머신의 다른 ROS 2 노드(기본 도메인 0)가 전부 보인다. 남의

@@ -86,6 +86,15 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py
 
 실제 로봇 옵션은 [로봇 실행 워크플로](../workflows/execute-on-robot.md)의 안전 확인 후 적용한다. Run 모드를 바꾸면 대응하는 ROS 스택도 다시 시작한다.
 
+**`Overrun detected! The controller manager missed its desired rate of 500 Hz` 가 계속 찍히면** —
+오류가 아니라 경고다. UR 드라이버는 controller_manager 를 실로봇 RTDE 주기(500 Hz = 2 ms)로
+돌리며 FIFO 실시간 우선순위를 요구하는데, 기본 docker 권한에서는 못 얻고(`Could not enable FIFO
+RT scheduling policy`) 머신이 바쁘면(Isaac Sim 렌더링, 같은 머신의 다른 스택) 2 ms 를 넘긴다.
+mock 에서는 결과에 영향이 없고, launch 가 mock 일 때 125 Hz 로 내리므로 거의 안 보인다. 실로봇은
+500 Hz 를 유지해야 하므로 컨테이너에 실시간 권한을 준다 — `docker/compose.yaml` 의 `cap_add:
+SYS_NICE` / `ulimits: rtprio: 99` (그 줄이 들어가기 전에 만든 컨테이너는 다시 만들어야 적용된다).
+`Maybe failed to update robot state, time diff: 0.003s` 는 RViz 의 무해한 잡음이다.
+
 **로봇이 0 자세로 쭉 뻗은 채 RViz·Isaac 이 안 따라오면** — UR 드라이버 버전 문제다. NVIDIA
 isaac-ros 저장소가 `ros-jazzy-ur-*` 를 `99.2.0` 으로 내보내고, 핀이 없으면 apt 가 ros.org 의
 `3.8.0` 대신 그걸 고른다. 그 빌드는 Jazzy 의 `joint_trajectory_controller`/`realtime_tools` 와
