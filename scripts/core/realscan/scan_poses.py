@@ -17,10 +17,18 @@ board_check.py --scan-board --save-frame 으로 잰 JSON. 보드를 돌렸으면
 기준이라 같은 자세를 물체가 옮겨진 만큼 평행이동한 결과가 된다. 물체·받침대 상자는 작업 좌표로 준다.
 끝에 pose_tour 에 줄 충돌 상자(--obstacle, base 기준)를 같이 출력한다.
 
+회전판: --view 높이각 방위 로 시점 방향을 직접 주고(방위 0 = 물체에서 로봇 쪽, base 기준) --turns 4 를 주면,
+판(보드·받침대·물체)을 물체 중심을 지나는 수직축으로 90° 씩 돌린 4 경우 모두에서 코너·손가락을 검사한다 —
+물체를 회전판 중심에 두면 같은 자세를 판을 돌릴 때마다 그대로 쓴다. 시드(--views-from/--poses, 여럿 가능)는
+IK 출발점으로만 쓰고, 방향이 가까운 것부터 고른다.
+
     python scripts/core/realscan/scan_poses.py --views-from data/blue_cube/scan/20261020_020042 \\
         --work-frame output/piper_scan_poses/frame.json --object 0 0 0.068 0.056 0.056 0.058 \\
         --keep-out 0 0 0.021 0.05 0.05 0.042 --fingers-from data/blue_cube/scan/20261020_020042 \\
         --out output/piper_scan_poses/stand.yaml
+    # 회전판: 위 1 + 45° 2 + 20° 2, 판 90° 씩 4번
+    python scripts/core/realscan/scan_poses.py --poses output/piper_scan_poses/*.yaml \\
+        --view 90 0 --view 45 -60 --view 45 -105 --view 20 -30 --view 20 -75 --turns 4 ...
 """
 from __future__ import annotations
 
@@ -70,6 +78,26 @@ def board_corners(spec):
     return np.c_[gx.ravel(), gy.ravel(), np.zeros(gx.size)]
 
 
+def spin(angle, centre):
+    """작업 좌표에서 centre 를 지나는 z 축으로 angle[rad] 돌리는 변환 (회전판)."""
+    c, s_ = np.cos(angle), np.sin(angle)
+    T = np.eye(4)
+    T[:2, :2] = [[c, -s_], [s_, c]]
+    T[:2, 3] = np.asarray(centre)[:2] - T[:2, :2] @ np.asarray(centre)[:2]
+    return T
+
+
+def view_directions(views, base_T_world, centre):
+    """(높이각, 방위)[deg] → 작업 좌표 시점 방향(물체→카메라). 방위 0 = 물체에서 로봇 base 쪽, + = 위에서 봐서 반시계."""
+    c = base_T_world[:3, :3] @ centre + base_T_world[:3, 3]
+    ref = np.arctan2(-c[1], -c[0])
+    out = []
+    for elev, az in views:
+        e, a = np.radians(elev), ref + np.radians(az)
+        out.append(base_T_world[:3, :3].T @ [np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+    return out
+
+
 def view_pose(direction, x_hint, centre, distance):
     """centre 를 보는 카메라 자세(z 광축) — direction 은 물체→카메라, roll 은 x_hint 에 가깝게."""
     z = -np.asarray(direction, float) / np.linalg.norm(direction)
@@ -117,36 +145,57 @@ class Scene:
 
 
 def plan_views(ffk, seeds, base_T_world, tool_T_depth, scene, centre, *, distances, raise_deg,
-               min_corners, finger_clear, max_move_deg, max_reach, lo, hi):
-    """시드 관절값마다 → 통과한 가장 가까운 시점(dict) 또는 실패 사유(dict, ok=False)."""
+               min_corners, finger_clear, max_move_deg, max_reach, lo, hi, directions=None, turns=1,
+               seeds_per_view=4):
+    """시드 관절값마다(directions 를 주면 방향마다) → 통과한 가장 가까운 시점(dict) 또는 실패 사유(dict, ok=False).
+
+    directions: 작업 좌표의 시점 방향(물체→카메라) — IK 시드는 카메라 방향이 가까운 seeds_per_view 개.
+    turns: 판을 centre 를 지나는 z 축으로 360/turns° 씩 돌린 모든 경우의 최솟값으로 코너·손가락을 본다
+    (판을 돌리는 대신 카메라를 반대로 돌려 같은 장면에서 잰다).
+    """
     world_T_base = np.linalg.inv(base_T_world)
+    cams = [world_T_base @ ffk.pose(q) @ tool_T_depth for q in seeds]      # 작업 좌표의 시드 카메라
+    seed_dirs = [(c[:3, 3] - centre) / np.linalg.norm(c[:3, 3] - centre) for c in cams]
+    if directions is None:
+        jobs = [(d, [i]) for i, d in enumerate(seed_dirs)]
+    else:
+        jobs = [(d / np.linalg.norm(d), list(np.argsort([-(s @ d) for s in seed_dirs])[:seeds_per_view]))
+                for d in map(np.asarray, directions)]
+    top = np.radians(85 if directions is None else 90)
+    spins = [spin(2 * np.pi * k / turns, centre) for k in range(turns)]
     out = []
-    for number, q0 in enumerate(seeds, 1):
-        seed_cam = world_T_base @ ffk.pose(q0) @ tool_T_depth          # 작업 좌표의 시드 카메라
-        d0 = seed_cam[:3, 3] - centre
-        az, elev0 = np.arctan2(d0[1], d0[0]), np.arcsin(d0[2] / np.linalg.norm(d0))
+    for number, (d0, candidates) in enumerate(jobs, 1):
+        az, elev0 = np.arctan2(d0[1], d0[0]), np.arcsin(np.clip(d0[2], -1, 1))
         best = first_fail = None
         for distance in distances:                                      # 가까운 거리부터 — 처음 통과한 것
             for d_elev in raise_deg:
-                elev = np.clip(elev0 + np.radians(d_elev), np.radians(5), np.radians(85))
+                elev = np.clip(elev0 + np.radians(d_elev), np.radians(5), top)
                 direction = np.array([np.cos(az) * np.cos(elev), np.sin(az) * np.cos(elev), np.sin(elev)])
-                T = view_pose(direction, seed_cam[:3, 0], centre, distance)
-                q = solve_ik(ffk, base_T_world @ T @ np.linalg.inv(tool_T_depth), [q0], lo, hi)
-                if q is None:
-                    continue
-                entry = {"number": number, "q": q, "distance_m": float(distance), "elev_deg": float(np.degrees(elev)),
-                         "seed_elev_deg": float(np.degrees(elev0)), "azimuth_deg": float(np.degrees(az)),
-                         "seed_distance_m": float(np.linalg.norm(d0)),
-                         "reach_m": wrist_reach(ffk.frames(q)), "move_deg": float(np.degrees(np.max(np.abs(q - q0)))),
-                         "corners": scene.visible_corners(T)}
-                entry["finger_clear_m"], entry["finger_low_m"] = scene.finger_clearance(T)
-                entry["ok"] = (entry["reach_m"] <= max_reach and entry["move_deg"] <= max_move_deg
-                               and entry["corners"] >= min_corners and entry["finger_clear_m"] >= finger_clear
-                               and entry["finger_low_m"] >= finger_clear)
-                if entry["ok"]:
-                    best = entry
+                for i in candidates:
+                    q0 = seeds[i]
+                    T = view_pose(direction, cams[i][:3, 0], centre, distance)
+                    q = solve_ik(ffk, base_T_world @ T @ np.linalg.inv(tool_T_depth), [q0], lo, hi)
+                    if q is None:
+                        continue
+                    corners = [scene.visible_corners(S @ T) for S in spins]
+                    clear = [scene.finger_clearance(S @ T) for S in spins]
+                    entry = {"number": number, "seed": int(i) + 1, "q": q, "distance_m": float(distance),
+                             "elev_deg": float(np.degrees(elev)), "seed_elev_deg": float(np.degrees(elev0)),
+                             "azimuth_deg": float(np.degrees(az)),
+                             "seed_distance_m": float(np.linalg.norm(cams[i][:3, 3] - centre)),
+                             "reach_m": wrist_reach(ffk.frames(q)),
+                             "move_deg": float(np.degrees(np.max(np.abs(q - q0)))),
+                             "corners": min(corners), "corners_by_turn": corners,
+                             "finger_clear_m": min(c for c, _ in clear), "finger_low_m": min(z for _, z in clear)}
+                    entry["ok"] = (entry["reach_m"] <= max_reach and entry["move_deg"] <= max_move_deg
+                                   and entry["corners"] >= min_corners and entry["finger_clear_m"] >= finger_clear
+                                   and entry["finger_low_m"] >= finger_clear)
+                    if entry["ok"]:
+                        best = entry
+                        break
+                    first_fail = first_fail or entry
+                if best:
                     break
-                first_fail = first_fail or entry
             if best:
                 break
         out.append(best or first_fail or {"number": number, "ok": False, "reason": "IK 해 없음"})
@@ -155,13 +204,16 @@ def plan_views(ffk, seeds, base_T_world, tool_T_depth, scene, centre, *, distanc
 
 def load_seeds(args):
     import yaml
-    if args.views_from:
-        run = Path(args.views_from)
-        run = run if run.is_absolute() else ROOT / run
-        frames = json.loads((run / "capture.json").read_text())["frames"]
-        return [np.asarray(f["q"], float) for f in frames], str(run.relative_to(ROOT))
-    data = yaml.safe_load(Path(args.poses).read_text())
-    return [np.radians(np.asarray(q, float)) for q in data["poses_deg"]], args.poses
+    seeds, names = [], []
+    for path in args.views_from or args.poses:
+        path = Path(path)
+        path = path if path.is_absolute() else ROOT / path
+        if args.views_from:
+            seeds += [np.asarray(f["q"], float) for f in json.loads((path / "capture.json").read_text())["frames"]]
+        else:
+            seeds += [np.radians(np.asarray(q, float)) for q in yaml.safe_load(path.read_text())["poses_deg"]]
+        names.append(str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path))
+    return seeds, ", ".join(names)
 
 
 def load_work_frame(path):
@@ -198,12 +250,18 @@ def load_fingers(run, color_size):
     return np.concatenate(points), mask
 
 
-def obstacle_for_tour(base_T_world, boxes, margin=0.01):
-    """pose_tour --obstacle 용 base 기준 축 정렬 상자 — 상자들 꼭짓점을 감싸고 margin 만큼 키운다."""
+def obstacle_for_tour(base_T_world, boxes, margin=0.01, turns=1, axis=(0, 0)):
+    """pose_tour --obstacle 용 base 기준 축 정렬 상자 — 상자들 꼭짓점을 감싸고 margin 만큼 키운다.
+
+    turns > 1: 상자들을 axis(작업 좌표 x, y)를 지나는 z 축으로 360/turns° 씩 돌린 것까지 감싼다 (회전판).
+    """
     corners = []
-    for c, s in boxes:
-        for sign in np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).T.reshape(-1, 3):
-            corners.append(base_T_world[:3, :3] @ (np.asarray(c) + sign * np.asarray(s) / 2) + base_T_world[:3, 3])
+    for k in range(turns):
+        S = spin(2 * np.pi * k / turns, axis)
+        for c, s in boxes:
+            for sign in np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).T.reshape(-1, 3):
+                p = S[:3, :3] @ (np.asarray(c) + sign * np.asarray(s) / 2) + S[:3, 3]
+                corners.append(base_T_world[:3, :3] @ p + base_T_world[:3, 3])
     corners = np.array(corners)
     lo, hi = corners.min(axis=0) - margin, corners.max(axis=0) + margin
     lo[2] = max(lo[2], 0.0)
@@ -213,8 +271,13 @@ def obstacle_for_tour(base_T_world, boxes, margin=0.01):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--views-from", help="시점 방향·IK 시드: 촬영 run 폴더 (capture.json 관절값)")
-    src.add_argument("--poses", help="시점 방향·IK 시드: 자세 YAML (poses_deg)")
+    src.add_argument("--views-from", nargs="+", help="시점 방향·IK 시드: 촬영 run 폴더 (capture.json 관절값)")
+    src.add_argument("--poses", nargs="+", help="시점 방향·IK 시드: 자세 YAML (poses_deg)")
+    p.add_argument("--view", type=float, nargs=2, action="append", metavar=("ELEV", "AZ"),
+                   help="시점 방향을 직접: 높이각·방위 [deg] (방위 0 = 물체에서 로봇 쪽, + = 위에서 봐서 반시계, "
+                        "base 기준). 주면 시드는 IK 출발점으로만 쓴다")
+    p.add_argument("--turns", type=int, default=1,
+                   help="회전판: 판을 물체 중심 수직축으로 360/N° 씩 돌린 N 경우 모두에서 코너·손가락 검사")
     p.add_argument("--work-frame", required=True,
                    help="작업 좌표의 base 위치: 보드 작업 좌표 run 폴더 또는 board_check.py --save-frame JSON")
     p.add_argument("--object", type=float, nargs=6, required=True, metavar=("CX", "CY", "CZ", "SX", "SY", "SZ"),
@@ -224,8 +287,8 @@ def main():
     p.add_argument("--fingers-from", help="손가락이 찍힌 run 폴더(벌린 그리퍼) — 없으면 손가락 검사를 건너뛴다")
     p.add_argument("--distances", type=float, nargs="+", default=[0.16, 0.17, 0.18, 0.19, 0.20, 0.22],
                    help="물체 중심 ↔ depth 카메라 거리 후보 [m] — 앞의 것부터")
-    p.add_argument("--raise-deg", type=float, nargs="+", default=[-10, 0, 8, 15, 20],
-                   help="시드 높이각에 더해 볼 값 [deg] — 앞의 것부터")
+    p.add_argument("--raise-deg", type=float, nargs="+",
+                   help="시점 높이각에 더해 볼 값 [deg] — 앞의 것부터 (기본: 시드 방향 -10 0 8 15 20, --view 0 5 10)")
     p.add_argument("--min-corners", type=int, default=26, help="계산상 보이는 보드 코너 최소 (실제 ~55–60%%)")
     p.add_argument("--finger-clear", type=float, default=0.025, help="손가락 ↔ 상자·보드 최소 거리 [m]")
     p.add_argument("--max-move-deg", type=float, default=60, help="시드 관절값에서 최대 변화 [deg]")
@@ -234,6 +297,10 @@ def main():
     p.add_argument("--config", default=str(ROOT / "workcell/scans/piper_d405.yaml"))
     p.add_argument("--calibration", default=str(ROOT / "workcell/calibration/piper_d405.yaml"))
     args = p.parse_args()
+    if args.turns < 1:
+        p.error("--turns 는 1 이상")
+    if args.raise_deg is None:
+        args.raise_deg = [0, 5, 10] if args.view else [-10, 0, 8, 15, 20]
 
     import yaml
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -256,33 +323,41 @@ def main():
         print("⚠️ --fingers-from 이 없어 손가락 충돌·가림을 검사하지 않습니다")
     scene = Scene(board_corners(cfg["scan_board"]), boxes, fingers, mask,
                   np.asarray(color["K"], float).reshape(3, 3), size, cal["identity"]["color_T_depth"])
-    rows = plan_views(ffk, seeds, base_T_world, tool_T_depth, scene, np.asarray(args.object[:3]),
+    centre = np.asarray(args.object[:3])
+    directions = view_directions(args.view, base_T_world, centre) if args.view else None
+    rows = plan_views(ffk, seeds, base_T_world, tool_T_depth, scene, centre,
                       distances=args.distances, raise_deg=args.raise_deg, min_corners=args.min_corners,
                       finger_clear=args.finger_clear, max_move_deg=args.max_move_deg, max_reach=args.max_reach,
-                      lo=lo, hi=hi)
+                      lo=lo, hi=hi, directions=directions, turns=args.turns)
     kept = []
     for r in rows:
         if "q" not in r:
             print(f"#{r['number']:2d} {r['reason']}")
             continue
-        print(f"#{r['number']:2d} 방위 {r['azimuth_deg']:4.0f}° 높이각 {r['seed_elev_deg']:3.0f}→{r['elev_deg']:3.0f}° | "
+        view = (f"시점 높이각 {args.view[r['number'] - 1][0]:3.0f}° 방위 {args.view[r['number'] - 1][1]:+4.0f}° → "
+                f"높이각 {r['elev_deg']:3.0f}° (시드 #{r['seed']})" if args.view else
+                f"방위 {r['azimuth_deg']:4.0f}° 높이각 {r['seed_elev_deg']:3.0f}→{r['elev_deg']:3.0f}°")
+        corners = "/".join(map(str, r["corners_by_turn"])) if args.turns > 1 else f"{r['corners']:2d}"
+        print(f"#{r['number']:2d} {view} | "
               f"{r['seed_distance_m'] * 100:.0f}→{r['distance_m'] * 100:.0f} cm {'통과' if r['ok'] else '실패'} | "
-              f"코너 {r['corners']:2d} | 손가락-상자 {r['finger_clear_m'] * 100:4.1f} cm, 최저 {r['finger_low_m'] * 100:4.1f} cm | "
+              f"코너 {corners} | 손가락-상자 {r['finger_clear_m'] * 100:4.1f} cm, 최저 {r['finger_low_m'] * 100:4.1f} cm | "
               f"뻗음 {r['reach_m'] * 100:.1f} cm | 관절 변화 {r['move_deg']:.0f}°")
         if r["ok"]:
             kept.append(r)
-    obstacle = obstacle_for_tour(base_T_world, boxes)
+    obstacle = obstacle_for_tour(base_T_world, boxes, turns=args.turns, axis=centre[:2])
     out = Path(args.out)
     out = out if out.is_absolute() else ROOT / out
     out.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"# scan_poses.py — 시점 {source}, 작업 좌표 {args.work_frame}",
-             f"# 물체 {args.object}, 받침대 등 {args.keep_out}",
+             f"# 물체 {args.object}, 받침대 등 {args.keep_out}"
+             + (f", 판 {360 / args.turns:g}° 씩 {args.turns}번 돌림" if args.turns > 1 else ""),
              f"# pose_tour 충돌 상자(base): --obstacle {' '.join(f'{v:.3f}' for v in obstacle)}",
              "# 각 줄: 관절값[deg] — 주석: 원래 시점 번호·물체 중심까지 거리·높이각·계산 코너·손가락 여유",
              "poses_deg:"]
     for r in kept:
         lines.append(f"- {yaml.safe_dump([round(float(x), 3) for x in np.degrees(r['q'])], default_flow_style=True).strip()}"
-                     f"  # #{r['number']} {r['distance_m'] * 100:.0f}cm 높이각 {r['elev_deg']:.0f}° 코너 {r['corners']} "
+                     f"  # #{r['number']} {r['distance_m'] * 100:.0f}cm 높이각 {r['elev_deg']:.0f}°"
+                     + (f" 방위 {args.view[r['number'] - 1][1]:+.0f}°" if args.view else "") + f" 코너 {r['corners']} "
                      f"손가락 {r['finger_clear_m'] * 100:.1f}cm")
     out.write_text("\n".join(lines) + "\n")
     print(f"{len(kept)}/{len(rows)}개 → {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out}")

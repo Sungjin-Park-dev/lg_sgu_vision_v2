@@ -188,6 +188,16 @@ python scripts/core/realscan/scan_poses.py --views-from data/blue_cube/scan/2026
   --out output/piper_scan_poses/stand.yaml
 ```
 - 물체를 받침대에 올려 보드째(클립보드 등 움직일 수 있는 판) 돌리면 반대쪽 면도 같은 run 에서 찍힌다 — 위치를 보드 기준으로 재므로 물체가 판 위에서 움직이지만 않으면 된다. 돌린 뒤의 미리보기·"팔로 계산한 위치와 차이"는 맞지 않는다(작업 좌표를 잡을 때의 보드 위치 기준). 돌린 뒤 보드를 다시 재서(`board_check.py --scan-board --save-frame`) `scan_poses.py` 를 다시 돌리면 같은 자세를 물체가 옮겨진 만큼 평행이동한 둘째 바퀴 자세가 나온다.
+- **회전판(수동)**: 회전판 → 보드 판 → 받침대 → 물체를 쌓아 테이프·점착 고무로 고정하고, 물체를 회전판 **중심**에 둔다. 그러면 판을 돌려도 base 기준 물체 위치가 그대로라 **자세 파일 하나를 돌릴 때마다 그대로** 쓴다(다시 재거나 자세를 다시 만들 필요 없음). 각도는 대략이면 된다 — 위치는 매 장 보드로 잰다. `scan_poses.py --view 높이각 방위`(방위 0 = 물체에서 로봇 쪽, + = 위에서 봐서 반시계)로 시점을 직접 주고 `--turns 4` 로 판을 90° 씩 돌린 4 경우 모두에서 코너·손가락을 검사한다(출력 코너 `22/21/22/21` = 돌림별). 방위 두 개를 45° 떨어뜨리면 90° 씩 4번 돌려 45° 간격이 된다. 실제로는 회전 중심이 보드 중심과 1–2 cm 어긋나기 쉽다(2026-10-20 ship: 14 mm, 돌릴 때마다 물체가 12–18 mm 옮겨짐) — 그래서 돌릴 때마다 위 자세에서 `board_check.py --scan-board --save-frame` 으로 다시 재고 그 판 위치로 `scan_poses.py`(`--turns` 없이)를 다시 돌린다(팔은 안 움직이고 10초). 같은 시드를 주면 관절이 몇 도만 바뀐다. 앱의 '보드로 작업 좌표 설정'은 보드에서 ~33 cm 면 D405 잡음으로 depth P95 가 5 mm 를 넘으므로 1번(위) 촬영 자세(~25–29 cm)에서 누른다. 드라이버 속도 1% 는 자세마다 12–60초를 기다리므로 5% 를 권한다.
+
+```bash
+python scripts/core/realscan/scan_poses.py --poses output/piper_scan_poses/*.yaml \
+  --view 90 0 --view 45 -60 --view 45 -105 --view 20 -30 --view 20 -75 --turns 4 \
+  --work-frame output/piper_scan_poses/turntable_frame.json --object 0 0 0.06 0.105 0.068 0.04 \
+  --keep-out 0 0 0.021 0.05 0.05 0.042 --fingers-from data/blue_cube/scan/20261020_020042 \
+  --min-corners 20 --out output/piper_scan_poses/turntable.yaml
+# 판 0° → pose_tour --capture → 위 자세로 → 90° 돌림 → board_check·scan_poses 다시 → pose_tour … 4번 (한 run 에 20장)
+```
 
 ## 3. 복원과 결과
 
