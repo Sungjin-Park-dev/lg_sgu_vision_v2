@@ -97,16 +97,19 @@
       ↓
 data/{물체}/viewpoint/{N}/viewpoints.h5           ← Viewpoint Studio
       ↓
-data/{물체}/ik/{N}/ik_*.h5                               ← Solve IK
+data/{물체}/ik/{N}/{시각}.h5                      ← Solve IK
       ↓
-data/{물체}/trajectory/{N}/solution.h5                   ← 방문 순서
+data/{물체}/trajectory/{N}/solution_{시각}.h5            ← 방문 순서
       ↓
-data/{물체}/trajectory/{N}/trajectory.csv (+ .npz)       ← 실행 경로
+data/{물체}/trajectory/{N}/scan_{시각}.csv (+ .npz)       ← 검사 경로
+data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv         ← tilt 경로
       ↓
 Isaac 미리보기  또는  실제 로봇</pre>
 </div>
 
 <p><code>{N}</code>은 그 물체의 viewpoint 개수다. 같은 물체라도 viewpoint 수가 다르면 다른 폴더에 저장되므로, 여러 설정을 나란히 두고 비교할 수 있다.</p>
+
+<p><code>{시각}</code>은 만든 시각(<code>YYYYMMDD_HHMMSS</code>)이다. <strong>IK 해·방문 순서·경로는 덮어쓰지 않는다</strong> — 다시 만들면 새 파일이 생기고 이전 것은 그대로 남는다. 한 번의 생성에서 나온 <code>solution_…</code>과 <code>trajectory_…</code>는 같은 시각을 가져 짝이 보인다. IK 해는 옵션과 물체 배치가 같은 것 중 <strong>가장 최근 파일</strong>을 자동으로 재사용한다.</p>
 
 <div class="plate" data-kind="사진" data-id="PLATE 01">
   <p>세 앱의 화면을 나란히 놓은 한 장. 왼쪽부터 Viewpoint Studio(브라우저), Isaac Pipeline(Isaac Sim 창), RViz. 전체 그림을 먼저 보여주는 자리다.</p>
@@ -172,7 +175,8 @@ docker exec -it ros-jazzy bash</pre>
 
 <div class="note">
   <span class="note__label">셸을 여러 개 쓴다</span>
-  <p>MoveIt으로 제어할 때는 터미널이 <strong>두 개</strong> 필요하다. 둘 다 위 <code>docker exec -it ros-jazzy bash</code>로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.</p>
+  <p>같은 컴퓨터에서 다른 사람의 ROS 프로그램이 돌고 있으면 서로 섞여서 로봇 스택이 안 뜬다. 컨테이너가 <code>ROS_DOMAIN_ID=30</code>으로 격리돼 있지만, 그 설정이 들어가기 전에 만든 컨테이너라면 여는 터미널마다 <code>export ROS_DOMAIN_ID=30</code>을 먼저 친다.</p>
+<p>MoveIt으로 제어할 때는 터미널이 <strong>두 개</strong> 필요하다. 둘 다 위 <code>docker exec -it ros-jazzy bash</code>로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.</p>
 </div>
 
 <h3>앱 실행 명령</h3>
@@ -212,21 +216,33 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 </div>
 
 <div class="plate" data-kind="사진" data-id="PLATE 03">
-  <p>Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.</p>
+  <p>Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 <span class="ui">Viewpoints</span> 폴더가 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.</p>
 </div>
 
-<h3>화면 구성</h3>
+<h3>화면 구성 — 위에서 아래로가 곧 작업 순서</h3>
 <div class="tw">
 <table class="grid">
   <thead><tr><th>영역</th><th>역할</th></tr></thead>
   <tbody>
     <tr><td><span class="ui">Object</span></td><td>물체 선택. 패널 맨 위에 접히지 않고 항상 보인다. <strong>바꾸면 화면이 비워진다</strong></td></tr>
-    <tr><td><span class="ui">Viewpoints</span></td><td>이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 새로 만든다</td></tr>
-    <tr><td><span class="ui">Display</span></td><td>화면에 무엇을 그릴지 켜고 끄는 토글만 모여 있다</td></tr>
-    <tr><td><span class="ui">Solver graph (hops)</span></td><td>다음 단계가 실제로 풀 그래프로 관점을 바꾸는 슬라이더</td></tr>
+    <tr><td><span class="ui">Viewpoints</span></td><td>이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 아래 단계로 새로 만든다</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Camera spec</span></td><td>카메라의 물리 스펙 5개</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Target</span></td><td>어느 파일의 어느 면을 검사할지, 후보에서 무엇을 걸러낼지</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Candidates</span></td><td>표면에 점을 어떻게 뿌릴지</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Selection</span></td><td>뿌린 점 중 무엇을 쓸지</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Verify</span></td><td>덮였는지 셀지</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Generate viewpoints</span></td><td>위 네 단계를 한 번에 돌리는 버튼</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Solver graph</span></td><td>점 위에 이동 제약 그래프를 만든다 (<span class="ui">Build graph</span>)</td></tr>
+    <tr><td>&nbsp;&nbsp;<span class="ui">Save h5</span></td><td>전부 파일로 저장</td></tr>
+    <tr><td><span class="ui">Display</span></td><td>화면에 무엇을 그릴지 토글 + <span class="ui">Solver graph (hops)</span> 렌즈</td></tr>
     <tr><td>진단 한 줄</td><td>패널 맨 아래. 지금 그래프의 상태를 숫자로 말한다</td></tr>
   </tbody>
 </table>
+</div>
+
+<div class="note">
+  <span class="note__label">버튼이 셋인 이유</span>
+  <p><strong>점을 만드는 일</strong>(<span class="ui">Generate viewpoints</span>)과 <strong>점 위에 그래프를 얹는 일</strong>(<span class="ui">Build graph</span>)은 별개다. 그래프 노브를 바꿔도 점의 개수·위치는 안 바뀌고 간선만 바뀐다. 그래서 그래프만 다시 만들 때 점을 다시 뽑을 필요가 없다. <span class="ui">Save h5</span>는 둘의 결과를 함께 쓴다 — 그래프가 없으면 저장이 먼저 만들어 준다(그래프 없는 파일은 다음 단계가 거부하기 때문).</p>
 </div>
 
 <h3>물체 및 Viewpoint 불러오기</h3>
@@ -252,81 +268,159 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 </table>
 </div>
 
-<h3>카메라 스펙</h3>
-<p>세 값이 viewpoint의 위치를 직접 결정한다. 그리고 이 값들은 <code>.h5</code>에 함께 저장되어 <strong>이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.</strong> 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.</p>
+<h3>Camera spec — 카메라 스펙</h3>
+<p>다섯 값이 viewpoint의 위치를 직접 결정한다. 앞의 셋은 <code>.h5</code>에 함께 저장되어 <strong>이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.</strong> 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.</p>
 
 <div class="tw">
 <table class="grid">
-  <thead><tr><th>컨트롤</th><th>의미</th><th>영향</th></tr></thead>
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
   <tbody>
-    <tr><td><span class="ui">FOV width (mm)</span></td><td>working distance에서 카메라가 담는 가로 실폭</td><td>클수록 viewpoint 수가 준다</td></tr>
-    <tr><td><span class="ui">FOV height (mm)</span></td><td>같은 거리에서의 세로 실폭</td><td>〃</td></tr>
-    <tr><td><span class="ui">Working distance (mm)</span></td><td>표면에서 카메라까지 띄우는 거리</td><td><strong>로봇이 실제로 가는 위치가 바뀐다</strong></td></tr>
+    <tr><td><span class="ui">FOV width (mm)</span></td><td>50</td><td>working distance에서 카메라가 담는 가로 실폭. 클수록 viewpoint 수가 준다</td></tr>
+    <tr><td><span class="ui">FOV height (mm)</span></td><td>50</td><td>같은 거리에서의 세로 실폭</td></tr>
+    <tr><td><span class="ui">Working distance (mm)</span></td><td>195</td><td>표면에서 카메라까지 띄우는 거리. <strong>로봇이 실제로 가는 위치가 바뀐다</strong></td></tr>
+    <tr><td><span class="ui">Max incidence (°)</span></td><td>0</td><td>프레임 가장자리에서 표면이 기울어 보여도 되는 한계. <code>0</code> = 제한 없음. <strong>CAD faces 샘플러에서만 반영</strong></td></tr>
+    <tr><td><span class="ui">Depth of field ± (mm)</span></td><td>0</td><td>초점이 맞는 거리 범위. <code>0</code> = 제한 없음. <strong>CAD faces 샘플러에서만 반영</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note note--warn">
+  <span class="note__label">주의 · Working distance의 기준점은 카메라 끝이다</span>
+  <p>렌즈 배럴 앞면에서 검사면까지의 거리다. 벤더 공칭 WD는 카메라 몸체 앞면 기준이라 <strong>77.77 mm 더 큰 숫자</strong>다 — 공칭값을 그대로 넣으면 검사면이 그만큼 멀어진다. 하한이 있어 검사면이 카메라 끝보다 안쪽이면 생성이 거부된다.</p>
+  <p>뒤의 둘(<span class="ui">Max incidence</span>·<span class="ui">Depth of field</span>)은 면의 곡률과 함께 <strong>‘유효 FOV’</strong>를 정한다. 곡률이 급한 면은 프레임 가장자리가 기울고 멀어져 공칭 FOV를 다 못 쓴다. 곡면 정의가 필요해서 CAD 샘플러에서만 쓰인다.</p>
+</div>
+
+<h3>Target — 무엇을 검사하나</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Mesh source</span></td><td><code>source.obj</code></td><td><code>data/{물체}/mesh/</code> 안의 파일. <code>.stp</code>를 고르면 CAD 원본을 직접 읽는다</td></tr>
+    <tr><td><span class="ui">Align</span></td><td>auto</td><td>CAD의 어느 축이 ‘위’인가. <code>auto</code>는 <code>source.obj</code>와 맞춘다. 모호하면 콘솔에 경고가 뜨고, 그때 <code>z-up</code>/<code>y-up</code>으로 못박는다</td></tr>
+    <tr><td><span class="ui">Part</span></td><td>(all)</td><td><strong>[.stp 전용]</strong> 파일 안의 부품(솔리드). 검사 대상만 샘플링하고 자세·원점도 그 부품 기준으로 맞춘다. 물체별 기본값이 있다</td></tr>
+    <tr><td><span class="ui">Material RGB</span></td><td>물체별</td><td><strong>[.obj 전용]</strong> 예 <code>0,255,0</code> — 그 재질 면만 검사한다. 비우면 메시 전체</td></tr>
+    <tr><td><span class="ui">Filter bottom faces</span></td><td>켬</td><td>아래를 보는 viewpoint 제거 — 로봇이 밑에서 올려다볼 수 없다</td></tr>
+    <tr><td><span class="ui">Bottom angle (°)</span></td><td>80</td><td>월드 −z에서 이 각 안쪽을 보는 면을 버린다</td></tr>
+    <tr><td><span class="ui">Filter occluded (ray)</span></td><td>켬</td><td>카메라 자리에서 광선을 쏴 <strong>실제로 안 보이는 점</strong>을 제거 — 파인 곳, 지그 뒤</td></tr>
   </tbody>
 </table>
 </div>
 
 <div class="note">
-  <span class="note__label">Working distance에는 하한이 있다</span>
-  <p>렌즈 물리 제약이라, 그보다 작은 값을 넣으면 생성이 거부된다. 검사면이 렌즈 배럴 안쪽에 놓이는 값이기 때문이다.</p>
+  <span class="note__label">Part와 Material RGB는 같은 질문의 두 답이다</span>
+  <p>“이 파일에서 어느 면이 검사 대상인가.” 파일 종류에 따라 하나만 살아 있다 — <code>.stp</code>를 고르면 <span class="ui">Material RGB</span> 칸이 비고(CAD 면에는 삼각형 색이 없다), <code>.obj</code>는 부품이 하나라 <span class="ui">Part</span>가 <code>(all)</code>로 고정된다.</p>
 </div>
 
-<h3>생성 파라미터</h3>
-<p><span class="ui">Generate viewpoints</span> 안에 네 개뿐이고, 넷 다 다음 단계를 실제로 바꾼다. 각 입력칸에 툴팁이 붙어 있다.</p>
-
+<h3>Candidates — 점을 어떻게 뿌리나</h3>
 <div class="tw">
 <table class="grid">
-  <thead><tr><th>컨트롤</th><th>범위</th><th>무엇을 정하나</th></tr></thead>
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
   <tbody>
-    <tr><td><span class="ui">FOV overlap (%)</span></td><td>—</td><td>이웃한 촬영 영역이 겹치는 비율. <strong>점의 개수와 간격</strong>을 정한다. 표면 간격 = min(FOV) × (1 − overlap). 올리면 촘촘해지고 검사 시간이 늘어난다</td></tr>
+    <tr><td><span class="ui">Sampler</span></td><td>Surface FPS (mesh)</td><td>어디에 점을 뿌리나. 두 가지</td></tr>
+    <tr><td><span class="ui">FOV overlap (%)</span></td><td>—</td><td>이웃 촬영이 겹치는 비율. 간격 = FOV × (1 − overlap)</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>Sampler</th><th>특징</th><th>overlap 권장</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Surface FPS (mesh)</span></td><td>삼각형 메시 위에 균등하게 뿌린다. <code>.obj</code>든 <code>.stp</code>든 된다. 프레임 모형이 없어 겹침으로 커버리지를 만든다</td><td><strong>50%</strong></td></tr>
+    <tr><td><span class="ui">CAD faces (STEP)</span></td><td><strong><span class="ui">Mesh source</span>가 <code>.stp</code>일 때만.</strong> 면마다 FOV 격자를 깔고 트리밍 경계 안쪽만 남긴다. 법선이 해석적이라 테셀레이션 오차가 0. 프레임이 사각형이라 겹침 0으로도 타일링된다</td><td><strong>≈10%</strong> (오차 여유)</td></tr>
+  </tbody>
+</table>
+</div>
+<p><code>.obj</code>로 돌아가면 <span class="ui">Sampler</span>는 자동으로 Surface FPS가 된다.</p>
+
+<h3>Selection — 뿌린 점 중 무엇을 쓰나</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Mode</span></td><td>최소 집합 (greedy)</td><td>아래 둘 중 하나</td></tr>
+    <tr><td><span class="ui">Target coverage (%)</span></td><td>100</td><td>greedy가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 더 보탤 것이 없을 때까지</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>Mode</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">샘플러 그대로</span></td><td>뽑은 점을 그대로 쓴다. 구멍이 남을 수 있다 — 진단용</td></tr>
+    <tr><td><span class="ui">최소 집합 (greedy)</span></td><td>못 덮은 셀을 겨냥한 <strong>구멍 후보</strong>까지 풀에 넣고, 그 풀에서 커버리지를 채우는 최소 집합을 고른다. 샘플러 혼자로는 안 닫히던 곳까지 닫으면서 점 수는 오히려 준다. <strong>CAD faces 전용</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Verify — 덮였나</h3>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">Coverage check</span></td><td>켬</td><td>면마다 매개변수 공간을 잘게 나눠 ‘덮임 / 덮을 수 없음 / 구멍’을 센다. Selection과 같은 판정을 쓰므로 두 숫자가 어긋나지 않는다. <strong>CAD faces 전용</strong>, 0.5초 내외</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Generate viewpoints — 실행</h3>
+<p>폴더 <strong>밖</strong>에 있는 버튼이다. 위의 Target · Candidates · Selection · Verify 네 단계를 한 번에 돌린다. 끝나면 바로 아래에 결과가 뜬다.</p>
+<div class="term">
+  <div class="term__tag">화면 · Generate 결과 줄 읽는 법</div>
+<pre>Done · 54 vp · CAD faces · 구멍 후보 7개 · 후보 61개에서 선택
+
+커버리지 100.0% (312/312 cm²) · 접근 불가 25cm² 제외</pre>
+</div>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>항목</th><th>뜻</th></tr></thead>
+  <tbody>
+    <tr><td><code>N vp</code></td><td>최종 viewpoint 개수</td></tr>
+    <tr><td><code>구멍 후보 N개</code></td><td>격자가 못 덮은 셀을 겨냥해 추가된 후보 수</td></tr>
+    <tr><td><code>후보 N개에서 선택</code></td><td>greedy가 고르기 전 풀의 크기</td></tr>
+    <tr><td><code>커버리지 %</code></td><td>검사 가능한 면적 중 덮인 비율. 분모는 <strong>검사 가능한 면적</strong>이다 — 아래를 향하거나 어떤 카메라로도 못 보는 곳은 뺐고, 뺀 면적은 <code>접근 불가 … 제외</code>로 <strong>반드시 같이 보여준다</strong></td></tr>
+    <tr><td><code>구멍: 면12(78%, 4cm²)</code></td><td>90% 미만으로 덮인 면과 그 면적 (최대 3개). 어디가 비었는지 알려준다</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Solver graph — Build graph</h3>
+<p>점이 다 정해진 뒤 그 위에 <strong>Delaunay 인접 그래프</strong>를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다. 셋 다 점의 개수·위치는 바꾸지 않는다.</p>
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>범위</th><th>의미</th></tr></thead>
+  <tbody>
     <tr><td><span class="ui">Max edge length (×)</span></td><td>1.0 – 5.0</td><td>간선 길이 상한. <strong>주변 카메라 위치 간격의 배수</strong>다 (표면 간격이 아니다)</td></tr>
     <tr><td><span class="ui">Max normal angle (°)</span></td><td>15 – 180</td><td>두 점의 법선이 이보다 벌어지면 잇지 않는다. <code>90°</code>면 반대편 면이 차단된다</td></tr>
     <tr><td><span class="ui">Neighbor search (k)</span></td><td>3 – 30</td><td>삼각분할 후보로 볼 이웃 수. 거의 건드릴 일이 없다</td></tr>
+    <tr><td><span class="ui">Build graph</span></td><td>—</td><td>그래프를 만든다. <code>Done · 329 edges · 2 component(s) · 간선 median/max 31/152 mm</code> 처럼 뜬다</td></tr>
   </tbody>
 </table>
 </div>
-
-<div class="note">
-  <span class="note__label">뒤의 셋이 그래프를 만든다</span>
-  <p><span class="ui">Max edge length</span> · <span class="ui">Max normal angle</span> · <span class="ui">Neighbor search</span> 셋이 <strong>Delaunay 인접 그래프</strong>를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다.</p>
-  <p>네 값 모두 <strong>슬라이더가 아니라 숫자 입력칸</strong>이다. 고쳐도 <span class="ui">Generate</span>를 누르기 전까지는 화면이 바뀌지 않는다.</p>
-</div>
-
-<h4>실행</h4>
-<div class="tw">
-<table class="grid">
-  <thead><tr><th>버튼</th><th>동작</th></tr></thead>
-  <tbody>
-    <tr><td><span class="ui">Generate</span></td><td>위 설정으로 viewpoint를 만든다. 끝나면 바로 아래에 <code>Done · 132 vp · 329 edges · 2 component(s)</code> 처럼 결과가 뜬다</td></tr>
-    <tr><td><span class="ui">Save h5</span></td><td>만든 결과를 파일로 저장한다. <strong>누르지 않으면 남지 않는다</strong> — 저장 전에는 <span class="ui">Saved viewpoints</span>가 <code>(generated · unsaved)</code>로 표시된다</td></tr>
-  </tbody>
-</table>
-</div>
+<p>세 값 모두 <strong>슬라이더가 아니라 숫자 입력칸</strong>이다. 고쳐도 <span class="ui">Build graph</span>를 누르기 전까지는 화면이 바뀌지 않는다. 점을 새로 만들면 상태 줄이 <code>Idle — 점이 새로 생겼습니다. Build graph.</code>로 바뀌어 그래프를 다시 만들라고 알려준다.</p>
 
 <div class="plate" data-kind="사진" data-id="PLATE 04">
-  <p><span class="ui">Viewpoints</span> 폴더를 펼친 확대 컷. <span class="ui">Saved viewpoints</span> → <span class="ui">Camera spec</span> → <span class="ui">Generate viewpoints</span> 순서와 노브 네 개, 그 아래 <code>Done ·</code> 상태 줄이 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.</p>
+  <p><span class="ui">Viewpoints</span> 폴더를 펼친 확대 컷. <span class="ui">Camera spec</span> → <span class="ui">Target</span> → <span class="ui">Candidates</span> → <span class="ui">Selection</span> → <span class="ui">Verify</span> → <span class="ui">Generate viewpoints</span> → <span class="ui">Solver graph</span> → <span class="ui">Save h5</span> 순서가 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.</p>
 </div>
 
-<h3>결과 확인</h3>
-<p><span class="ui">Display</span> 폴더의 토글 네 개로 무엇을 그릴지 정한다.</p>
-
+<h3>결과 확인 — Display</h3>
 <div class="tw">
 <table class="grid">
   <thead><tr><th>토글</th><th>기본</th><th>보여주는 것</th></tr></thead>
   <tbody>
     <tr><td><span class="ui">Mesh</span></td><td>켬</td><td>물체 표면</td></tr>
+    <tr><td><span class="ui">Material colors</span></td><td>끔</td><td>메시를 재질 색으로 그린다. <span class="ui">Material RGB</span>가 무엇을 고르는지 눈으로 확인된다</td></tr>
     <tr><td><span class="ui">Surface points</span></td><td>켬</td><td>메시 표면 위의 검사 지점</td></tr>
     <tr><td><span class="ui">Camera positions</span></td><td>켬</td><td>표면점 + 법선 × WD — <strong>로봇 EE가 실제로 가는 곳</strong></td></tr>
     <tr><td><span class="ui">Graph edges</span></td><td>켬</td><td>다음 단계의 순서 제약 그래프. <strong>색이 연결 성분</strong>을 나타낸다</td></tr>
+    <tr><td><span class="ui">Coverage cells</span></td><td>끔</td><td>커버리지 셀을 상태별 색으로 — <strong>초록</strong> 덮임 · <strong>빨강</strong> 구멍 · <strong>회색</strong> 검사 불가. 상태 줄의 숫자가 “어디”인지 보여준다 (CAD faces + Coverage check일 때만)</td></tr>
+    <tr><td><span class="ui">Solver graph (hops)</span></td><td>2</td><td>다시 만들지 않고 <strong>‘다음 단계가 실제로 볼 간선’</strong>으로 관점만 바꾸는 슬라이더. 끌면 즉시 반영된다. <strong>저장 내용은 바뀌지 않는다</strong></td></tr>
   </tbody>
 </table>
 </div>
 
-<p><span class="ui">Solver graph (hops)</span>는 폴더 밖, 진단 한 줄 바로 위에 있다. 다시 만들지 않고 <strong>“다음 단계가 실제로 볼 간선”</strong>으로 관점만 바꾸는 슬라이더라, 끌면 즉시 반영된다.</p>
-
-<div class="note">
-  <span class="note__label">hops는 다음 단계와 맞춰 둔다</span>
-  <p>파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 <span class="ui">--delaunay-expand-hops</span>와 <strong>같은 값</strong>으로 두면 화면과 다음 단계가 같은 그래프를 본다. 양쪽 기본은 <code>2</code>다.</p>
+<div class="note note--warn">
+  <span class="note__label">주의 · hops는 다음 단계와 맞춰 둔다</span>
+  <p>파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 <span class="ui">--delaunay-expand-hops</span>와 <strong>같은 값</strong>으로 두면 화면과 다음 단계가 같은 그래프를 본다. <strong>지금 두 기본값이 다르다</strong> — Studio는 <code>2</code>, Isaac Pipeline은 <code>4</code>. 한쪽을 맞춰 두고 보는 것이 안전하다.</p>
 </div>
 
 <h4>진단 한 줄 읽기</h4>
@@ -339,30 +433,26 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
   <thead><tr><th>항목</th><th>뜻</th></tr></thead>
   <tbody>
     <tr><td><code>edges</code></td><td>저장될 간선 수 (1-hop)</td></tr>
-    <tr><td><code>components</code></td><td>그래프가 몇 조각인지. <strong>2 이상이어도 대개 정상이다</strong> — 조각 사이를 잇는 이동 구간이 생길 뿐이고, 실제로 쓰는 파일 다수가 2성분 이상이다</td></tr>
+    <tr><td><code>components</code></td><td>그래프가 몇 조각인지. <strong>2 이상이어도 대개 정상이다</strong> — 조각 사이를 잇는 이동 구간이 생길 뿐이다</td></tr>
     <tr><td><code>isolated</code></td><td>간선이 하나도 없는 외톨이 점. 다음 단계가 제약 그래프에서 떨어뜨린다</td></tr>
     <tr><td><code>GLNS: N (h-hop)</code></td><td>현재 hops 설정에서 다음 단계가 실제로 푸는 간선 수</td></tr>
   </tbody>
 </table>
 </div>
-
-<div class="note note--warn">
-  <span class="note__label">주의 · No graph</span>
-  <p>진단 줄에 <code>⚠ No graph</code>가 뜨면 그 파일에 Delaunay 간선이 없다는 뜻이다. 경로 생성이 거부하므로 다시 만들어야 한다.</p>
-</div>
+<p>진단 줄에 <code>⚠ No graph</code>가 뜨면 아직 그래프가 없다는 뜻이다. <span class="ui">Build graph</span>를 누른다(저장본이라면 다시 만들어야 한다).</p>
 
 <div class="plate" data-kind="사진" data-id="PLATE 05">
-  <p>같은 물체를 <span class="ui">Max normal angle</span>만 바꿔 두 번 생성한 비교 컷. 성분이 여러 조각으로 갈라진 경우와 하나로 이어진 경우를, 하단 진단 한 줄과 함께 나란히.</p>
+  <p>CAD faces로 생성한 결과에서 <span class="ui">Coverage cells</span>를 켠 뷰포트. 초록(덮임)·빨강(구멍)·회색(검사 불가) 셀이 면 위에 깔린 모습과, 같은 화면의 Generate 결과 줄(커버리지 % · 구멍 면 목록)을 함께.</p>
 </div>
 
 <h3>Viewpoint 저장</h3>
-<p><span class="ui">Save h5</span>를 누르면 아래 경로에 저장된다.</p>
+<p><span class="ui">Save h5</span>를 누르면 아래 경로에 저장되고, 상태 줄에 저장된 경로가 트리로 펼쳐진다.</p>
 <div class="term">
   <div class="term__tag">저장 위치</div>
 <pre>data/{물체}/viewpoint/{개수}/viewpoints.h5
 
 # 예
-data/cylinder_sample/viewpoint/132/viewpoints.h5</pre>
+data/cylinder_sample/viewpoint/54/viewpoints.h5</pre>
 </div>
 <p>이 파일 경로를 다음 단계인 Isaac Pipeline에 그대로 넣는다. 파일 안에는 각 지점의 위치·법선·카메라 위치와 함께 <strong>카메라 스펙, 그래프 간선</strong>이 들어 있다. 방문 순서는 들어 있지 않다.</p>
 
@@ -370,9 +460,11 @@ data/cylinder_sample/viewpoint/132/viewpoints.h5</pre>
 <ol class="steps">
   <li><span class="ui">Object</span>에서 물체를 고른다.</li>
   <li><span class="ui">Camera spec</span>에서 FOV와 working distance를 정한다.</li>
-  <li><span class="ui">Generate viewpoints</span>에서 overlap과 그래프 노브 3개를 조절한다.</li>
-  <li><span class="ui">Generate</span>로 만든다.</li>
-  <li><span class="ui">Display</span> 토글과 하단 진단 한 줄로 점 분포와 그래프를 확인한다.</li>
+  <li><span class="ui">Target</span>에서 파일(<code>.obj</code>/<code>.stp</code>)과 검사 대상 면을 고른다.</li>
+  <li><span class="ui">Candidates</span>에서 Sampler와 overlap을 정한다 — CAD면 <code>CAD faces</code> + 10%, 메시면 <code>Surface FPS</code> + 50%.</li>
+  <li><span class="ui">Generate viewpoints</span>를 누르고, 결과 줄의 커버리지와 구멍을 본다. 부족하면 3·4로 돌아간다.</li>
+  <li><span class="ui">Build graph</span>로 그래프를 만들고, 진단 한 줄의 성분·외톨이 수를 본다.</li>
+  <li><span class="ui">Display</span> 토글로 점·카메라 위치·커버리지 셀을 확인한다.</li>
   <li>마음에 들면 <span class="ui">Save h5</span>로 저장한다.</li>
 </ol>
 </section>
@@ -425,6 +517,12 @@ data/cylinder_sample/viewpoint/132/viewpoints.h5</pre>
   <p>Run 모드가 <code>real</code>이면 ROS 쪽도 real 스택을 띄워야 하고, <code>sim</code>이면 sim 스택을 띄워야 한다. <strong>두 스택을 동시에 띄우면 안 된다</strong> — 로봇 모델이 충돌해 ROS 노드가 죽는다.</p>
 </div>
 
+<div class="note">
+  <span class="note__label">모드는 앱이 정하고, 스택이 따른다</span>
+  <p>앱은 지금 모드를 ROS 토픽(<code>/looksgood/mode</code>)에 계속 알린다. 스택 쪽 게이트가 그걸 받아 <strong>MoveIt용 컨트롤러와 검사용 컨트롤러 중 하나만</strong> 켜 둔다. 그래서 스택을 나중에 띄우거나 다시 띄워도 맞는 상태가 되고, 앱이 꺼지면 2초 안에 두 컨트롤러가 모두 꺼져 아무것도 로봇을 못 움직인다.</p>
+  <p>앱 없이 RViz만 쓰려면 launch에 <code>default_mode:=sim/moveit</code>(또는 <code>real/moveit</code>)을 준다.</p>
+</div>
+
 <div class="plate" data-kind="사진" data-id="PLATE 06">
   <p>Isaac Pipeline 상단의 <span class="ui">Pipeline Mode</span>와 <span class="ui">Run Mode</span> 콤보박스 확대 컷. 네 조합 중 어디에 있는지가 화면에서 어떻게 보이는지.</p>
 </div>
@@ -466,7 +564,7 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py</pre>
 <p>컨트롤러가 붙고 계획기와 RViz가 뜨면 터미널에 <code>You can start planning now!</code>가 출력된다. 이때부터 RViz를 쓰면 된다.</p>
 
 <h3>MoveIt × Real</h3>
-<p>셸 1의 Isaac 앱을 <code>--mode real --pipeline-mode moveit</code>으로 켜고, 셸 2에서 real 스택을 띄운다. <strong>기본값은 실제 로봇이 아니라 mock hardware</strong>라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다.</p>
+<p>셸 1의 Isaac 앱을 <code>--mode real --pipeline-mode moveit</code>으로 켜고, 셸 2에서 real 스택을 띄운다. <strong>기본값은 실제 로봇이 아니라 mock hardware</strong>라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다. mock 로봇은 sim과 같은 준비 자세에서 시작한다(실제 로봇은 지금 있는 자세가 그대로다).</p>
 
 <div class="term">
   <div class="term__tag">REAL · 셸 2 · mock hardware (기본)</div>
@@ -630,6 +728,7 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
     <tr><td><span class="ui">tilt-azimuths</span></td><td>8</td><td>기울이는 방향을 몇 갈래로 나눌지</td></tr>
     <tr><td><span class="ui">dedup</span></td><td>켬</td><td>거의 같은 해를 하나로 합친다</td></tr>
     <tr><td><span class="ui">dedup-rad</span></td><td>0.08</td><td>이 값 안쪽이면 같은 해로 본다 (rad)</td></tr>
+    <tr><td><span class="ui">face the viewpoint (no reach-over)</span></td><td>켬</td><td>base(1축)가 <strong>그 지점 쪽을 보는</strong> IK 해만 쓴다. UR은 손목 위치 하나에 base 해가 둘이다 — 지점을 보는 자세와, 반대쪽을 보고 팔을 베이스 위로 넘겨 닿는 자세. 뒤의 것이 뽑히면 로봇이 반대쪽으로 돈다. 끄면 둘 다 후보로 쓴다. (현재 base에 가장 가까운 ±360° 표현으로 맞추는 것은 항상 한다 — 자세를 잃지 않는 표현 선택일 뿐이다)</td></tr>
     <tr><td><span class="ui">num-seeds</span></td><td>32</td><td>한 지점당 IK를 몇 번 다른 시작값으로 풀지. <strong>키우면 더 많이 찾지만 느려진다</strong></td></tr>
     <tr><td><span class="ui">ik-batch-size</span></td><td>128</td><td>GPU에서 한 번에 푸는 개수. 결과에는 영향이 없고 속도·메모리만 바뀐다</td></tr>
   </tbody>
@@ -660,36 +759,60 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 <h3>6 · Motion Speed</h3>
 <p>앞으로 만들 경로가 <strong>얼마나 빠르게 실행될지</strong>를 정한다. 이 값들은 경로를 만드는 순간 파일에 함께 구워지므로, <strong>경로를 만들기 전에</strong> 정해야 한다. 이미 만든 경로는 예전 속도를 그대로 갖고 있다.</p>
 
+<p>경로에는 두 종류의 구간이 있고, 종류마다 다른 쌍이 속도를 정한다.</p>
+
 <div class="tw">
 <table class="grid">
-  <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
+  <thead><tr><th>구간</th><th>어디에 있나</th><th>속도를 정하는 값</th></tr></thead>
   <tbody>
-    <tr><td><span class="ui">scan EE speed [mm/s]</span></td><td>10</td><td>검사 구간에서 카메라가 움직이는 속도</td></tr>
-    <tr><td><span class="ui">scan EE angular [deg/s]</span></td><td>20</td><td>검사 구간에서 카메라 방향이 돌아가는 속도</td></tr>
-    <tr><td><span class="ui">max joint vel [rad/s]</span></td><td>0.3</td><td>관절 속도 상한. <strong>이동 구간의 속도는 이 값만으로 정해진다</strong></td></tr>
-    <tr><td><span class="ui">min segment dt [s]</span></td><td>0.05</td><td>구간 하나에 최소한 들이는 시간. 짧은 구간이 순간적으로 빨라지는 것을 막는다</td></tr>
-    <tr><td><span class="ui">corner threshold [deg]</span></td><td>30</td><td>이보다 급하게 꺾이는 곳부터 감속한다</td></tr>
-    <tr><td><span class="ui">corner max slowdown [x]</span></td><td>2.5</td><td>가장 급한 꺾임에서 몇 배 느려질지. <code>1</code>이면 감속하지 않는다</td></tr>
+    <tr><td>보간 구간</td><td>viewpoint 사이를 카메라가 <strong>직선으로</strong> 훑는 곳, tilt 부채꼴</td><td>EE 속도, EE 각속도 (그 직선 위의 속도)</td></tr>
+    <tr><td>플래닝 구간</td><td>모션 플래너가 만든 이동(transit), <span class="ui">Plan to Start</span> / <span class="ui">Plan to HOME</span></td><td>관절 속도 배율, 관절 가속도 배율</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>그래서 배율 슬라이더가 둘이다. 각 슬라이더 옆의 숫자 둘은 <strong>그 슬라이더와 하나의 값</strong>이다 — 슬라이더를 끌면 둘이 따라오고, 둘 중 아무 숫자나 직접 치면 슬라이더와 나머지가 따라온다. 두 그룹은 서로 독립이라 스캔은 천천히, 이동은 빠르게 둘 수 있다.</p>
+
+<div class="tw">
+<table class="grid">
+  <thead><tr><th>컨트롤</th><th>기본(f=1)</th><th>배율과의 관계</th><th>의미</th></tr></thead>
+  <tbody>
+    <tr><td><span class="ui">scan factor</span> (슬라이더 + 숫자)</td><td>1.0</td><td>0.1 – 3.0</td><td>보간 구간의 시간 배율</td></tr>
+    <tr><td><span class="ui">EE speed [mm/s]</span></td><td>10</td><td>× f</td><td>카메라가 표면을 따라 움직이는 속도</td></tr>
+    <tr><td><span class="ui">EE angular [deg/s]</span></td><td>20</td><td>× f</td><td>카메라가 도는 속도</td></tr>
+    <tr><td><span class="ui">transit factor</span> (슬라이더 + 숫자)</td><td>1.0</td><td>0.1 – 2.23</td><td>플래닝 구간의 시간 배율</td></tr>
+    <tr><td><span class="ui">joint velocity scaling</span></td><td>0.2</td><td>× f</td><td>관절별 속도 한계에 곱하는 배율(0–1). MoveIt/RViz 의 Velocity Scaling 과 같은 수</td></tr>
+    <tr><td><span class="ui">joint acceleration scaling</span></td><td>0.2</td><td>× f²</td><td>관절별 가속도 한계에 곱하는 배율(0–1). MoveIt/RViz 의 Acceleration Scaling 과 같은 수</td></tr>
   </tbody>
 </table>
 </div>
 
 <div class="note">
-  <span class="note__label">셋 중 가장 느린 것이 이긴다</span>
-  <p>검사 구간은 <strong>카메라 속도 · 카메라 회전 속도 · 관절 속도</strong>를 모두 만족하는 시간으로 계산된다. 그래서 카메라 속도를 3배로 올려도 관절 속도에 걸리면 3배가 되지 않는다. 이동 구간은 검사가 아니므로 관절 속도만 본다.</p>
-  <p><code>0</code>을 넣으면 그 제한 하나를 끄는 뜻이다. 음수는 받지 않는다.</p>
+  <span class="note__label">MoveIt 과 같은 숫자</span>
+  <p>관절별 한계(UR20 속도 120/120/150/210/210/210 deg/s, 가속도 5 rad/s²)는 <code>scripts/moveit/ur_config/joint_limits.yaml</code> 한 파일에 있고, MoveIt(move_group, RViz)과 LooksGood 이 <strong>같은 파일</strong>을 읽는다. 배율 0.2 는 어느 쪽에서든 "한계의 20%" 다. transit 배율 1.0 은 RViz 패널에서 두 Scaling 을 0.2 로 둔 것과 같은 속도다. 한계를 바꾸려면 그 파일을 고친다 — 양쪽이 같이 바뀐다.</p>
 </div>
 
+<div class="note">
+  <span class="note__label">왜 가속도만 f² 인가</span>
+  <p>궤적을 시간축으로 1/f 만큼 압축하면 속도는 f배, 가속도는 f²배가 된다. 그래서 배율 2로 만든 이동은 배율 1의 이동과 <strong>모양이 같고 시간만 절반</strong>이다. 가속도 배율 칸에 0.8 을 치면 배율은 √(0.8 ÷ 0.2) = 2 가 된다. transit 배율의 상한 2.23 은 가속도 배율이 1.0(로봇 한계 100%)에 닿는 곳이다.</p>
+</div>
+
+<div class="note">
+  <span class="note__label">화면에 없는 값</span>
+  <p>관절 가속도 한계는 로봇의 한계라 출발·정지, 꺾이는 곳, 플래닝 구간과 보간 구간의 이음새에서도 지켜진다 — 스캔 속도가 느려서 보간 구간 안에서 실제로 걸리는 일은 없다. 구간 최소 시간(0.02 s)은 수치 안전용 바닥값이라 고정이다.</p>
+</div>
 
 <h3>7 · Generate Trajectory</h3>
 <p>실제 실행할 경로를 만든다. 두 종류를 만들 수 있다.</p>
 
 <h4>Scan options (GLNS) — 검사 경로</h4>
 <p>모든 viewpoint를 한 번씩 도는 경로다. 방문 순서와 각 지점에서의 팔 자세를 함께 최적화하고, 지점 사이를 충돌 없이 잇는다.</p>
+<p>지점 사이는 두 방식 중 하나로 이어진다. 팔 자세가 크게 바뀌지 않는 인접 지점 사이는 <strong>카메라가 직선으로</strong> 움직이는 보간 구간이다 — 카메라 위치를 직선으로, 자세를 매끄럽게 돌리며 5 mm 마다 IK를 풀어 그 직선을 따르는 관절 경로를 만든다. 그 직선을 만들 수 없거나(IK 불능·관절 점프) 직선이 물체에 닿으면, 그리고 팔 자세가 크게 바뀌는 곳(joint 점프)은 모션 플래너가 충돌을 피해 만드는 <strong>플래닝 구간</strong>이다. 어느 구간이 어느 속도로 가는지는 <span class="ui">Motion Speed</span> 참고.</p>
 <div class="tw">
 <table class="grid">
   <thead><tr><th>컨트롤</th><th>기본</th><th>의미</th></tr></thead>
   <tbody>
+    <tr><td><span class="ui">IK solutions (h5)</span></td><td>비어 있음</td><td>어느 IK 해로 풀지. 비우면 <span class="ui">Solve IK</span> 옵션에 맞는 가장 최근 파일(없으면 새로 푼다). <span class="ui">Browse...</span>로 직접 고르거나 <span class="ui">Latest</span>로 최신을 넣는다. <span class="ui">Check and Save IK</span>가 끝나면 방금 저장한 파일이 자동으로 들어간다. 고른 파일은 자기 옵션(roll/tilt/dedup/seed)을 가져오고, 물체 위치가 지금과 다르면 생성이 멈추고 이유를 로그에 쓴다</td></tr>
     <tr><td><span class="ui">--delaunay-expand-hops</span></td><td>2</td><td>어느 정도 떨어진 지점끼리 이어도 되는지. 키우면 더 좋은 순서를 찾을 수 있지만 느려진다</td></tr>
     <tr><td><span class="ui">--max-candidates-per-viewpoint</span></td><td>32</td><td>한 지점당 고려할 팔 자세 후보 수</td></tr>
   </tbody>
@@ -778,10 +901,10 @@ ros2 launch scripts/moveit/ur20_real_moveit.launch.py</pre>
 <p>패널 맨 아래 상태 줄이 <strong>지금 무엇이 재생 중인지</strong>를 항상 적는다.</p>
 <div class="term">
   <div class="term__tag">화면 · 상태 줄 읽는 법</div>
-<pre>t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv
+<pre>t=2.14s / 6.31s  (wp 140/411)  playing: move_to_start_20260916_143012.csv
                                         └ 지금 고스트가 트는 파일
 
-CSV path: .../trajectory/74/trajectory.csv
+CSV path: .../trajectory/74/scan_20260916_143012.csv
           └ Execute Scan 이 실행할 파일</pre>
 </div>
 <p>이동 경로를 계획하면 고스트는 그 이동을 재생하지만, <span class="ui">CSV path</span> 칸은 검사 경로를 가리킨 채로 남는다. <strong>둘이 다른 것이 정상</strong>이고, 상태 줄이 그 차이를 말해 준다.</p>
@@ -875,11 +998,11 @@ CSV path: .../trajectory/74/trajectory.csv
   <tbody>
     <tr><td>물체 메시</td><td><code>data/{물체}/mesh/source.obj</code></td></tr>
     <tr><td>Viewpoint</td><td><code>data/{물체}/viewpoint/{N}/viewpoints.h5</code></td></tr>
-    <tr><td>IK 해</td><td><code>data/{물체}/ik/{N}/ik_*.h5</code></td></tr>
-    <tr><td>방문 순서</td><td><code>data/{물체}/trajectory/{N}/solution.h5</code></td></tr>
-    <tr><td>검사 경로</td><td><code>data/{물체}/trajectory/{N}/trajectory.csv</code></td></tr>
-    <tr><td>Tilt 경로</td><td><code>data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}.csv</code></td></tr>
-    <tr><td>이동 경로</td><td><code>data/{물체}/trajectory/{N}/home_move_*.csv</code></td></tr>
+    <tr><td>IK 해</td><td><code>data/{물체}/ik/{N}/{시각}.h5</code> — 이름은 저장 시각뿐이고, 어떤 옵션(roll/tilt/dedup/seed)과 물체 위치로 푼 것인지는 파일 안에 적혀 있다</td></tr>
+    <tr><td>방문 순서</td><td><code>data/{물체}/trajectory/{N}/solution_{시각}.h5</code></td></tr>
+    <tr><td>검사 경로</td><td><code>data/{물체}/trajectory/{N}/scan_{시각}.csv</code></td></tr>
+    <tr><td>Tilt 경로</td><td><code>data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv</code> — <code>행</code>은 기준 궤적에서 중심으로 고른 행 번호</td></tr>
+    <tr><td>이동 경로</td><td><code>data/{물체}/trajectory/{N}/move_to_start_{시각}.csv</code>, <code>move_to_home_{시각}.csv</code></td></tr>
     <tr><td>워크셀 정의</td><td><code>workcell/scenes/{이름}.yaml</code></td></tr>
   </tbody>
 </table>

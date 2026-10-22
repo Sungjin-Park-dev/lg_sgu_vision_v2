@@ -5,11 +5,18 @@
 ```text
 mesh/                입력 자산 — source.obj, source.usd, material
 viewpoint/{N}/       viewpoints.h5
-trajectory/{N}/      solution.h5                       GLNS 해 (verify 의 입력)
-                     trajectory.csv | .npz             스캔 궤적 (실행용)
+ik/{N}/              {시각}.h5                  저장 IK 후보 (옵션·물체 pose 가 같은 최신 파일을 재사용)
+trajectory/{N}/      solution_{시각}.h5                GLNS 해 (verify 의 입력)
+                     scan_{시각}.csv | .npz            스캔(검사) 궤적 (실행용). 해와 같은 시각 = 짝
+                     tilt_row{행}_{시각}.csv | .npz   기준 궤적의 그 행을 중심으로 한 tilt 궤적
+                     move_to_start_{시각}.csv         Plan to Start / move_to_home_{시각}.csv
+
+`{시각}` 은 `YYYYMMDD_HHMMSS` 다. Isaac Pipeline 은 항상 스탬프를 붙여 **덮어쓰지 않는다**;
+`verify.py --tag` 없이 / `solve.py --output` 으로 고정 이름을 주면 옛 방식(덮어씀)이다 —
+trajectory_studio 가 그렇게 쓴다.
                      trajectory_home_to_start.csv|npz  HOME 브래킷 (옵션)
                      trajectory_end_to_home.csv|npz
-                     home_move_{approach,return}.csv|npz
+                     move_to_start_{시각}.csv|npz / move_to_home_{시각}.csv|npz
 ```
 
 `{N}`은 viewpoint 개수다. 파일명 규칙은 `{역할}[_{변형}][_{세부}]`이고, 변형 토큰은 여러 개가
@@ -58,4 +65,4 @@ NPZ는 브라우저 재생용 sidecar다.
 - `meta` — 생성 조건 JSON(물체 배치, WD, spacing, reconfig 임계, 커버리지). 파일명이
   파라미터를 담지 않으므로 여기에 남긴다.
 
-성분별 중간 궤적은 저장하지 않는다. 실행 대상은 전 성분을 이은 `trajectory.csv` 하나다.
+성분별 중간 궤적은 저장하지 않는다. 실행 대상은 전 성분을 이은 `scan_{시각}.csv` 하나다.

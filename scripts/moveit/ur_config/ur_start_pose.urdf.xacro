@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!--
+  드라이버 ur.urdf.xacro 를 그대로 쓰되 initial_positions_file 하나만 우리 것으로 바꾼다.
+
+  ur_control.launch.py 는 initial_positions_file 을 launch 인자로 내주지 않는다. 대신
+  description_file 은 바꿀 수 있으므로, 이 얇은 래퍼를 description_file 로 준다. xacro 의
+  arg 는 먼저 선언된 쪽이 이기므로 여기서 기본값을 잡으면 포함된 파일의 기본값을 덮는다.
+  기본값 경로는 moveit_assets.INITIAL_POSITIONS_FILE 과 같아야 한다 — launch 가 그 파일을
+  config.ROBOT_START_STATE 로 먼저 써 둔다.
+
+  효과는 mock 하드웨어(GenericSystem 의 initial_value)에만 있다. 실로봇은 실측이 진실이다.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+  <xacro:arg name="name" default="ur"/>
+  <xacro:arg name="initial_positions_file" default="/tmp/ur20_initial_positions.yaml"/>
+  <xacro:include filename="$(find ur_robot_driver)/urdf/ur.urdf.xacro"/>
+</robot>

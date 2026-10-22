@@ -28,8 +28,10 @@ from launch.actions import (
     ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_context import LaunchContext
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -43,6 +45,7 @@ sys.path.insert(0, MOVEIT_DIR)
 import moveit_assets            # noqa: E402  (리포 자산 → MoveIt 형식 파생)
 PROJECT_SCRIPTS = os.path.dirname(MOVEIT_DIR)          # this repo's scripts/
 PROJECT_ROOT = os.path.dirname(PROJECT_SCRIPTS)
+MOCK_UPDATE_RATE_YAML = os.path.join(MOVEIT_DIR, 'ur_config', 'ur20_mock_update_rate.yaml')
 # robot_description for move_group / cuMotion. 기구학·카메라 기하는 workcell 의 URDF 가
 # 소유한다 — cuRobo/Isaac/viser 와 같은 파일이라 카메라를 옮겨도 자동으로 따라온다.
 # (여기 description 의 ros2_control 은 무의미하다. 실행은 ur_robot_driver 의 컨트롤러
@@ -88,16 +91,42 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     use_cumotion = str(context.perform_substitution(
         LaunchConfiguration('use_cumotion'))).lower() not in ('false', '0')
 
+    # mock 하드웨어가 sim 과 같은 준비 자세(config.ROBOT_START_STATE)에서 시작하도록,
+    # 99.x(NVIDIA 빌드) 드라이버면 컨트롤러가 첫 update 에서 죽는다 — 처방과 함께 여기서 멈춘다.
+    moveit_assets.require_ros_org_ur_driver()
+    # 드라이버 description 에 initial_positions 를 우리 값으로 넣는다(래퍼 xacro 참고).
+    moveit_assets.prepare_initial_positions()
+
     # 1) Real robot driver: ros2_control + scaled_joint_trajectory_controller + /joint_states.
+    use_mock = str(context.perform_substitution(
+        LaunchConfiguration('use_mock_hardware'))).lower() not in ('false', '0')
+    ur_control_args = {
+        'ur_type': ur_type,
+        'robot_ip': LaunchConfiguration('robot_ip'),
+        'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
+        'launch_rviz': 'false',
+        # 드라이버가 scaled 를 켜 둔 채 뜨지 않게 한다. 어느 컨트롤러를 켤지는 아래
+        # mode_gate 가 앱의 /looksgood/mode 를 보고 정한다 — 앱이 말하기 전엔 아무것도
+        # 실로봇을 못 움직인다.
+        'activate_joint_controller': 'false',
+        # ur_control → ur_rsp 로 내려가는 launch configuration. 우리 래퍼가 드라이버
+        # xacro 를 포함하면서 initial_positions_file 만 바꾼다.
+        'description_file': moveit_assets.START_POSE_XACRO,
+    }
+    if use_mock:
+        # mock 은 실로봇의 500 Hz RTDE 주기를 맞출 이유가 없다 — 125 Hz 로 내려 RT 권한 없는
+        # 컨테이너에서 "Overrun detected" 가 쏟아지지 않게 한다(ur20_mock_update_rate.yaml).
+        # 실로봇은 드라이버 기본(500 Hz)을 쓴다.
+        ur_control_args['update_rate_config_file'] = MOCK_UPDATE_RATE_YAML
     ur_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ur_robot_driver'), 'launch', 'ur_control.launch.py')),
-        launch_arguments={
-            'ur_type': ur_type,
-            'robot_ip': LaunchConfiguration('robot_ip'),
-            'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
-            'launch_rviz': 'false',
-        }.items(),
+        launch_arguments=ur_control_args.items(),
+    )
+    mode_gate = ExecuteProcess(
+        cmd=['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mode_gate.py'),
+             '--default-mode', LaunchConfiguration('default_mode')],
+        output='screen',
     )
 
     # 2) move_group with cuMotion pipeline (real time).
@@ -109,7 +138,9 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
         .planning_pipelines(pipelines=['ompl'])
-        .joint_limits(file_path='config/joint_limits.yaml')
+        # 관절 속도·가속도 한계는 Inspection 시간매김과 같은 파일 — RViz 의 scaling 과 앱의
+        # transit 배율이 같은 수에 곱해진다(파일 머리 주석 참고).
+        .joint_limits(file_path=moveit_assets.JOINT_LIMITS_YAML)
         .to_moveit_configs()
     )
     cumotion_cfg = os.path.join(
@@ -181,7 +212,19 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
 
     planner_actions = [cumotion] if use_cumotion else [scene_pub]
     # Delay move_group/RViz/planner so the driver's controllers are up first.
-    delayed = TimerAction(period=6.0, actions=[move_group, rviz, *planner_actions])
+    # move_group/RViz 는 /joint_states 가 **실제로 흐른 뒤**에 띄운다 — sim launch 와 같은
+    # 게이트다. 예전의 고정 6s 타이머는 드라이버가 늦으면 RViz 가 '현재 상태 없음' 인 채로
+    # 초기화돼 Query Goal 로봇이 0 자세에 굳어 있었다(mock 이 0 에서 시작하던 때는 안 보였고,
+    # 준비 자세에서 시작하게 되면서 드러났다).
+    joint_state_gate = ExecuteProcess(
+        cmd=['python3', os.path.join(MOVEIT_DIR, 'wait_for_joint_state_gate.py'),
+             '--topic', '/joint_states', '--timeout', '60.0'],
+        output='screen',
+    )
+    start_moveit_after_states = RegisterEventHandler(OnProcessExit(
+        target_action=joint_state_gate,
+        on_exit=[move_group, rviz, *planner_actions],
+    ))
 
     # cuMotion trajectories end with a tiny non-zero velocity; UR's scaled (and
     # plain) joint_trajectory_controller reject a goal whose last point has nonzero
@@ -198,7 +241,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
              'allow_nonzero_velocity_at_trajectory_end true && break; '
              'sleep 2; done'],
         output='screen')])
-    return [ur_control, delayed, allow_nonzero_vel]
+    return [ur_control, mode_gate, joint_state_gate, start_moveit_after_states, allow_nonzero_vel]
 
 
 def generate_launch_description():
@@ -214,6 +257,10 @@ def generate_launch_description():
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
         DeclareLaunchArgument('xrdf_path', default_value=CAMERA_XRDF),
+        DeclareLaunchArgument(
+            'default_mode', default_value='',
+            description='앱(isaac_pipeline)이 없을 때 mode_gate 가 쓸 모드(real/moveit 등). '
+                        '비우면 앱이 말하기 전까지 궤적 컨트롤러 전부 비활성(fail-safe).'),
         DeclareLaunchArgument(
             'use_cumotion', default_value='true',
             description='false = cuMotion 없이 OMPL 로만 계획한다. cuMotion 은 CUDA 13 '

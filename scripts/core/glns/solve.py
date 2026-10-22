@@ -32,12 +32,17 @@ from core.glns.candidates import (  # noqa: E402
     _collision_filter_representatives,
     _joint_limits_and_periods,
     _solve_pose_variant_candidates,
+    keep_front_reach,
+    pin_base_to_current,
 )
 from core.glns.ik_store import (  # noqa: E402
     build_settings,
+    find_ik_solutions,
     ik_solutions_path,
     load_ik_solutions,
+    read_ik_settings,
     save_ik_solutions,
+    settings_match,
 )
 from core.glns.problem import (  # noqa: E402
     build_gtsp_problem,
@@ -117,6 +122,18 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(dedup=True)
     parser.add_argument("--dedup-rad", type=float, default=PT.CANDIDATE_DEDUP_RAD,
                         help=f"[dedup] L∞ 관절 임계 rad (default: {PT.CANDIDATE_DEDUP_RAD})")
+    # 첫 값이 음수일 수 있으니 호출자는 --base-ref=<v> (등호) 로 넘긴다.
+    parser.add_argument("--base-ref", "--base-section-ref", dest="base_ref", type=float, default=None,
+                        help="현재 base(shoulder_pan) 관절값 [rad]. 주면 모든 IK 후보의 base 를 이 값에 "
+                             "가장 가까운 2π 등가로 다시 표현하고, base 를 비주기 관절로 다뤄 그 표현 "
+                             "안에서만 푼다")
+    parser.add_argument("--front-reach-deg", type=float, default=None,
+                        help="주면 base 가 그 지점 방향에서 이 각도 안을 보는 IK 후보만 쓴다(팔을 "
+                             "베이스 위로 넘겨 반대쪽에서 닿는 분기 제외). 보통 90")
+    parser.add_argument("--ik-solutions", type=Path, default=None,
+                        help="이 저장 IK 파일(ik/{N}/<시각>.h5)을 쓴다. 증강·dedup·seed 옵션은 파일 것을 "
+                             "따르고, 물체 pose·작업거리가 지금과 다르면 멈춘다. 없으면 설정이 맞는 최신 "
+                             "파일, 그것도 없으면 새로 푼다")
     parser.add_argument("--no-ik-reuse", action="store_true",
                         help="저장된 IK(ik_*.h5) 재사용을 끄고 항상 새로 계산한다")
     parser.add_argument("--max-candidates-per-viewpoint", type=int,
@@ -225,11 +242,12 @@ def _run_glns(
 
 
 def _default_output(object_name: str, count: int) -> Path:
-    """물체·viewpoint 수당 해는 하나다 — 재solve 하면 덮어쓴다.
+    """``--output`` 이 없을 때의 해 경로 — 스탬프를 붙여 **덮어쓰지 않는다**.
 
-    옛 궤적 npz 는 mtime 비교로 자동 무효화되므로(trajectory_studio) 이력을 남길 필요가 없다.
+    같은 물체·viewpoint 수로 다시 풀어도 이전 해가 남아야 비교·복구가 된다. 해 하나를
+    mtime 으로 관리하는 호출자(trajectory_studio)는 --output 으로 고정 이름을 직접 준다.
     """
-    return config.get_solution_path(object_name, count)
+    return config.get_solution_path(object_name, count, stamp=config.run_stamp())
 
 
 def _path_reconfig_fields(selected, threshold_rad, base_idx_arr, wrist_idx_arr) -> dict:
@@ -307,6 +325,14 @@ def main() -> int:
     world = PT.build_collision_world(args.object)
     robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
+    if args.base_ref is not None:
+        # base 표현을 현재 자세 기준으로 고정한다: 후보는 아래에서 현재 base 에 가장 가까운
+        # 등가로 다시 표현하고, 여기서 base 를 비주기로 바꿔 dedup·비용·unwrap 이 base 의 2π
+        # 등가를 아예 만들지 않게 한다 — 그래야 "가까워 보이지만 실제로는 한 바퀴" 인 비용이 없다.
+        joint_periods = joint_periods.copy()
+        joint_periods[0] = 0.0
+        print(f"  Base pinned to the 2pi equivalents nearest the current base "
+              f"{np.rad2deg(args.base_ref):.1f} deg (base treated as non-periodic)")
     periodic_names = [
         name for name, period in zip(
             robot_cfg["robot_cfg"]["kinematics"]["cspace"]["joint_names"], joint_periods)
@@ -314,6 +340,36 @@ def main() -> int:
     ]
     print(f"  Periodic joint lifting enabled: {periodic_names}")
     wrist3_fixed = float(config.ROBOT_START_STATE[-1])
+    if args.ik_solutions is not None:
+        # 사용자가 고른 IK 파일이 옵션의 진실이다: 증강·dedup·seed 는 파일 것을 따른다. 물체
+        # pose 와 작업거리만은 지금 요청과 같아야 한다 — 물체를 옮긴 뒤의 옛 해로 풀면 안 된다.
+        if args.no_ik_reuse:
+            raise SystemExit("--ik-solutions and --no-ik-reuse contradict each other")
+        stored = read_ik_settings(args.ik_solutions)
+        if stored is None:
+            raise SystemExit(f"--ik-solutions {args.ik_solutions}: missing or not an IK solutions file")
+        want_pose = {"object_position": config.TARGET_OBJECT["position"],
+                     "object_quat_wxyz": config.TARGET_OBJECT["rotation"],
+                     "working_distance_m": float(source["wd_m"])}
+        if not settings_match(want_pose, stored):
+            raise SystemExit(
+                f"--ik-solutions {args.ik_solutions}: it was solved for a different object pose "
+                f"or working distance (file: pos {np.round(stored['object_position'], 4).tolist()}, "
+                f"now: {np.round(want_pose['object_position'], 4).tolist()}). "
+                "Run Check and Save IK again for the current placement.")
+        args.roll_augment = bool(stored["roll_augment"])
+        args.roll_step_deg = float(stored["roll_step_deg"])
+        args.tilt_augment = bool(stored["tilt_augment"])
+        args.tilt_angles_deg = [float(x) for x in np.atleast_1d(stored["tilt_angles_deg"])]
+        args.tilt_azimuths = int(stored["tilt_azimuths"])
+        args.dedup = bool(stored["dedup"])
+        if args.dedup:
+            args.dedup_rad = float(stored["dedup_rad"])
+        args.num_seeds = int(stored["num_seeds"])
+        args.ik_seed = int(stored["ik_seed"])
+        print(f"  IK options taken from the picked file: roll={args.roll_augment} "
+              f"tilt={args.tilt_augment} dedup={args.dedup} seeds={args.num_seeds} "
+              f"({args.ik_solutions})")
     lock_nominal_wrist3 = not (args.roll_augment or args.tilt_augment)
     # Check-and-Save-IK 가 같은 물체 pose·증강·dedup 으로 저장해둔 IK 가 있으면 그대로 쓰고,
     # 아니면 새로 계산해 그 자리에 저장한다(다음 실행/모드가 재사용). ik_store 가 진실이다.
@@ -327,11 +383,20 @@ def main() -> int:
         num_seeds=args.num_seeds, ik_seed=args.ik_seed,
         lock_nominal_wrist3=lock_nominal_wrist3,
     )
-    ik_path = ik_solutions_path(source_path, roll_augment=args.roll_augment,
-                                tilt_augment=args.tilt_augment, dedup=args.dedup)
-    loaded = None if args.no_ik_reuse else load_ik_solutions(ik_path, ik_settings)
+    # 저장은 항상 새 스탬프 파일로(덮어쓰기 없음). 재사용은 설정이 맞는 **가장 최근** 파일.
+    ik_path = ik_solutions_path(source_path, stamp=config.run_stamp())
+    if args.ik_solutions is not None:
+        picked = load_ik_solutions(args.ik_solutions, ik_settings)
+        if picked is None:
+            raise SystemExit(f"--ik-solutions {args.ik_solutions}: unreadable or corrupt")
+        found = (picked, args.ik_solutions)
+        print(f"  Using the IK solutions file you picked: {args.ik_solutions}")
+    else:
+        found = None if args.no_ik_reuse else find_ik_solutions(
+            source_path, want_settings=ik_settings)
+    loaded, ik_path_used = (found if found is not None else (None, None))
     if loaded is not None and len(loaded[0]) != n_viewpoints:
-        print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path})")
+        print(f"  Saved IK viewpoint-count mismatch - recomputing ({ik_path_used})")
         loaded = None
 
     if loaded is not None:
@@ -339,7 +404,7 @@ def main() -> int:
         removed_collision = 0
         total_loaded = int(sum(len(r) for r in representatives_raw))
         print(f"  Reusing saved IK ({total_loaded} candidates, object pose + settings "
-              f"match): {ik_path}")
+              f"match): {ik_path_used}")
     else:
         targets = _build_pose_variants(
             world_poses, source["wd_m"], roll_augment=args.roll_augment,
@@ -362,6 +427,16 @@ def main() -> int:
                               ik_settings, source_viewpoints=source_path,
                               object_name=args.object)
             print(f"  Saved IK for reuse -> {ik_path}")
+    if args.base_ref is not None:
+        representatives_raw, candidate_metadata_raw, base_moved, base_removed = pin_base_to_current(
+            representatives_raw, candidate_metadata_raw, args.base_ref, robot_cfg)
+        print(f"  Base pin: re-expressed {base_moved} candidates to the nearest 2pi equivalent, "
+              f"dropped {base_removed} (no in-limit equivalent)")
+    if args.front_reach_deg is not None:
+        representatives_raw, candidate_metadata_raw, front_removed, front_lost = keep_front_reach(
+            representatives_raw, candidate_metadata_raw, args.front_reach_deg)
+        print(f"  Front-reach filter ({args.front_reach_deg:g} deg): removed {front_removed} "
+              f"reach-over candidates; {front_lost} viewpoint(s) lost reachability")
     candidate_counts_raw = np.asarray(
         [len(reps) for reps in representatives_raw], dtype=np.int32,
     )
@@ -636,6 +711,9 @@ def main() -> int:
         "joint_upper_rad": joint_upper.astype(float).tolist(),
         "joint_periods_rad": joint_periods.astype(float).tolist(),
         "joint_unwrapped": True,
+        "base_ref_rad": None if args.base_ref is None else float(args.base_ref),
+        "front_reach_deg": (None if args.front_reach_deg is None
+                            else float(args.front_reach_deg)),
         "delaunay_expand_hops": int(args.delaunay_expand_hops),
         "graph_edge_count": int(len(graph_edges)),
         "glns_mode": args.glns_mode,

@@ -27,16 +27,19 @@ data/{물체}/mesh/source.obj                              ← 준비물
       ↓
 data/{물체}/viewpoint/{N}/viewpoints.h5           ← Viewpoint Studio
       ↓
-data/{물체}/ik/{N}/ik_*.h5                               ← Solve IK
+data/{물체}/ik/{N}/{시각}.h5                      ← Solve IK
       ↓
-data/{물체}/trajectory/{N}/solution.h5                   ← 방문 순서
+data/{물체}/trajectory/{N}/solution_{시각}.h5            ← 방문 순서
       ↓
-data/{물체}/trajectory/{N}/trajectory.csv (+ .npz)       ← 실행 경로
+data/{물체}/trajectory/{N}/scan_{시각}.csv (+ .npz)       ← 검사 경로
+data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv         ← tilt 경로
       ↓
 Isaac 미리보기  또는  실제 로봇
 ```
 
 `{N}`은 그 물체의 viewpoint 개수다. 같은 물체라도 viewpoint 수가 다르면 다른 폴더에 저장되므로, 여러 설정을 나란히 두고 비교할 수 있다.
+
+`{시각}`은 만든 시각(`YYYYMMDD_HHMMSS`)이다. **IK 해·방문 순서·경로는 덮어쓰지 않는다** — 다시 만들면 새 파일이 생기고 이전 것은 그대로 남는다. 한 번의 생성에서 나온 `solution_…`과 `trajectory_…`는 같은 시각을 가져 짝이 보인다. IK 해는 옵션과 물체 배치가 같은 것 중 **가장 최근 파일**을 자동으로 재사용한다.
 
 > 📷 **PLATE 01 · 사진**
 >
@@ -99,6 +102,8 @@ docker exec -it ros-jazzy bash
 
 > 💡 **셸을 여러 개 쓴다**
 >
+> 같은 컴퓨터에서 다른 사람의 ROS 프로그램이 돌고 있으면 서로 섞여서 로봇 스택이 안 뜬다. 컨테이너가 `ROS_DOMAIN_ID=30`으로 격리돼 있지만, 그 설정이 들어가기 전에 만든 컨테이너라면 여는 터미널마다 `export ROS_DOMAIN_ID=30`을 먼저 친다.
+>
 > MoveIt으로 제어할 때는 터미널이 **두 개** 필요하다. 둘 다 위 `docker exec -it ros-jazzy bash`로 같은 컨테이너에 들어간 것이면 된다. 새 탭을 열어 같은 명령을 다시 치면 된다.
 
 ### 앱 실행 명령
@@ -141,17 +146,28 @@ uv run scripts/apps/viewpoint_studio.py
 
 > 📷 **PLATE 03 · 사진**
 >
-> Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 패널이 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.
+> Viewpoint Studio 전체 화면. 3D 뷰에 물체 메시·표면점·카메라 위치·그래프 간선이 모두 켜져 있고, 오른쪽 `Viewpoints` 폴더가 펼쳐진 상태. 하단 진단 한 줄이 함께 보이면 좋다.
 
-### 화면 구성
+### 화면 구성 — 위에서 아래로가 곧 작업 순서
 
 | 영역 | 역할 |
 | --- | --- |
 | `Object` | 물체 선택. 패널 맨 위에 접히지 않고 항상 보인다. **바꾸면 화면이 비워진다** |
-| `Viewpoints` | 이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 새로 만든다 |
-| `Display` | 화면에 무엇을 그릴지 켜고 끄는 토글만 모여 있다 |
-| `Solver graph (hops)` | 다음 단계가 실제로 풀 그래프로 관점을 바꾸는 슬라이더 |
+| `Viewpoints` | 이 물체의 viewpoint를 어디서 얻을지 — 저장본을 열거나, 아래 단계로 새로 만든다 |
+| `Camera spec` | 카메라의 물리 스펙 5개 |
+| `Target` | 어느 파일의 어느 면을 검사할지, 후보에서 무엇을 걸러낼지 |
+| `Candidates` | 표면에 점을 어떻게 뿌릴지 |
+| `Selection` | 뿌린 점 중 무엇을 쓸지 |
+| `Verify` | 덮였는지 셀지 |
+| `Generate viewpoints` | 위 네 단계를 한 번에 돌리는 버튼 |
+| `Solver graph` | 점 위에 이동 제약 그래프를 만든다 (`Build graph`) |
+| `Save h5` | 전부 파일로 저장 |
+| `Display` | 화면에 무엇을 그릴지 토글 + `Solver graph (hops)` 렌즈 |
 | 진단 한 줄 | 패널 맨 아래. 지금 그래프의 상태를 숫자로 말한다 |
+
+> 💡 **버튼이 셋인 이유**
+>
+> **점을 만드는 일**(`Generate viewpoints`)과 **점 위에 그래프를 얹는 일**(`Build graph`)은 별개다. 그래프 노브를 바꿔도 점의 개수·위치는 안 바뀌고 간선만 바뀐다. 그래서 그래프만 다시 만들 때 점을 다시 뽑을 필요가 없다. `Save h5`는 둘의 결과를 함께 쓴다 — 그래프가 없으면 저장이 먼저 만들어 준다(그래프 없는 파일은 다음 단계가 거부하기 때문).
 
 ### 물체 및 Viewpoint 불러오기
 
@@ -168,64 +184,124 @@ uv run scripts/apps/viewpoint_studio.py
 | `(generated · unsaved)` | 방금 만들었지만 **아직 저장하지 않았다** |
 | 파일 이름 | 그 파일을 불러온 상태 |
 
-### 카메라 스펙
+### Camera spec — 카메라 스펙
 
-세 값이 viewpoint의 위치를 직접 결정한다. 그리고 이 값들은 `.h5`에 함께 저장되어 **이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.** 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.
+다섯 값이 viewpoint의 위치를 직접 결정한다. 앞의 셋은 `.h5`에 함께 저장되어 **이후 모든 단계(IK · 경로 생성 · Isaac)가 이 값을 쓴다.** 나중에 바꾸려면 viewpoint를 다시 만들어야 한다.
 
-| 컨트롤 | 의미 | 영향 |
+| 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
-| `FOV width (mm)` | working distance에서 카메라가 담는 가로 실폭 | 클수록 viewpoint 수가 준다 |
-| `FOV height (mm)` | 같은 거리에서의 세로 실폭 | 〃 |
-| `Working distance (mm)` | 표면에서 카메라까지 띄우는 거리 | **로봇이 실제로 가는 위치가 바뀐다** |
+| `FOV width (mm)` | 50 | working distance에서 카메라가 담는 가로 실폭. 클수록 viewpoint 수가 준다 |
+| `FOV height (mm)` | 50 | 같은 거리에서의 세로 실폭 |
+| `Working distance (mm)` | 195 | 표면에서 카메라까지 띄우는 거리. **로봇이 실제로 가는 위치가 바뀐다** |
+| `Max incidence (°)` | 0 | 프레임 가장자리에서 표면이 기울어 보여도 되는 한계. `0` = 제한 없음. **CAD faces 샘플러에서만 반영** |
+| `Depth of field ± (mm)` | 0 | 초점이 맞는 거리 범위. `0` = 제한 없음. **CAD faces 샘플러에서만 반영** |
 
-> 💡 **Working distance에는 하한이 있다**
+> ⚠️ **주의 · Working distance의 기준점은 카메라 끝이다**
 >
-> 렌즈 물리 제약이라, 그보다 작은 값을 넣으면 생성이 거부된다. 검사면이 렌즈 배럴 안쪽에 놓이는 값이기 때문이다.
+> 렌즈 배럴 앞면에서 검사면까지의 거리다. 벤더 공칭 WD는 카메라 몸체 앞면 기준이라 **77.77 mm 더 큰 숫자**다 — 공칭값을 그대로 넣으면 검사면이 그만큼 멀어진다. 하한이 있어 검사면이 카메라 끝보다 안쪽이면 생성이 거부된다.
+>
+> 뒤의 둘(`Max incidence`·`Depth of field`)은 면의 곡률과 함께 **‘유효 FOV’**를 정한다. 곡률이 급한 면은 프레임 가장자리가 기울고 멀어져 공칭 FOV를 다 못 쓴다. 곡면 정의가 필요해서 CAD 샘플러에서만 쓰인다.
 
-### 생성 파라미터
+### Target — 무엇을 검사하나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Mesh source` | `source.obj` | `data/{물체}/mesh/` 안의 파일. `.stp`를 고르면 CAD 원본을 직접 읽는다 |
+| `Align` | auto | CAD의 어느 축이 ‘위’인가. `auto`는 `source.obj`와 맞춘다. 모호하면 콘솔에 경고가 뜨고, 그때 `z-up`/`y-up`으로 못박는다 |
+| `Part` | (all) | **[.stp 전용]** 파일 안의 부품(솔리드). 검사 대상만 샘플링하고 자세·원점도 그 부품 기준으로 맞춘다. 물체별 기본값이 있다 |
+| `Material RGB` | 물체별 | **[.obj 전용]** 예 `0,255,0` — 그 재질 면만 검사한다. 비우면 메시 전체 |
+| `Filter bottom faces` | 켬 | 아래를 보는 viewpoint 제거 — 로봇이 밑에서 올려다볼 수 없다 |
+| `Bottom angle (°)` | 80 | 월드 −z에서 이 각 안쪽을 보는 면을 버린다 |
+| `Filter occluded (ray)` | 켬 | 카메라 자리에서 광선을 쏴 **실제로 안 보이는 점**을 제거 — 파인 곳, 지그 뒤 |
+
+> 💡 **Part와 Material RGB는 같은 질문의 두 답이다**
+>
+> “이 파일에서 어느 면이 검사 대상인가.” 파일 종류에 따라 하나만 살아 있다 — `.stp`를 고르면 `Material RGB` 칸이 비고(CAD 면에는 삼각형 색이 없다), `.obj`는 부품이 하나라 `Part`가 `(all)`로 고정된다.
+
+### Candidates — 점을 어떻게 뿌리나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Sampler` | Surface FPS (mesh) | 어디에 점을 뿌리나. 두 가지 |
+| `FOV overlap (%)` | — | 이웃 촬영이 겹치는 비율. 간격 = FOV × (1 − overlap) |
+
+| Sampler | 특징 | overlap 권장 |
+| --- | --- | --- |
+| `Surface FPS (mesh)` | 삼각형 메시 위에 균등하게 뿌린다. `.obj`든 `.stp`든 된다. 프레임 모형이 없어 겹침으로 커버리지를 만든다 | **50%** |
+| `CAD faces (STEP)` | **`Mesh source`가 `.stp`일 때만.** 면마다 FOV 격자를 깔고 트리밍 경계 안쪽만 남긴다. 법선이 해석적이라 테셀레이션 오차가 0. 프레임이 사각형이라 겹침 0으로도 타일링된다 | **≈10%** (오차 여유) |
 
 ---
 
-| 컨트롤 | 범위 | 무엇을 정하나 |
+### Selection — 뿌린 점 중 무엇을 쓰나
+
+| 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
-| `FOV overlap (%)` | — | 이웃한 촬영 영역이 겹치는 비율. **점의 개수와 간격**을 정한다. 표면 간격 = min(FOV) × (1 − overlap). 올리면 촘촘해지고 검사 시간이 늘어난다 |
+| `Mode` | 최소 집합 (greedy) | 아래 둘 중 하나 |
+| `Target coverage (%)` | 100 | greedy가 이 커버리지에 도달하면 멈춘다. 후보 전체로도 못 미치면 더 보탤 것이 없을 때까지 |
+
+| Mode | 동작 |
+| --- | --- |
+| `샘플러 그대로` | 뽑은 점을 그대로 쓴다. 구멍이 남을 수 있다 — 진단용 |
+| `최소 집합 (greedy)` | 못 덮은 셀을 겨냥한 **구멍 후보**까지 풀에 넣고, 그 풀에서 커버리지를 채우는 최소 집합을 고른다. 샘플러 혼자로는 안 닫히던 곳까지 닫으면서 점 수는 오히려 준다. **CAD faces 전용** |
+
+### Verify — 덮였나
+
+| 컨트롤 | 기본 | 의미 |
+| --- | --- | --- |
+| `Coverage check` | 켬 | 면마다 매개변수 공간을 잘게 나눠 ‘덮임 / 덮을 수 없음 / 구멍’을 센다. Selection과 같은 판정을 쓰므로 두 숫자가 어긋나지 않는다. **CAD faces 전용**, 0.5초 내외 |
+
+### Generate viewpoints — 실행
+
+폴더 **밖**에 있는 버튼이다. 위의 Target · Candidates · Selection · Verify 네 단계를 한 번에 돌린다. 끝나면 바로 아래에 결과가 뜬다.
+
+**화면 · Generate 결과 줄 읽는 법**
+
+```
+Done · 54 vp · CAD faces · 구멍 후보 7개 · 후보 61개에서 선택
+
+커버리지 100.0% (312/312 cm²) · 접근 불가 25cm² 제외
+```
+
+| 항목 | 뜻 |
+| --- | --- |
+| `N vp` | 최종 viewpoint 개수 |
+| `구멍 후보 N개` | 격자가 못 덮은 셀을 겨냥해 추가된 후보 수 |
+| `후보 N개에서 선택` | greedy가 고르기 전 풀의 크기 |
+| `커버리지 %` | 검사 가능한 면적 중 덮인 비율. 분모는 **검사 가능한 면적**이다 — 아래를 향하거나 어떤 카메라로도 못 보는 곳은 뺐고, 뺀 면적은 `접근 불가 … 제외`로 **반드시 같이 보여준다** |
+| `구멍: 면12(78%, 4cm²)` | 90% 미만으로 덮인 면과 그 면적 (최대 3개). 어디가 비었는지 알려준다 |
+
+### Solver graph — Build graph
+
+점이 다 정해진 뒤 그 위에 **Delaunay 인접 그래프**를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다. 셋 다 점의 개수·위치는 바꾸지 않는다.
+
+| 컨트롤 | 범위 | 의미 |
+| --- | --- | --- |
 | `Max edge length (×)` | 1.0 – 5.0 | 간선 길이 상한. **주변 카메라 위치 간격의 배수**다 (표면 간격이 아니다) |
 | `Max normal angle (°)` | 15 – 180 | 두 점의 법선이 이보다 벌어지면 잇지 않는다. `90°`면 반대편 면이 차단된다 |
 | `Neighbor search (k)` | 3 – 30 | 삼각분할 후보로 볼 이웃 수. 거의 건드릴 일이 없다 |
+| `Build graph` | — | 그래프를 만든다. `Done · 329 edges · 2 component(s) · 간선 median/max 31/152 mm` 처럼 뜬다 |
 
-> 💡 **뒤의 셋이 그래프를 만든다**
->
-> `Max edge length` · `Max normal angle` · `Neighbor search` 셋이 **Delaunay 인접 그래프**를 만든다. 이 그래프가 다음 단계의 순서 제약이 되므로, 간선이 어떻게 이어지는지가 로봇의 이동 비용을 좌우한다.
->
-> 네 값 모두 **슬라이더가 아니라 숫자 입력칸**이다. 고쳐도 `Generate`를 누르기 전까지는 화면이 바뀌지 않는다.
-
-#### 실행
-
-| 버튼 | 동작 |
-| --- | --- |
-| `Generate` | 위 설정으로 viewpoint를 만든다. 끝나면 바로 아래에 `Done · 132 vp · 329 edges · 2 component(s)` 처럼 결과가 뜬다 |
-| `Save h5` | 만든 결과를 파일로 저장한다. **누르지 않으면 남지 않는다** — 저장 전에는 `Saved viewpoints`가 `(generated · unsaved)`로 표시된다 |
+---
 
 > 📷 **PLATE 04 · 사진**
 >
-> `Viewpoints` 폴더를 펼친 확대 컷. `Saved viewpoints` → `Camera spec` → `Generate viewpoints` 순서와 노브 네 개, 그 아래 `Done ·` 상태 줄이 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.
+> `Viewpoints` 폴더를 펼친 확대 컷. `Camera spec` → `Target` → `Candidates` → `Selection` → `Verify` → `Generate viewpoints` → `Solver graph` → `Save h5` 순서가 한눈에 들어오게. 툴팁 하나를 띄운 상태면 더 좋다.
 
-### 결과 확인
-
----
+### 결과 확인 — Display
 
 | 토글 | 기본 | 보여주는 것 |
 | --- | --- | --- |
 | `Mesh` | 켬 | 물체 표면 |
+| `Material colors` | 끔 | 메시를 재질 색으로 그린다. `Material RGB`가 무엇을 고르는지 눈으로 확인된다 |
 | `Surface points` | 켬 | 메시 표면 위의 검사 지점 |
 | `Camera positions` | 켬 | 표면점 + 법선 × WD — **로봇 EE가 실제로 가는 곳** |
 | `Graph edges` | 켬 | 다음 단계의 순서 제약 그래프. **색이 연결 성분**을 나타낸다 |
+| `Coverage cells` | 끔 | 커버리지 셀을 상태별 색으로 — **초록** 덮임 · **빨강** 구멍 · **회색** 검사 불가. 상태 줄의 숫자가 “어디”인지 보여준다 (CAD faces + Coverage check일 때만) |
+| `Solver graph (hops)` | 2 | 다시 만들지 않고 **‘다음 단계가 실제로 볼 간선’**으로 관점만 바꾸는 슬라이더. 끌면 즉시 반영된다. **저장 내용은 바뀌지 않는다** |
 
----
-
-> 💡 **hops는 다음 단계와 맞춰 둔다**
+> ⚠️ **주의 · hops는 다음 단계와 맞춰 둔다**
 >
-> 파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 `--delaunay-expand-hops`와 **같은 값**으로 두면 화면과 다음 단계가 같은 그래프를 본다. 양쪽 기본은 `2`다.
+> 파일에 저장되는 간선은 항상 1-hop이고, 경로 생성이 그것을 N-hop으로 확장해 푼다. 이 슬라이더를 Isaac Pipeline의 `--delaunay-expand-hops`와 **같은 값**으로 두면 화면과 다음 단계가 같은 그래프를 본다. **지금 두 기본값이 다르다** — Studio는 `2`, Isaac Pipeline은 `4`. 한쪽을 맞춰 두고 보는 것이 안전하다.
 
 #### 진단 한 줄 읽기
 
@@ -238,17 +314,15 @@ uv run scripts/apps/viewpoint_studio.py
 | 항목 | 뜻 |
 | --- | --- |
 | `edges` | 저장될 간선 수 (1-hop) |
-| `components` | 그래프가 몇 조각인지. **2 이상이어도 대개 정상이다** — 조각 사이를 잇는 이동 구간이 생길 뿐이고, 실제로 쓰는 파일 다수가 2성분 이상이다 |
+| `components` | 그래프가 몇 조각인지. **2 이상이어도 대개 정상이다** — 조각 사이를 잇는 이동 구간이 생길 뿐이다 |
 | `isolated` | 간선이 하나도 없는 외톨이 점. 다음 단계가 제약 그래프에서 떨어뜨린다 |
 | `GLNS: N (h-hop)` | 현재 hops 설정에서 다음 단계가 실제로 푸는 간선 수 |
 
-> ⚠️ **주의 · No graph**
->
-> 진단 줄에 `⚠ No graph`가 뜨면 그 파일에 Delaunay 간선이 없다는 뜻이다. 경로 생성이 거부하므로 다시 만들어야 한다.
+---
 
 > 📷 **PLATE 05 · 사진**
 >
-> 같은 물체를 `Max normal angle`만 바꿔 두 번 생성한 비교 컷. 성분이 여러 조각으로 갈라진 경우와 하나로 이어진 경우를, 하단 진단 한 줄과 함께 나란히.
+> CAD faces로 생성한 결과에서 `Coverage cells`를 켠 뷰포트. 초록(덮임)·빨강(구멍)·회색(검사 불가) 셀이 면 위에 깔린 모습과, 같은 화면의 Generate 결과 줄(커버리지 % · 구멍 면 목록)을 함께.
 
 ### Viewpoint 저장
 
@@ -260,7 +334,7 @@ uv run scripts/apps/viewpoint_studio.py
 data/{물체}/viewpoint/{개수}/viewpoints.h5
 
 # 예
-data/cylinder_sample/viewpoint/132/viewpoints.h5
+data/cylinder_sample/viewpoint/54/viewpoints.h5
 ```
 
 이 파일 경로를 다음 단계인 Isaac Pipeline에 그대로 넣는다. 파일 안에는 각 지점의 위치·법선·카메라 위치와 함께 **카메라 스펙, 그래프 간선**이 들어 있다. 방문 순서는 들어 있지 않다.
@@ -269,10 +343,12 @@ data/cylinder_sample/viewpoint/132/viewpoints.h5
 
 1. `Object`에서 물체를 고른다.
 2. `Camera spec`에서 FOV와 working distance를 정한다.
-3. `Generate viewpoints`에서 overlap과 그래프 노브 3개를 조절한다.
-4. `Generate`로 만든다.
-5. `Display` 토글과 하단 진단 한 줄로 점 분포와 그래프를 확인한다.
-6. 마음에 들면 `Save h5`로 저장한다.
+3. `Target`에서 파일(`.obj`/`.stp`)과 검사 대상 면을 고른다.
+4. `Candidates`에서 Sampler와 overlap을 정한다 — CAD면 `CAD faces` + 10%, 메시면 `Surface FPS` + 50%.
+5. `Generate viewpoints`를 누르고, 결과 줄의 커버리지와 구멍을 본다. 부족하면 3·4로 돌아간다.
+6. `Build graph`로 그래프를 만들고, 진단 한 줄의 성분·외톨이 수를 본다.
+7. `Display` 토글로 점·카메라 위치·커버리지 셀을 확인한다.
+8. 마음에 들면 `Save h5`로 저장한다.
 
 ---
 
@@ -301,6 +377,12 @@ Isaac Pipeline은 두 개의 축으로 동작을 정한다. **어느 로봇을 �
 > 🤖 **실로봇 · ROS 스택과 짝이 맞아야 한다**
 >
 > Run 모드가 `real`이면 ROS 쪽도 real 스택을 띄워야 하고, `sim`이면 sim 스택을 띄워야 한다. **두 스택을 동시에 띄우면 안 된다** — 로봇 모델이 충돌해 ROS 노드가 죽는다.
+
+> 💡 **모드는 앱이 정하고, 스택이 따른다**
+>
+> 앱은 지금 모드를 ROS 토픽(`/looksgood/mode`)에 계속 알린다. 스택 쪽 게이트가 그걸 받아 **MoveIt용 컨트롤러와 검사용 컨트롤러 중 하나만** 켜 둔다. 그래서 스택을 나중에 띄우거나 다시 띄워도 맞는 상태가 되고, 앱이 꺼지면 2초 안에 두 컨트롤러가 모두 꺼져 아무것도 로봇을 못 움직인다.
+>
+> 앱 없이 RViz만 쓰려면 launch에 `default_mode:=sim/moveit`(또는 `real/moveit`)을 준다.
 
 > 📷 **PLATE 06 · 사진**
 >
@@ -346,7 +428,7 @@ ros2 launch scripts/moveit/ur20_isaac_state_synced.launch.py
 
 ### MoveIt × Real
 
-셸 1의 Isaac 앱을 `--mode real --pipeline-mode moveit`으로 켜고, 셸 2에서 real 스택을 띄운다. **기본값은 실제 로봇이 아니라 mock hardware**라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다.
+셸 1의 Isaac 앱을 `--mode real --pipeline-mode moveit`으로 켜고, 셸 2에서 real 스택을 띄운다. **기본값은 실제 로봇이 아니라 mock hardware**라, 로봇 없이도 전체 흐름을 그대로 연습할 수 있다. mock 로봇은 sim과 같은 준비 자세에서 시작한다(실제 로봇은 지금 있는 자세가 그대로다).
 
 **REAL · 셸 2 · mock hardware (기본)**
 
@@ -489,6 +571,7 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 | `tilt-azimuths` | 8 | 기울이는 방향을 몇 갈래로 나눌지 |
 | `dedup` | 켬 | 거의 같은 해를 하나로 합친다 |
 | `dedup-rad` | 0.08 | 이 값 안쪽이면 같은 해로 본다 (rad) |
+| `face the viewpoint (no reach-over)` | 켬 | base(1축)가 **그 지점 쪽을 보는** IK 해만 쓴다. UR은 손목 위치 하나에 base 해가 둘이다 — 지점을 보는 자세와, 반대쪽을 보고 팔을 베이스 위로 넘겨 닿는 자세. 뒤의 것이 뽑히면 로봇이 반대쪽으로 돈다. 끄면 둘 다 후보로 쓴다. (현재 base에 가장 가까운 ±360° 표현으로 맞추는 것은 항상 한다 — 자세를 잃지 않는 표현 선택일 뿐이다) |
 | `num-seeds` | 32 | 한 지점당 IK를 몇 번 다른 시작값으로 풀지. **키우면 더 많이 찾지만 느려진다** |
 | `ik-batch-size` | 128 | GPU에서 한 번에 푸는 개수. 결과에는 영향이 없고 속도·메모리만 바뀐다 |
 
@@ -509,20 +592,35 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 
 앞으로 만들 경로가 **얼마나 빠르게 실행될지**를 정한다. 이 값들은 경로를 만드는 순간 파일에 함께 구워지므로, **경로를 만들기 전에** 정해야 한다. 이미 만든 경로는 예전 속도를 그대로 갖고 있다.
 
-| 컨트롤 | 기본 | 의미 |
-| --- | --- | --- |
-| `scan EE speed [mm/s]` | 10 | 검사 구간에서 카메라가 움직이는 속도 |
-| `scan EE angular [deg/s]` | 20 | 검사 구간에서 카메라 방향이 돌아가는 속도 |
-| `max joint vel [rad/s]` | 0.3 | 관절 속도 상한. **이동 구간의 속도는 이 값만으로 정해진다** |
-| `min segment dt [s]` | 0.05 | 구간 하나에 최소한 들이는 시간. 짧은 구간이 순간적으로 빨라지는 것을 막는다 |
-| `corner threshold [deg]` | 30 | 이보다 급하게 꺾이는 곳부터 감속한다 |
-| `corner max slowdown [x]` | 2.5 | 가장 급한 꺾임에서 몇 배 느려질지. `1`이면 감속하지 않는다 |
+경로에는 두 종류의 구간이 있고, 종류마다 다른 쌍이 속도를 정한다.
 
-> 💡 **셋 중 가장 느린 것이 이긴다**
+| 구간 | 어디에 있나 | 속도를 정하는 값 |
+| --- | --- | --- |
+| 보간 구간 | viewpoint 사이를 카메라가 **직선으로** 훑는 곳, tilt 부채꼴 | EE 속도, EE 각속도 (그 직선 위의 속도) |
+| 플래닝 구간 | 모션 플래너가 만든 이동(transit), `Plan to Start` / `Plan to HOME` | 관절 속도 배율, 관절 가속도 배율 |
+
+그래서 배율 슬라이더가 둘이다. 각 슬라이더 옆의 숫자 둘은 **그 슬라이더와 하나의 값**이다 — 슬라이더를 끌면 둘이 따라오고, 둘 중 아무 숫자나 직접 치면 슬라이더와 나머지가 따라온다. 두 그룹은 서로 독립이라 스캔은 천천히, 이동은 빠르게 둘 수 있다.
+
+| 컨트롤 | 기본(f=1) | 배율과의 관계 | 의미 |
+| --- | --- | --- | --- |
+| `scan factor` (슬라이더 + 숫자) | 1.0 | 0.1 – 3.0 | 보간 구간의 시간 배율 |
+| `EE speed [mm/s]` | 10 | × f | 카메라가 표면을 따라 움직이는 속도 |
+| `EE angular [deg/s]` | 20 | × f | 카메라가 도는 속도 |
+| `transit factor` (슬라이더 + 숫자) | 1.0 | 0.1 – 2.23 | 플래닝 구간의 시간 배율 |
+| `joint velocity scaling` | 0.2 | × f | 관절별 속도 한계에 곱하는 배율(0–1). MoveIt/RViz 의 Velocity Scaling 과 같은 수 |
+| `joint acceleration scaling` | 0.2 | × f² | 관절별 가속도 한계에 곱하는 배율(0–1). MoveIt/RViz 의 Acceleration Scaling 과 같은 수 |
+
+> 💡 **MoveIt 과 같은 숫자**
 >
-> 검사 구간은 **카메라 속도 · 카메라 회전 속도 · 관절 속도**를 모두 만족하는 시간으로 계산된다. 그래서 카메라 속도를 3배로 올려도 관절 속도에 걸리면 3배가 되지 않는다. 이동 구간은 검사가 아니므로 관절 속도만 본다.
+> 관절별 한계(UR20 속도 120/120/150/210/210/210 deg/s, 가속도 5 rad/s²)는 `scripts/moveit/ur_config/joint_limits.yaml` 한 파일에 있고, MoveIt(move_group, RViz)과 LooksGood 이 **같은 파일**을 읽는다. 배율 0.2 는 어느 쪽에서든 "한계의 20%" 다. transit 배율 1.0 은 RViz 패널에서 두 Scaling 을 0.2 로 둔 것과 같은 속도다. 한계를 바꾸려면 그 파일을 고친다 — 양쪽이 같이 바뀐다.
+
+> 💡 **왜 가속도만 f² 인가**
 >
-> `0`을 넣으면 그 제한 하나를 끄는 뜻이다. 음수는 받지 않는다.
+> 궤적을 시간축으로 1/f 만큼 압축하면 속도는 f배, 가속도는 f²배가 된다. 그래서 배율 2로 만든 이동은 배율 1의 이동과 **모양이 같고 시간만 절반**이다. 가속도 배율 칸에 0.8 을 치면 배율은 √(0.8 ÷ 0.2) = 2 가 된다. transit 배율의 상한 2.23 은 가속도 배율이 1.0(로봇 한계 100%)에 닿는 곳이다.
+
+> 💡 **화면에 없는 값**
+>
+> 관절 가속도 한계는 로봇의 한계라 출발·정지, 꺾이는 곳, 플래닝 구간과 보간 구간의 이음새에서도 지켜진다 — 스캔 속도가 느려서 보간 구간 안에서 실제로 걸리는 일은 없다. 구간 최소 시간(0.02 s)은 수치 안전용 바닥값이라 고정이다.
 
 ### 7 · Generate Trajectory
 
@@ -532,8 +630,11 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 
 모든 viewpoint를 한 번씩 도는 경로다. 방문 순서와 각 지점에서의 팔 자세를 함께 최적화하고, 지점 사이를 충돌 없이 잇는다.
 
+지점 사이는 두 방식 중 하나로 이어진다. 팔 자세가 크게 바뀌지 않는 인접 지점 사이는 **카메라가 직선으로** 움직이는 보간 구간이다 — 카메라 위치를 직선으로, 자세를 매끄럽게 돌리며 5 mm 마다 IK를 풀어 그 직선을 따르는 관절 경로를 만든다. 그 직선을 만들 수 없거나(IK 불능·관절 점프) 직선이 물체에 닿으면, 그리고 팔 자세가 크게 바뀌는 곳(joint 점프)은 모션 플래너가 충돌을 피해 만드는 **플래닝 구간**이다. 어느 구간이 어느 속도로 가는지는 `Motion Speed` 참고.
+
 | 컨트롤 | 기본 | 의미 |
 | --- | --- | --- |
+| `IK solutions (h5)` | 비어 있음 | 어느 IK 해로 풀지. 비우면 `Solve IK` 옵션에 맞는 가장 최근 파일(없으면 새로 푼다). `Browse...`로 직접 고르거나 `Latest`로 최신을 넣는다. `Check and Save IK`가 끝나면 방금 저장한 파일이 자동으로 들어간다. 고른 파일은 자기 옵션(roll/tilt/dedup/seed)을 가져오고, 물체 위치가 지금과 다르면 생성이 멈추고 이유를 로그에 쓴다 |
 | `--delaunay-expand-hops` | 2 | 어느 정도 떨어진 지점끼리 이어도 되는지. 키우면 더 좋은 순서를 찾을 수 있지만 느려진다 |
 | `--max-candidates-per-viewpoint` | 32 | 한 지점당 고려할 팔 자세 후보 수 |
 
@@ -600,10 +701,10 @@ OMNI_KIT_ACCEPT_EULA=YES uv run --no-sync \
 **화면 · 상태 줄 읽는 법**
 
 ```
-t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv
+t=2.14s / 6.31s  (wp 140/411)  playing: move_to_start_20260916_143012.csv
                                         └ 지금 고스트가 트는 파일
 
-CSV path: .../trajectory/74/trajectory.csv
+CSV path: .../trajectory/74/scan_20260916_143012.csv
           └ Execute Scan 이 실행할 파일
 ```
 
@@ -680,11 +781,11 @@ CSV path: .../trajectory/74/trajectory.csv
 | --- | --- |
 | 물체 메시 | `data/{물체}/mesh/source.obj` |
 | Viewpoint | `data/{물체}/viewpoint/{N}/viewpoints.h5` |
-| IK 해 | `data/{물체}/ik/{N}/ik_*.h5` |
-| 방문 순서 | `data/{물체}/trajectory/{N}/solution.h5` |
-| 검사 경로 | `data/{물체}/trajectory/{N}/trajectory.csv` |
-| Tilt 경로 | `data/{물체}/trajectory/{N}/trajectory_tilt_vp{번호}.csv` |
-| 이동 경로 | `data/{물체}/trajectory/{N}/home_move_*.csv` |
+| IK 해 | `data/{물체}/ik/{N}/{시각}.h5` — 이름은 저장 시각뿐이고, 어떤 옵션(roll/tilt/dedup/seed)과 물체 위치로 푼 것인지는 파일 안에 적혀 있다 |
+| 방문 순서 | `data/{물체}/trajectory/{N}/solution_{시각}.h5` |
+| 검사 경로 | `data/{물체}/trajectory/{N}/scan_{시각}.csv` |
+| Tilt 경로 | `data/{물체}/trajectory/{N}/tilt_row{행}_{시각}.csv` — `행`은 기준 궤적에서 중심으로 고른 행 번호 |
+| 이동 경로 | `data/{물체}/trajectory/{N}/move_to_start_{시각}.csv`, `move_to_home_{시각}.csv` |
 | 워크셀 정의 | `workcell/scenes/{이름}.yaml` |
 
 ### 경로 파일 안에 무엇이 들어 있나

@@ -19,14 +19,14 @@ import), GLNS 에서 충돌-free 였던 자세는 여기서도 충돌-free 다 �
 viewpoint component 간 seam 거리(joint L∞)로만 최적화하고 ``_stitch_pieces``로
 봉합한다. HOME 접근/복귀는 기본적으로 별도 계획하며, ``--home-bracket``을 명시한
 경우에만 양 끝에 붙인다. seam 은 절대 조용히 드롭하지 않고 실패 시 hard-error
-(``trajectory.csv/.npz`` 미생성). 각 성분의 resample/drop 은 성분 내부로 한정돼
+(``scan_*.csv/.npz`` 미생성). 각 성분의 resample/drop 은 성분 내부로 한정돼
 (``interpolate_and_resample`` 의 "최장 run keep" 이 성분 경계를 넘지 못함).
 
 실행:
     uv run --no-sync scripts/core/glns/verify.py \
         --result data/sample/trajectory/74/solution.h5 [--join] [--order optimized]
 
-**출력은 joined 하나다** — ``trajectory.csv`` + ``trajectory.npz``
+**출력은 joined 하나다** — ``scan_<시각>.csv`` + ``scan_<시각>.npz``
 (joints/ee_positions/is_transit/times/meta)로, ``trajectory_studio.py`` 가 transit 포함 실제
 motion 을 재생한다. 성분별 중간 궤적은 메모리에만 두고 파일로 남기지 않는다(표로만 보고).
 viewpoint 1개짜리 성분도 join 에 포함한다 — 예전에는 건너뛰어 조용히 빠졌다.
@@ -71,17 +71,6 @@ def _decode(value):
     return value
 
 
-def _parse_joints(text):
-    """"q0,...,q5" → (6,) ndarray. None/빈 문자열이면 None."""
-    if not text:
-        return None
-    values = [v for v in str(text).replace(",", " ").split() if v]
-    q = np.asarray([float(v) for v in values], dtype=np.float64)
-    if q.shape != (6,):
-        raise SystemExit(f"--start-joints needs 6 values, got {len(values)}")
-    return q
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Feed a GLNS-selected path through plan_trajectory's "
@@ -94,11 +83,6 @@ def _parse_args() -> argparse.Namespace:
     # 기본값은 h5 에 박제된 씬 스냅샷이다(재현). 이 플래그는 "다른 셀이면 어떻게 되나"를
     # 물어보는 실험용 override 라, 쓰면 경고를 찍는다.
     scene_config.add_cli_argument(parser)
-    # 첫 값이 음수면 argparse 가 옵션으로 오인한다 — 호출자는 --start-joints=<v> 형태로.
-    parser.add_argument("--start-joints", type=str, default=None,
-                        help='스캔 시작을 이 자세에 가까운 끝점으로 고정한다 "q0,...,q5" [rad]. '
-                             '보통 로봇의 현재 관절값. 성분 순서와 방향 선택에만 쓰이고 '
-                             'GTSP 해 자체는 바꾸지 않는다')
     parser.add_argument("--spacing", type=float, default=PT.DEFAULT_SPACING_M,
                         help=f"Scan resample spacing in meters (default: {PT.DEFAULT_SPACING_M})")
     parser.add_argument("--output-dir", type=Path, default=None,
@@ -108,7 +92,7 @@ def _parse_args() -> argparse.Namespace:
                              "드롭(viewpoint skip). graph-direct 만으로 도는지 확인용")
     parser.add_argument("--join", action=argparse.BooleanOptionalAction, default=True,
                         help="충돌-free 성분들을 seam transit으로 하나의 연속 "
-                             "scan 궤적(trajectory.csv)으로 연결 (default: on)")
+                             "scan 궤적(scan_*.csv)으로 연결 (default: on)")
     parser.add_argument("--order", choices=("optimized", "fixed"), default="optimized",
                         help="성분 방문 순서: optimized(seam 거리 최소) / fixed(id 순서). default optimized")
     parser.add_argument("--home-bracket", action=argparse.BooleanOptionalAction,
@@ -124,6 +108,10 @@ def _parse_args() -> argparse.Namespace:
                         default="both",
                         help="with --home-transitions-only, plan both legs or only "
                              "HOME→start / end→HOME (default: both)")
+    parser.add_argument("--tag", type=str, default=None,
+                        help="산출물 이름 접미사 — scan_<tag>.csv/.npz 로 쓴다. 보통 해 파일과 "
+                             "같은 실행 스탬프(YYYYMMDD_HHMMSS)를 넘겨 덮어쓰지 않게 한다. "
+                             "없으면 scan.csv (덮어씀)")
     PT.add_timing_cli_arguments(parser)
     args = parser.parse_args()
     if not args.result.exists():
@@ -163,18 +151,25 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
                   f"value on {mismatch} edge(s) - check the wrist_3 lock / threshold "
                   f"assumption. Proceeding with the recomputed value.")
 
-    # 작은 jump는 원래 joint 직선 보간 대상이다. 이 중 충돌하는 edge도 viewpoint를
-    # drop하기 전에 MotionGen fallback 대상으로 승격한다. reconfiguration edge와 합쳐
-    # 한 번에 batch planning하므로 planner warmup/호출 비용도 공유한다.
+    # 작은 jump 는 보간(스캔) 구간이다: viewpoint 사이를 Cartesian 직선(EE lerp + slerp)으로
+    # IK 추적한다 — 인접 edge 와 skip 재연결 후보 쌍 전부를 한 배치로. 추적이 안 되거나(IK
+    # 불능·관절 점프) 그 직선이 충돌하는 인접 edge 는 viewpoint 를 drop 하기 전에 MotionGen
+    # fallback(플래닝 구간)으로 승격한다. reconfiguration edge 와 합쳐 한 번에 batch planning.
     scan_edge_indices = np.where(~is_reconfig)[0]
-    collision_fallback_indices = PT.find_colliding_interpolation_edges(
-        selected, scan_edge_indices, robot_cfg, world_config,
-    )
+    scan_pairs = PT.candidate_scan_pairs(selected, reconfig_rad, PT.TRANSIT_FAIL_SKIP_MAX)
+    scan_paths, cart = PT.track_cartesian_scans(selected, scan_pairs, robot_cfg, world_config)
+    print(f"    Cartesian scan tracking: {cart['n_ok']}/{cart['n_pairs']} pairs straight "
+          f"({cart['n_samples']} IK samples, {cart['seconds']:.1f}s); "
+          f"ik-fail {cart['n_ik_fail']}, joint-jump {cart['n_jump_fail']}")
+    bad_adjacent = PT.colliding_scan_paths(
+        scan_paths, [(int(i), int(i) + 1) for i in scan_edge_indices], robot_cfg, world_config)
+    collision_fallback_indices = np.asarray(sorted(a for a, _b in bad_adjacent), dtype=np.int64)
     if len(collision_fallback_indices):
         labels = [f"{int(vp_order[i])}→{int(vp_order[i + 1])}"
                   for i in collision_fallback_indices]
-        print(f"    Scan interpolation collision: {len(collision_fallback_indices)} edge(s) "
-              f"-> MotionGen fallback [{', '.join(labels)}]")
+        print(f"    Cartesian scan not usable (untrackable or colliding): "
+              f"{len(collision_fallback_indices)} edge(s) -> MotionGen fallback "
+              f"[{', '.join(labels)}]")
 
     # --- Phase 4: reconfig + colliding scan edge transit 계획(충돌회피 motion) ---
     motion_indices = np.union1d(reconfig_indices, collision_fallback_indices).astype(np.int64)
@@ -199,6 +194,7 @@ def _plan_and_resample_component(component, *, robot_cfg, world_config, reconfig
             selected, transit_segments, robot_cfg,
             mode=PT.RESAMPLE_MODE, spacing=spacing,
             reconfig_threshold_rad=reconfig_rad, world_scene=world_config,
+            scan_paths=scan_paths,
         )
     except RuntimeError as exc:   # <2 safe-run: 모든 인접 전이가 이을 수 없는 reconfig
         return {"ok": False, "error": str(exc), "M": M, "reconfig_mismatch": mismatch}
@@ -240,6 +236,7 @@ def _singleton_component(component):
         "n_collisions": 0, "collision_free": True,
         # 한 자세에 머무르는 구간이라 소요 시간이 없다. 충돌 검사는 joined 게이트가 한다.
         "total_time": 0.0, "transit_time": 0.0, "n_waypoints": 1,
+        "max_joint_vel_ratio": 0.0, "max_joint_acc_ratio": 0.0,
         "reconfig_mismatch": 0, "csv": None,
         "final_traj": selected,
         "final_is_transit": np.zeros(1, dtype=bool),   # scan point (transit 아님)
@@ -266,6 +263,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "n_collisions": 0,
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": 0,
+            "max_joint_vel_ratio": float("nan"), "max_joint_acc_ratio": float("nan"),
             "reconfig_mismatch": pr.get("reconfig_mismatch", 0), "csv": None,
             "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None, "error": pr["error"],
@@ -283,6 +281,7 @@ def _verify_component(component, *, robot_cfg, world_config, reconfig_rad, wd_m,
             "collision_fallback_ok": pr["collision_fallback_ok"],
             "collision_free": False, "total_time": float("nan"),
             "transit_time": float("nan"), "n_waypoints": len(pr["final_traj"]),
+            "max_joint_vel_ratio": float("nan"), "max_joint_acc_ratio": float("nan"),
             "reconfig_mismatch": pr["reconfig_mismatch"], "csv": None,
             "final_traj": None, "final_is_transit": None, "final_kinds": None,
             "entry": None, "exit": None,
@@ -362,9 +361,12 @@ def main() -> int:
     world_config = PT.build_collision_world(object_name)
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 
+    # 스캔 산출물 이름 — --tag 가 있으면 scan_<tag>(보통 tag = 실행 시각), 없으면 scan (덮어씀).
+    joined_stem = f"scan_{args.tag}" if args.tag else "scan"
+
     scan_joints = None
     if args.home_transitions_only:
-        scan_npz = out_dir / "trajectory.npz"
+        scan_npz = out_dir / f"{joined_stem}.npz"
         if not scan_npz.exists():
             print(f"HOME TRANSITIONS FAILED: scan trajectory not found: {scan_npz}")
             return 2
@@ -443,7 +445,9 @@ def main() -> int:
                          f"original idx: {res['dropped']}")
         time_note = (f", time={res['total_time']:.1f}s "
                      f"(scan={res['total_time'] - res['transit_time']:.1f}s, "
-                     f"transit={res['transit_time']:.1f}s)") if res["collision_free"] else ""
+                     f"transit={res['transit_time']:.1f}s; joint vel/acc vs limit "
+                     f"{res['max_joint_vel_ratio']:.2f}/{res['max_joint_acc_ratio']:.2f})"
+                     ) if res["collision_free"] else ""
         fallback_note = (f", scan-collision fallback "
                          f"{res['collision_fallback_ok']}/{res['collision_fallback_req']}"
                          if res["collision_fallback_req"] else "")
@@ -503,13 +507,13 @@ def main() -> int:
               "preserve the GLNS path (scan-edge collision / transit failure).")
     print("=" * 64)
 
-    # --- 성분 연결: 하나의 연속 실행 궤적(trajectory.csv) ---
+    # --- 성분 연결: 하나의 연속 실행 궤적(scan_<시각>.csv) ---
     if args.join:
         print("JOIN COMPONENTS -> single continuous trajectory")
         print("-" * 64)
         if args.require_full_coverage and missing_total:
-            (out_dir / "trajectory.csv").unlink(missing_ok=True)
-            (out_dir / "trajectory.npz").unlink(missing_ok=True)
+            (out_dir / f"{joined_stem}.csv").unlink(missing_ok=True)
+            (out_dir / f"{joined_stem}.npz").unlink(missing_ok=True)
             print(f"  FAIL - --require-full-coverage: {missing_total} viewpoint(s) "
                   f"missing from joined ({covered_total}/{expected_total}); not written.")
             print("=" * 64)
@@ -518,7 +522,7 @@ def main() -> int:
             print("  no collision-free component to join - joined not written.")
             print("=" * 64)
         else:
-            joined_csv = out_dir / "trajectory.csv"
+            joined_csv = out_dir / f"{joined_stem}.csv"
             # 파일명이 더 이상 생성 조건을 담지 않으므로 npz sidecar 에 남긴다
             # (예전 DP 가 trajectory_dp_ee_s0010_… 로 인코딩하던 정보의 자리).
             joined_meta = {
@@ -540,15 +544,14 @@ def main() -> int:
                     reconfig_rad=reconfig_rad, enable_via_ladder=not args.no_via,
                     home_bracket=args.home_bracket, order_strategy=args.order,
                     out_csv=joined_csv, motion_planner=motion_planner,
-                    meta=joined_meta, start_q=_parse_joints(args.start_joints),
+                    meta=joined_meta,
                 )
             except SeamFailure as exc:
                 print(f"  SEAM FAILED: {exc} - cannot bridge (via-home included). joined not written.")
                 print("=" * 64)
                 return 2
             hb = args.home_bracket
-            seq = (["HOME"] if hb else []) + [f"comp{c}" for c in jr["order"]] + \
-                  (["HOME"] if hb else [])
+            seq = (["HOME"] if hb else []) + [jr["order_desc"]] + (["HOME"] if hb else [])
             print(f"  order({args.order}): {' -> '.join(seq)}")
             print(f"  seams {jr['n_seams']}: routes={jr['seam_routes']}")
             g = jr["gate"]
@@ -556,7 +559,8 @@ def main() -> int:
                 print(f"  -> OK (collision-free), {g['n_waypoints']} waypoints, "
                       f"time={g['total_time']:.1f}s "
                       f"(scan={g['total_time'] - g['transit_time']:.1f}s, "
-                      f"transit={g['transit_time']:.1f}s)")
+                      f"transit={g['transit_time']:.1f}s; joint vel/acc vs limit "
+                      f"{g['max_joint_vel_ratio']:.2f}/{g['max_joint_acc_ratio']:.2f})")
                 print(f"  CSV: {g['csv']}")
                 print("=" * 64)
             else:

@@ -15,7 +15,7 @@ an Omni UI window whose panels follow the order of the work:
     F) Execute trajectory on Isaac UR20 or real robot       (subprocess)
 
 B is split out from D because it is a separate, reusable step: its output
-(data/{object}/ik/{N}/*.h5) is keyed by the candidate options, and D reuses that
+(data/{object}/ik/{N}/<stamp>.h5) carries its options in attrs, and D reuses that
 file only when the options still match. Speed sits between them because it
 changes nothing about IK and everything about what D writes.
 
@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.isaac import scene as urctl  # noqa: E402
 from common import config as _cfg_module  # noqa: E402
 from common import scene_config  # noqa: E402
+from common import speed_model as _speed  # noqa: E402
 
 JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -74,20 +75,9 @@ IK_RANDOM_SEED = 123
 # threshold for the Check-and-Save-IK / GLNS IK candidate stage).
 CANDIDATE_DEDUP_RAD = 0.08
 
-# 실행 속도 노브 — scripts/core/trajectory/settings.py::TIMING_KNOBS 의 UI 쪽 짝이다.
-# 이 값들이 CSV 의 time 열을 정하고, 두 실행기(고스트 재생 / 실로봇 publish)가 그 열을
-# 그대로 따른다. 생성 시점에 궤적에 구워지므로 바꾸면 다시 생성해야 반영된다.
-# 플래그와 기본값은 settings.py 와 같아야 한다 — 여기 값을 복사해 두는 이유는 IK_RANDOM_SEED
-# 와 같다(이 모듈은 Isaac 번들 파이썬에서 도는데 settings 를 import 하면 cuRobo 가 딸려온다).
-# (CLI 플래그, 필드 키, 라벨, 기본값)
-TIMING_FIELDS = (
-    ("--ee-speed-mm-s", "timing_ee_speed", "scan EE speed [mm/s]", 10.0),
-    ("--ee-angular-speed-deg-s", "timing_ee_angular", "scan EE angular [deg/s]", 20.0),
-    ("--max-joint-vel-rad-s", "timing_joint_vel", "max joint vel [rad/s]", 0.3),
-    ("--min-segment-dt-s", "timing_min_dt", "min segment dt [s]", 0.05),
-    ("--corner-angle-threshold-deg", "timing_corner_deg", "corner threshold [deg]", 30.0),
-    ("--corner-max-slowdown", "timing_corner_slow", "corner max slowdown [x]", 2.5),
-)
+# Motion Speed 의 결합 모델은 common/speed_model.py 에 있다(앱과 settings.py 기본값이 공유).
+# 배율 둘: 스캔 배율 → EE 선·각속도(보간 구간), 이동 배율 → 관절 속도·가속도 배율(플래닝
+# 구간; MoveIt 과 같은 joint_limits.yaml, 같은 scaling factor 의미). 여기서는 값을 적지 않는다.
 
 # waypoint_kind 라벨 색 (omni.ui 0xAABBGGRR). Tilt 패널의 중심 행 라벨에 쓴다 —
 # 어떤 종류의 점을 중심으로 고르는지가 한눈에 보여야 한다.
@@ -99,6 +89,7 @@ WAYPOINT_KIND_COLOR = {
 WAYPOINT_KIND_COLOR_UNKNOWN = 0xFF8888CC   # 라벨 없는 옛 CSV / 읽기 실패
 
 CSV_PATH_RE = re.compile(r"CSV saved to (\S+)")
+IK_H5_PATH_RE = re.compile(r"IK_SOLUTIONS_H5 (\S+)")      # check_ik.py 가 저장 경로를 찍는 줄
 
 
 def rotvec_to_quat(rv) -> np.ndarray:
@@ -195,6 +186,8 @@ GHOST_USD_NAME = "ur20_with_camera_ghost.usd"
 # Trajectory controllers, gated by pipeline mode (only one active at a time):
 #   MoveIt (RViz move_group) → MOVEIT_CONTROLLER
 #   Inspection (publish_trajectory) → INSPECTION_CONTROLLER
+# 어느 것이 활성인지는 이 앱이 아니라 스택의 mode_gate.py 가 /looksgood/mode 를 보고 정한다.
+# 여기서는 Cancel 버튼의 goal 취소 대상 이름으로만 쓴다.
 MOVEIT_CONTROLLER = "scaled_joint_trajectory_controller"
 INSPECTION_CONTROLLER = "joint_trajectory_controller"
 
@@ -465,7 +458,7 @@ class SubprocessRunner:
         """마지막 실행이 사용자 Cancel 로 끝났는가 — 실패와 구분해 로그를 정직하게 쓰려고."""
         return self._cancelled
 
-    def start(self, cmd, cwd, on_line, on_exit):
+    def start(self, cmd, cwd, on_line, on_exit, stdin: bool = False):
         # Supersede any in-flight process instead of raising. A prior
         # fire-and-forget run (e.g. a quick `ros2 param set`) may not have been
         # drained by pump() yet — this happens at startup where apply_mode and
@@ -488,6 +481,7 @@ class SubprocessRunner:
         self._cancelled = False
         proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env,
+            stdin=(subprocess.PIPE if stdin else None),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
             # 자기 프로세스 그룹으로 띄운다 — Cancel 이 bash 뿐 아니라 그 자손(uv → python)
@@ -500,6 +494,18 @@ class SubprocessRunner:
         self._reader = threading.Thread(
             target=self._read_loop, args=(gen, proc), daemon=True)
         self._reader.start()
+
+    def write_line(self, text: str) -> bool:
+        """stdin 으로 한 줄(개행 포함). 파이프가 없거나 끊겼으면 False — 호출자가 다시 띄운다."""
+        proc = self._proc
+        if proc is None or proc.stdin is None or not self.running:
+            return False
+        try:
+            proc.stdin.write(text + "\n")
+            proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
 
     def _read_loop(self, gen, proc):
         try:
@@ -715,6 +721,18 @@ class IsaacArticulationExecutor:
         self._on_done = None
         self._log("[execute] Isaac trajectory cancelled; holding last target")
 
+    def hold(self, q: np.ndarray):
+        """PD 목표를 q 로 다시 쓴다(텔레포트 없음). 그래프가 관절을 놓는 순간 드라이브에
+        남아 있던 목표가 무엇이든 제자리(q = 방금 읽은 현재 자세)를 지키게 한다."""
+        if self._running:
+            return
+        try:
+            if self._controller is None:
+                self._initialize()
+            self._apply_target(np.asarray(q, dtype=np.float64))
+        except Exception as exc:  # noqa: BLE001 — 방어용이라 실패가 전환을 막으면 안 된다
+            self._log(f"[execute] hold failed: {exc}")
+
 
 # =============================================================================
 # Preview player — applies CSV waypoints to the ghost via FK.
@@ -903,6 +921,19 @@ class GraphTickSwitch:
             pass
         return "noop"
 
+    def set_node_disabled(self, node_name: str, disabled: bool):
+        """그래프 안의 노드 하나만 끄고 켠다(OnPlaybackTick 이 아니라 예: ArticulationController).
+
+        그래프는 tick 하되 관절에는 쓰지 않는 상태를 만들 때 쓴다 — 구독 큐에 쌓인 묵은
+        명령을 흘려보내는 동안. 실패해도 죽지 않고 로그만 남긴다(best-effort).
+        """
+        import omni.graph.core as og
+        try:
+            node = og.Controller.node(f"{self._graph_path}/{node_name}")
+            node.set_disabled(bool(disabled))
+        except Exception as e:  # noqa: BLE001
+            self._log(f"[graph] {node_name} disable={disabled} failed: {e}")
+
     def set_active(self, active: bool):
         """active=False → graph stops driving joints; active=True → resume."""
         if self._mode is None:
@@ -979,6 +1010,9 @@ class PipelineWindow:
         # 방금 만든 tilt CSV 로 바뀌어(생성 결과를 바로 재생하는 동작) 다음 tilt 의 기준이
         # 스캔이 아니라 직전 tilt 가 돼버린다.
         self._tilt_base_csv_model = ui.SimpleStringModel("")
+        # Generate 가 쓸 IK 해 파일. 비우면 solve 가 Solve IK 옵션에 맞는 최신 파일을 고르고
+        # (없으면 새로 푼다), 채우면 그 파일만 쓴다. Check and Save IK 가 방금 쓴 파일로 채운다.
+        self._ik_h5_model = ui.SimpleStringModel("")
 
         # ONE editable camera spec (mm) shared by both inspection cameras. 프리뷰 고스트와
         # 실 로봇은 같은 물리 카메라의 두 표현이라, 스펙이 갈리면 프리뷰가 실제와 다른 화각을
@@ -1010,13 +1044,17 @@ class PipelineWindow:
         self._gen_runner = SubprocessRunner()
         self._ik_runner = SubprocessRunner()
         self._pub_runner = SubprocessRunner()
-        self._ctrl_runner = SubprocessRunner()   # ros2 control switch/cancel calls
-        self._relay_runner = SubprocessRunner()  # ros2 param set on the relay (mode gate)
+        self._ctrl_runner = SubprocessRunner()   # Cancel 버튼의 goal 취소 (ros2 service call)
         # Viewpoint Studio(브라우저 앱)는 이 앱과 독립적인 별개 프로그램이다 — 스테이지도
         # 다른 러너도 건드리지 않고, 오래 살아 있는 서버라 작업 러너와 섞을 수 없다.
         self._studio_runner = SubprocessRunner()
         self._studio_status_label = None
         self._studio_port = 8080
+        # 모드 발행기(mode_publisher.py) — 이 앱이 ROS 에 하는 유일한 일. 오래 사는 서브
+        # 프로세스라 작업 러너와 섞지 않는다. 스택의 mode_gate 가 이 발행을 보고 집행한다.
+        self._mode_pub_runner = SubprocessRunner()
+        self._mode_pub_retry_at = 0.0
+        self._mode_pub_warned = False
         # Keep GraphTickSwitch around for the publish path. Preview no
         # longer needs it (ghost is a separate prim tree, not the real UR20),
         # so we leave the graph untouched during preview — the user-confirmed
@@ -1238,94 +1276,98 @@ class PipelineWindow:
         self.apply_pipeline_mode("moveit" if idx == 1 else "inspection")
 
     def apply_pipeline_mode(self, mode: str):
-        """Pipeline mode = command source + UI lock. It does NOT toggle any graph —
-        the Run mode (sim/real) owns graph selection (see apply_mode). Both MoveIt
-        (RViz move_group) and Inspection (Execute panel) ultimately command the same
-        controller; pipeline mode only changes which tool the user drives with and
-        locks the other.
+        """Pipeline mode = 명령 주체. moveit → RViz 가 움직인다 / inspection → 이 앱이 움직인다.
 
-        moveit     → Inspection panels greyed/locked (use RViz to drive the robot).
-        inspection → Inspection panels active (Execute drives the current robot:
-                     Isaac in sim, real robot in real).
+        Run mode 와 함께 (run, pipeline) 한 쌍이 모드다. 모드가 바뀌면 하는 일은 두 가지뿐이고
+        **네 조합 모두 같다**:
+          1. Isaac 로봇 게이트 — /SimRobotGraph 의 관절 쓰는 노드 on/off (_apply_sim_graph_gates)
+          2. 모드 발행         — /looksgood/mode (_publish_mode). 스택의 mode_gate 가 받아
+                                 실로봇 쪽 컨트롤러 활성화와 Isaac 명령 릴레이를 집행한다.
+        앱은 컨트롤러도 ROS 파라미터도 직접 건드리지 않는다.
         """
         self._pipeline_mode = mode
         self._set_inspection_ui_enabled(mode != "moveit")
         if mode == "inspection":
             self._sync_mode_ui()  # restore Execute-button state after unlock
         self._sync_pipeline_ui()
-        # Activate exactly the controller for this mode so the OTHER source is
-        # blocked at the controller level: MoveIt → scaled_joint_trajectory_controller,
-        # Inspection → joint_trajectory_controller. In Inspection mode scaled is
-        # deactivated, so MoveIt Execute is rejected ("controller not active").
-        # (No-op in real mode if its stack uses the same controller names; best-effort
-        # if the ROS stack isn't up yet.)
-        if self._mode == "sim":
-            # Inspection SIM executes directly through SingleArticulation and must
-            # not require ROS or allow /SimRobotGraph to overwrite PD targets.
-            # (그래서 sim × inspection 에서는 두 그래프 모두 꺼진다.)
-            self._sim_graph.set_active(mode == "moveit")
-            self._real_graph.set_active(False)
-            if mode == "moveit":
-                # Relay forwarding is owned by apply_mode (stays True throughout sim);
-                # re-asserting it here is redundant and, at startup, double-starts the
-                # relay runner before the UI loop has drained the first run.
-                self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
-        elif mode == "moveit":
-            self._switch_controllers(MOVEIT_CONTROLLER, INSPECTION_CONTROLLER)
-        else:
-            self._switch_controllers(INSPECTION_CONTROLLER, MOVEIT_CONTROLLER)
+
+        hold_q = None
+        if self._mode == "sim" and mode == "inspection":
+            try:
+                hold_q = self._sim_executor.current_joints()
+            except Exception:  # noqa: BLE001 — 부팅 직후엔 아직 physics view 가 없다
+                pass
+        self._apply_sim_graph_gates()
+        if hold_q is not None:
+            # 관절 쓰는 노드를 끈 순간의 자세를 PD 목표로 다시 써 둔다 — 드라이브에 다른
+            # 목표가 남아 있어도 제자리를 지킨다.
+            self._sim_executor.hold(hold_q)
+        self._publish_mode()
         self._append_log(
             f"[pipeline] -> {mode.upper()} :: "
-            + ("MoveIt active, Inspection locked" if mode == "moveit"
-               else "Inspection active, MoveIt blocked"))
+            + ("MoveIt drives, Inspection locked" if mode == "moveit"
+               else "Inspection drives, MoveIt blocked"))
 
-    def _switch_controllers(self, activate: str, deactivate: str):
-        """Activate one trajectory controller and deactivate the other, cancelling any
-        lingering goal on BOTH around the switch (best-effort subprocess; the ROS
-        stack lives in the other shell).
+    def _apply_sim_graph_gates(self):
+        """/SimRobotGraph 의 노드 게이트 — 지금 (run mode, pipeline mode) 에서 정해진다.
 
-        Why cancel both: if a controller is deactivated mid-goal its action status
-        freezes at EXECUTING, and the relay (which forwards /isaac_joint_commands
-        only while a goal is active) then keeps forwarding the OTHER controller's
-        idle hold command — a state→command→robot→state feedback loop that makes the
-        robot shake. Cancelling the outgoing goal before the switch (its CANCELED
-        status reaches the relay while still active) and the incoming controller's
-        stale goal after the switch clears that, with no timers/deadlines."""
-        if self._ctrl_runner.running:
-            self._ctrl_runner.terminate()
+            tick(구독)               항상 ON   ← 큐가 쌓이지 않게. 모드와 무관.
+            ArticulationController  sim × moveit 일 때만  ← 관절에 쓰는 유일한 자리
+            PublishJointState/Clock sim 일 때만           ← real 에서는 twin 루프를 먹이지 않는다
 
-        def cancel(ctrl: str) -> str:
-            return (f"timeout 2 ros2 service call /{ctrl}/follow_joint_trajectory"
-                    "/_action/cancel_goal action_msgs/srv/CancelGoal '{}' "
-                    "2>/dev/null || true")
+        run mode 와 pipeline mode 어느 쪽이 바뀌어도 이 한 함수가 다시 계산한다.
+        """
+        sim = self._mode == "sim"
+        drive = sim and self._pipeline_mode == "moveit"
+        self._sim_graph.set_active(True)
+        self._sim_graph.set_node_disabled("ArticulationController", not drive)
+        self._sim_graph.set_node_disabled("PublishJointState", not sim)
+        self._sim_graph.set_node_disabled("PublishClock", not sim)
 
-        shell_cmd = (
-            "source /opt/ros/jazzy/setup.bash && "
-            f"{cancel(deactivate)} ; "
-            f"ros2 control switch_controllers --activate {activate} --deactivate {deactivate} ; "
-            f"{cancel(activate)}"
-        )
-        self._append_log(f"[ctrl] switch: +{activate} -{deactivate} (cancel both)")
-        self._ctrl_runner.start(
-            ["bash", "-c", shell_cmd], cwd=PROJECT_ROOT,
-            on_line=self._append_log,
-            on_exit=lambda rc: self._append_log(f"[ctrl] switch exit={rc}"))
+    # 모드 발행기 재시작 간격. ROS 환경이 없으면(순수 sim×inspection 작업) 매번 죽는데,
+    # 그때마다 로그를 채우면 안 된다.
+    MODE_PUB_RETRY_S = 15.0
 
-    def _ensure_inspection_controller_cmd(self) -> str:
-        """Shell snippet that activates the inspection controller (jtc) and
-        deactivates MoveIt's (scaled), so a real publish always reaches an ACTIVE
-        controller.
+    def _mode_string(self) -> str:
+        return f"{self._mode}/{self._pipeline_mode}"
 
-        Prepended to every real controller-publish because the one-shot switch in
-        apply_pipeline_mode/apply_mode can miss: a sim→real run-mode change does
-        NOT switch controllers, and restarting the shell-2 UR stack resets it to
-        scaled-active. Idempotent and best-effort ('|| true' keeps it non-fatal
-        when already in that state), so it is safe to run before every send."""
-        return (
-            f"ros2 control switch_controllers "
-            f"--activate {INSPECTION_CONTROLLER} --deactivate {MOVEIT_CONTROLLER} "
-            f"|| true"
-        )
+    def _publish_mode(self):
+        """/looksgood/mode 에 지금 모드를 계속 발행하게 한다 — 이 앱이 ROS 에 하는 유일한 일.
+
+        발행기(mode_publisher.py)는 오래 사는 서브프로세스다: 살아 있으면 stdin 에 한 줄,
+        없으면 띄운다. 그것이 곧 "앱이 살아서 이 모드를 원한다" 는 신호라, 앱이 죽어 발행이
+        멈추면 스택의 mode_gate 가 fail-safe(궤적 컨트롤러 전부 비활성)로 간다.
+        """
+        mode = self._mode_string()
+        if self._mode_pub_runner.running and self._mode_pub_runner.write_line(mode):
+            return
+        shell = ("source /opt/ros/jazzy/setup.bash && "
+                 f"exec python3 scripts/moveit/mode_publisher.py --mode {mode}")
+
+        def on_line(line: str):
+            self._mode_pub_warned = False
+            self._append_log(f"[mode] {line}")
+
+        def on_exit(rc: int):
+            if not self._mode_pub_warned and not self._mode_pub_runner.cancelled:
+                self._mode_pub_warned = True
+                self._append_log(
+                    f"[mode] publisher exited (rc={rc}) - no ROS env? MoveIt and the real "
+                    f"robot stay blocked until it runs; retrying every "
+                    f"{self.MODE_PUB_RETRY_S:.0f}s")
+
+        self._mode_pub_retry_at = time.time() + self.MODE_PUB_RETRY_S
+        self._mode_pub_runner.start(["bash", "-c", shell], cwd=PROJECT_ROOT,
+                                    on_line=on_line, on_exit=on_exit, stdin=True)
+
+    def _mode_pub_tick(self, dt: float):
+        """발행기가 죽어 있으면 간격을 두고 다시 띄운다 — 스택이 나중에 떠도 모드는 계속 들려야 한다."""
+        if self._mode_pub_runner.running or time.time() < self._mode_pub_retry_at:
+            return
+        self._publish_mode()
+
+
+
 
     # Style overrides toggled with the lock so panels also *look* disabled
     # (this Isaac theme doesn't auto-grey on .enabled=False).
@@ -1421,58 +1463,32 @@ class PipelineWindow:
         self.apply_mode("sim" if idx == 0 else "real")
 
     def apply_mode(self, mode: str):
-        """Run mode = which robot drives the Isaac articulation:
+        """Run mode = 어느 로봇인가. sim → Isaac 이 로봇 / real → Isaac 은 실로봇의 거울.
 
-          sim  → Isaac IS the robot: /SimRobotGraph drives from /isaac_joint_commands
-                 and publishes /isaac_joint_states + /clock; /RealRobotGraph mirror OFF.
-          real → Isaac MIRRORS the real robot: /RealRobotGraph ON (drive from real
-                 /joint_states + cameras); /SimRobotGraph's driving + publishing nodes
-                 OFF (so it neither moves Isaac nor feeds the twin loop).
+          sim  → /SimRobotGraph 가 (moveit 이면) /isaac_joint_commands 로 Isaac 을 움직이고
+                 /isaac_joint_states·/clock 을 낸다. /RealRobotGraph 거울은 OFF.
+          real → /RealRobotGraph 가 실 /joint_states 로 Isaac 을 움직인다(거울).
+                 /SimRobotGraph 는 구독만 하고 쓰지도 발행하지도 않는다.
 
-        Cross-mode replay is stopped at the SOURCE: the relay (셸2) is the only thing
-        that feeds /isaac_joint_commands, so the app sets its `forward_enabled`
-        parameter — true in sim, false in real. In real mode the relay discards
-        commands, so a MoveIt Execute done in real mode never reaches Isaac and there
-        is nothing to replay when sim is re-entered (works even if the goal is still
-        active). No rebuild / cancel / timing needed.
-
-        REAL and MoveIt modes require the matching ROS stack; Inspection+SIM does not.
+        apply_pipeline_mode 와 같은 두 동작(Isaac 게이트 + 모드 발행)으로 끝난다. 실로봇 쪽
+        (컨트롤러·릴레이)은 스택의 mode_gate 가 발행된 모드를 보고 집행한다.
         """
         self._mode = mode
         if mode == "sim":
-            clear_artic_commands(self._sim_graph_path)
             self._real_graph.set_active(False)      # /RealRobotGraph mirror off
-            if self._pipeline_mode == "moveit":
-                self._set_relay_forwarding(True)
-                self._sim_graph.set_active(True)
-                which = "/SimRobotGraph drives (live /isaac_joint_commands)"
-            else:
-                self._sim_graph.set_active(False)
-                which = "in-process executor drives Isaac UR20 (ROS-free)"
+            which = ("/SimRobotGraph drives (live /isaac_joint_commands)"
+                     if self._pipeline_mode == "moveit"
+                     else "in-process executor drives Isaac UR20 (ROS-free)")
         else:  # real
-            self._set_relay_forwarding(False)  # relay discards → Isaac not driven by commands
-            self._sim_graph.set_active(False)
             clear_artic_commands(self._real_graph_path)
             self._real_graph.set_active(True)       # /RealRobotGraph mirror on
             which = "/RealRobotGraph mirrors real /joint_states (twin)"
+        self._apply_sim_graph_gates()
         self._mode_applied = mode
         self._sync_mode_ui()
+        self._publish_mode()
         self._append_log(f"[run-mode] -> {mode.upper()} :: {which}")
 
-    def _set_relay_forwarding(self, on: bool):
-        """Tell the relay (셸2) whether to feed /isaac_joint_commands. This is the
-        mode gate: in real mode the relay discards commands so they never reach
-        Isaac (no buffering, no replay on sim re-entry). Best-effort subprocess."""
-        if self._relay_runner.running:
-            self._relay_runner.terminate()
-        val = "true" if on else "false"
-        cmd = ("source /opt/ros/jazzy/setup.bash && "
-               f"timeout 3 ros2 param set /isaac_joint_command_relay forward_enabled {val} "
-               "2>/dev/null || true")
-        self._append_log(f"[relay] forward_enabled -> {val}")
-        self._relay_runner.start(
-            ["bash", "-c", cmd], cwd=PROJECT_ROOT, on_line=self._append_log,
-            on_exit=lambda rc: self._append_log(f"[relay] param set exit={rc}"))
 
     def _sync_mode_ui(self):
         if self._mode_label is not None:
@@ -2260,6 +2276,13 @@ class PipelineWindow:
                 self._fields["glns_dedup"] = self._checkbox_row("dedup", True)
                 self._fields["glns_dedup_rad"] = self._row(
                     "    dedup-rad", float(CANDIDATE_DEDUP_RAD))
+                # base 가 그 지점 쪽을 보는 IK 해만 쓴다. UR 은 손목 위치 하나에 base 해가
+                # 둘(지점을 보는 분기 / 반대쪽을 보고 팔을 베이스 위로 넘기는 분기)이라, 뒤의
+                # 분기가 뽑히면 base 가 반대쪽으로 돈다. 끄면 두 분기를 다 후보로 쓴다.
+                # (현재 base 에 가장 가까운 2π 표현으로 맞추는 것은 항상 한다 — 자세를 잃지
+                #  않는 표현 선택일 뿐이라 켜고 끌 이유가 없다.)
+                self._fields["glns_front_reach"] = self._checkbox_row(
+                    "face the viewpoint (no reach-over)", True)
                 self._fields["glns_num_seeds"] = self._row("num-seeds", 32)
                 self._fields["glns_ik_batch_size"] = self._row("ik-batch-size", 128)
                 with ui.HStack(height=28, spacing=6):
@@ -2283,6 +2306,19 @@ class PipelineWindow:
                 # 입력은 위 두 패널이 정한다: viewpoint h5("Load Object & Viewpoints"),
                 # IK 후보 옵션("Solve IK"), 시간 매김("Motion Speed"). 물체 pose 는 스테이지의
                 # 살아있는 기즈모 값이다.
+                # 어느 IK 해로 풀지는 여기서 고른다. IK 파일은 스탬프로 쌓이므로(ik/{N}/<옵션>_<시각>.h5)
+                # "최신" 이 늘 원하는 것은 아니다 — 물체를 옮기기 전 것을 다시 쓰고 싶을 수도 있다.
+                with ui.HStack(height=22, spacing=6):
+                    ui.Label("IK solutions (h5)", width=140)
+                    self._lock(ui.StringField(model=self._ik_h5_model))
+                    self._lock(ui.Button("Browse...", width=90, clicked_fn=self._on_browse_ik_h5))
+                    self._lock(ui.Button("Latest", width=70, clicked_fn=self._on_pick_latest_ik))
+                ui.Label(
+                    "Empty = the newest saved file whose options and object pose match the "
+                    "Solve IK settings (solves IK afresh if there is none). A picked file "
+                    "brings its own options; only the object pose must still match, or "
+                    "Generate stops. Check and Save IK fills this with the file it just wrote.",
+                    height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
                 with ui.CollapsableFrame("Scan options (GLNS)", height=0, collapsed=True):
                     with ui.VStack(spacing=4):
                         self._fields["glns_hops"]     = self._row("--delaunay-expand-hops", 4)
@@ -2362,46 +2398,117 @@ class PipelineWindow:
                                                    clicked_fn=self._on_clear_tilt_fan))
 
     def _build_panel_speed(self):
-        """실행 속도 노브 — settings.py 의 타이밍 값을 그대로 CLI 로 넘긴다.
+        """실행 속도 — 배율 둘(스캔·이동), 각각 슬라이더 하나와 숫자 둘.
 
-        생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to Start·HOME)이
-        모두 같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로, 이 값을 바꾸면
-        **다시 생성해야** 로봇 속도가 바뀐다 — 이미 만든 CSV 를 다시 시간매김하는 경로는 없다.
-        그래서 Generate 패널 **위**에 둔다: 굽기 전에 정하는 값이다.
+        구간의 종류마다 다른 쌍이 시간을 정한다. 보간 구간(viewpoint 사이, tilt)은 EE 선·각속도,
+        플래닝 구간(transit, Plan to Start/HOME)은 관절 속도·가속도 배율 — MoveIt 과 같은
+        joint_limits.yaml 에 같은 뜻의 scaling factor 를 곱한다(RViz 의 Velocity/Acceleration
+        Scaling 과 같은 수). 생성기 셋(Generate Scan Motion / Generate Tilt Motion / Plan to
+        Start·HOME)이 모두 같은 값을 쓴다. 궤적 CSV 의 time 열은 생성 시점에 구워지므로
+        **다시 생성해야** 로봇 속도가 바뀐다 — 그래서 Generate 패널 위다.
         """
         ui = self._ui
         frame = ui.CollapsableFrame("Motion Speed", height=0, collapsed=True)
         self._inspection_frames.append(frame)
+        vs0, as0 = _speed.transit_base()
+        self._speed_sliders = {}
         with frame:
             with ui.VStack(spacing=4):
                 ui.Label(
-                    "Sets the CSV time column - the speed both executors follow (ghost "
-                    "playback and the real robot). Baked in at generate time, so set "
-                    "these BEFORE generating; an existing CSV keeps its old timing. "
-                    "Also used by Plan to Start / Plan to HOME.",
-                    height=58, word_wrap=True)
-                for _flag, key, label, default in TIMING_FIELDS:
+                    "Two speed factors, baked into the CSV at generate time. Scan factor: "
+                    "interpolated segments (between viewpoints, tilt) follow EE linear/angular "
+                    "speed. Transit factor: motion-planned segments follow joint velocity/"
+                    "acceleration scaling - the same joint_limits.yaml and the same 0-1 scaling "
+                    "numbers as MoveIt/RViz. Speed x f, acceleration x f^2; drag a slider or "
+                    "type any number and its group follows.",
+                    height=96, word_wrap=True)
+                # (그룹, 슬라이더 라벨, 범위, [(필드 키, 라벨, 기본값)])
+                groups = (
+                    ("scan", "scan factor (interpolated)",
+                     (_speed.SCAN_FACTOR_MIN, _speed.SCAN_FACTOR_MAX),
+                     (("scan_ee", "EE speed [mm/s]", _speed.SCAN_BASE["ee_mm_s"]),
+                      ("scan_ang", "EE angular [deg/s]", _speed.SCAN_BASE["ee_angular_deg_s"]))),
+                    ("transit", "transit factor (planned)",
+                     (_speed.TRANSIT_FACTOR_MIN, _speed.transit_factor_max()),
+                     (("transit_vs", "joint velocity scaling", vs0),
+                      ("transit_as", "joint acceleration scaling", as0))),
+                )
+                for group, label, (lo, hi), fields in groups:
                     with ui.HStack(height=22, spacing=6):
                         ui.Label(label, width=200)
-                        # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
-                        # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
-                        self._fields[key] = self._num_field(default, width=90)
+                        model = ui.SimpleFloatModel(1.0)
+                        self._speed_sliders[group] = model
+                        self._lock(ui.FloatSlider(model, min=lo, max=hi))
+                        self._fields[f"{group}_factor"] = self._num_field(1.0, width=70)
+                    with ui.HStack(height=22, spacing=6):
+                        ui.Spacer(width=24)
+                        for key, flabel, base in fields:
+                            ui.Label(flabel, width=160)
+                            # _num_field 는 _lock 까지 한다 — 생성이 도는 중에 값을 고치면
+                            # 화면의 숫자와 실제로 구워지는 값이 달라진다(명령줄은 이미 떠났다).
+                            self._fields[key] = self._num_field(float(base), width=80)
                 ui.Label(
-                    "Scan segments obey all of EE speed, EE angular speed and joint "
-                    "velocity (slowest wins). Transit segments obey joint velocity only. "
-                    "0 disables that one limit.",
+                    f"scan factor {_speed.SCAN_FACTOR_MIN:g} - {_speed.SCAN_FACTOR_MAX:g}; "
+                    f"transit factor {_speed.TRANSIT_FACTOR_MIN:g} - "
+                    f"{_speed.transit_factor_max():g} (both scalings stay <= 1.0 = robot limit). "
+                    "Start/stop, corners and scan/transit seams ramp within the acceleration limit.",
                     height=44, word_wrap=True, style=self._DIM_WIDGET_STYLE)
+                # 결합: 그룹 안에서 어느 쪽이 바뀌든 그 그룹의 배율 f 를 정하고 나머지에 쓴다.
+                # 재진입 가드로 순환을 막고, 방금 편집 중인 칸은 되쓰지 않는다 — 타자 도중 값을
+                # 덮어쓰면 입력이 깨진다.
+                self._speed_syncing = False
+                for group, _label, _range, fields in groups:
+                    self._speed_sliders[group].add_value_changed_fn(
+                        lambda _m, g=group: self._on_speed_changed(g, "slider"))
+                    for key in (f"{group}_factor", *(k for k, _l, _b in fields)):
+                        self._fields[key].add_value_changed_fn(
+                            lambda _m, g=group, k=key: self._on_speed_changed(g, k))
+
+    # 그룹별 (필드 키 → speed_model 의 값 이름). 배율 ↔ 숫자 환산은 전부 speed_model 이 한다.
+    _SPEED_FIELDS = {
+        "scan": {"scan_ee": "ee_mm_s", "scan_ang": "ee_angular_deg_s"},
+        "transit": {"transit_vs": "velocity_scaling", "transit_as": "acceleration_scaling"},
+    }
+
+    def _speed_factor_from(self, group: str, source: str) -> float:
+        """편집된 곳 하나에서 그 그룹의 배율 f 를 역산한다."""
+        if source == "slider":
+            return float(self._speed_sliders[group].get_value_as_float())
+        if source == f"{group}_factor":
+            return float(self._get_field(source, float))
+        name = self._SPEED_FIELDS[group][source]
+        value = float(self._get_field(source, float))
+        return (_speed.scan_factor_from(name, value) if group == "scan"
+                else _speed.transit_factor_from(name, value))
+
+    def _on_speed_changed(self, group: str, source: str):
+        if self._speed_syncing:
+            return
+        self._speed_syncing = True
+        try:
+            f = self._speed_factor_from(group, source)
+            values = _speed.scan_values(f) if group == "scan" else _speed.transit_values(f)
+            targets = {f"{group}_factor": f}
+            targets.update({key: values[name] for key, name in self._SPEED_FIELDS[group].items()})
+            # 슬라이더는 자기 범위로 스스로 잘린다. 숫자 칸은 타자 중이라 잘라 되쓰지 않고
+            # 표시만 따라간다 — 실제 쓰는 값은 _timing_cli_args 가 범위로 자른다.
+            if source != "slider":
+                clamp = _speed.clamp_scan if group == "scan" else _speed.clamp_transit
+                self._speed_sliders[group].set_value(clamp(f))
+            for key, value in targets.items():
+                if key != source:
+                    self._fields[key].set_value(float(value))
+        finally:
+            self._speed_syncing = False
 
     def _timing_cli_args(self) -> str:
-        """속도 노브 → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
+        """두 배율 → CLI 플래그 문자열. 생성기 셋이 같은 문자열을 붙인다.
 
-        음수는 settings.py 의 argparse type 이 rc=2 로 거절한다. 여기서 미리 막지 않는 것은
-        UI 가 조용히 값을 고쳐 놓으면 입력한 값과 실제 값이 달라지기 때문이다 — 거절은
-        로그에 남는 편이 낫다.
+        넷(EE 선·각속도, 관절 속도·가속도 배율)을 배율에서 만들어 넘긴다. 최소 구간시간은
+        넘기지 않는다 — settings.py 기본값이 쓰인다.
         """
-        return " ".join(
-            f"{flag} {float(self._get_field(key, float)):g}"
-            for flag, key, _label, _default in TIMING_FIELDS)
+        return _speed.cli_args(float(self._get_field("scan_factor", float)),
+                               float(self._get_field("transit_factor", float)))
 
     def _build_panel_preview(self):
         ui = self._ui
@@ -2571,6 +2678,15 @@ class PipelineWindow:
             toks += ["--dedup-rad", str(float(self._get_field("glns_dedup_rad", float)))]
         toks += ["--num-seeds", str(max(1, int(self._get_field("glns_num_seeds", int))))]
         toks += ["--ik-seed", str(IK_RANDOM_SEED)]
+        # 저장 IK 재사용 조건에는 안 들어간다(파일은 전체 해를 담고, 아래 둘은 읽을 때 건다).
+        # NB: --base-ref=<v> (등호). 음수면 argparse 가 옵션으로 오인한다.
+        try:
+            base_now = float(self._sim_executor.current_joints()[0])
+            toks.append(f"--base-ref={base_now:.6f}")
+        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 표현 고정 없이 진행
+            self._append_log(f"[ik] no current joint state, base representation not pinned: {exc}")
+        if self._get_field("glns_front_reach", bool):
+            toks += ["--front-reach-deg", "90"]
         return toks
 
     def _on_load_object(self):
@@ -3212,6 +3328,15 @@ class PipelineWindow:
 
         def on_line(line: str):
             self._append_log(line)
+            m = IK_H5_PATH_RE.search(line)
+            if m:
+                saved = m.group(1)
+                if not Path(saved).is_absolute():
+                    saved = str(PROJECT_ROOT / saved)
+                # 방금 푼 해가 다음 Generate 의 입력이 되는 것이 자연스럽다. 이전 선택은 덮는다 —
+                # 새로 풀었다는 것은 그걸 쓰겠다는 뜻이다.
+                self._ik_h5_model.set_value(saved)
+                self._append_log(f"[ik] Generate will use: {saved}")
 
         def on_exit(rc: int):
             cancelled = self._ik_runner.cancelled
@@ -4087,23 +4212,24 @@ class PipelineWindow:
         augment = (f" {' '.join(self._ik_candidate_tokens())}"
                    f" --ik-batch-size {self._ik_batch()}"
                    f" --max-candidates-per-viewpoint {max_candidates}")
+        ik_pick = self._ik_h5_model.get_value_as_string().strip()
+        if ik_pick:
+            if not Path(ik_pick).exists():
+                self._append_log(f"[generate] IK solutions file not found: {ik_pick}")
+                return
+            augment += f" --ik-solutions {ik_pick!r}"
+            self._append_log(f"[generate] IK solutions: {ik_pick}")
+        else:
+            self._append_log("[generate] IK solutions: newest saved file matching the Solve IK "
+                             "settings (fresh solve if none)")
         from common import config as _config
 
-        # 해와 궤적은 한 폴더에 산다. 이름에 앱 이름을 넣지 않는다 — 어느 앱이 만들었든
-        # 같은 물체/viewpoint 수면 같은 해다(재solve 는 덮어쓰기).
-        det_h5 = str(_config.get_solution_path(obj, n_vp))
+        # 해와 궤적은 한 폴더에 살고 **같은 스탬프**를 나눠 갖는다 — 덮어쓰지 않는다.
+        # solution_<stamp>.h5 와 trajectory_<stamp>.csv 가 짝이라 어느 해에서 나온 궤적인지
+        # 이름만으로 보인다(npz meta 의 source_solution 도 같은 말을 한다).
+        stamp = _config.run_stamp()
+        det_h5 = str(_config.get_solution_path(obj, n_vp, stamp=stamp))
         trajectory_dir = str(Path(det_h5).parent)
-        # 현재 자세를 넘겨 **이어붙인 궤적의 관절값 표현만** 그 기준으로 다시 고르게 한다
-        # (verify 의 align_path_to_start). 방문 순서·방향·waypoint 수는 안 바뀐다 — 2π 만큼
-        # 헛도는 표현만 없앤다.
-        # NB: --start-joints=<v> (등호). 첫 값이 음수면 argparse 가 옵션으로 오인한다.
-        start_arg = ""
-        try:
-            current_q = self._sim_executor.current_joints()
-            start_arg = " --start-joints=" + repr(",".join(f"{v:.6f}" for v in current_q))
-        except Exception as exc:  # noqa: BLE001 — 로봇 미준비면 고정 없이 진행
-            self._append_log(
-                f"[generate] no current joint state, scan start not anchored: {exc}")
         pos_s = " ".join(f"{v:.6f}" for v in pos_robot)
         quat_s = " ".join(f"{v:.6f}" for v in quat_wxyz)
         shell = (
@@ -4114,7 +4240,7 @@ class PipelineWindow:
             f"--delaunay-expand-hops {hops}{augment} --output {det_h5!r} "
             f"&& {self._uv} run --no-sync scripts/core/glns/verify.py "
             f"--result {det_h5!r} --join --require-full-coverage --spacing {spacing} "
-            f"--no-home-bracket --output-dir {trajectory_dir!r}{start_arg} "
+            f"--no-home-bracket --output-dir {trajectory_dir!r} --tag {stamp} "
             # 속도는 solve 가 아니라 verify 가 CSV 에 굽는다 — 여기에만 붙인다.
             f"{self._timing_cli_args()}"
         )
@@ -4182,7 +4308,9 @@ class PipelineWindow:
         # 계획 산출물은 자기가 브래킷하는 스캔 궤적 옆에 둔다. 스캔 CSV 가 없으면(return 만
         # 가능) h5 경로에서 물체/viewpoint 수를 읽어 같은 레이아웃 자리를 만들고, 그것도
         # 없으면 물체 폴더까지만. 어느 경우든 data/{object}/ 밖으로 나가지 않는다.
-        name = f"home_move_{transition}.csv"
+        # 이름 = 역할 + 시각. approach 는 "현재 → 스캔 시작", return 은 "현재 → HOME".
+        role = "move_to_start" if transition == "approach" else "move_to_home"
+        name = f"{role}_{_config.run_stamp()}.csv"
         if csv and Path(csv).parent.is_dir():
             return target_q, Path(csv).parent / name
         _, n_vp = self._parse_h5_meta(self._h5_path_model.get_value_as_string().strip())
@@ -4757,13 +4885,16 @@ class PipelineWindow:
                 "Hide Tilt Fan" if self._tilt_fan_on else "Show Tilt Fan")
 
     def _tilt_output_path(self, obj: str, n_vp, index: int) -> Path:
-        """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙(trajectory_{역할}.csv)."""
+        """Tilt CSV 자리 — 스캔 산출물과 같은 폴더, 같은 명명 규칙 + 실행 스탬프(덮어쓰기 없음)."""
         from common import config as _config
 
-        role = f"tilt_vp{index:04d}"
+        # 중심은 기준 궤적의 **행**이다(viewpoint 행일 수도, 보간·플래닝 행일 수도 있다) — 이름도
+        # 그렇게 말한다. 어느 기준 궤적의 행인지는 npz meta 의 base_trajectory 가 남긴다.
+        role = f"tilt_row{index:04d}"
+        stamp = _config.run_stamp()
         if n_vp is not None:
-            return _config.get_trajectory_artifact_path(obj, n_vp, role=role)
-        return _config.DATA_ROOT / obj / "trajectory" / f"trajectory_{role}.csv"
+            return _config.get_trajectory_artifact_path(obj, n_vp, role=role, stamp=stamp)
+        return _config.DATA_ROOT / obj / "trajectory" / f"{role}_{stamp}.csv"
 
     def _on_generate_tilt(self):
         """스캔 궤적의 한 행을 중심으로 공전하는 tilt 궤적을 만든다 (tilt_motion.py 서브프로세스).
@@ -4935,6 +5066,35 @@ class PipelineWindow:
         self._open_file_picker("Select trajectory CSV", self._csv_path_model,
                                "CSV (*.csv)", ".csv", start_dir)
 
+    def _on_browse_ik_h5(self):
+        """Generate 가 쓸 IK 해 파일을 고른다 (data/{object}/ik/{N}/)."""
+        start_dir = self._start_dir_for(self._ik_h5_model, "ik")
+        self._open_file_picker("Select IK solutions .h5", self._ik_h5_model,
+                               "HDF5 (*.h5)", ".h5", start_dir)
+
+    def _on_pick_latest_ik(self):
+        """이 viewpoint 세트의 가장 최근 IK 파일(ik/{N}/<시각>.h5)을 칸에 넣는다.
+
+        디렉터리 규칙은 ik_store 가 소유한다 — 파일로 불러 쓴다(core.glns 패키지를 import
+        하면 cuRobo 가 딸려온다). 물체 pose 가 맞는지는 solve 가 열어서 확인한다.
+        """
+        h5 = self._h5_path_model.get_value_as_string().strip()
+        if not h5:
+            self._append_log("[ik] pick a viewpoints .h5 first")
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ik_store_for_app", PROJECT_ROOT / "scripts" / "core" / "glns" / "ik_store.py")
+        ik_store = importlib.util.module_from_spec(spec)
+        sys.modules["ik_store_for_app"] = ik_store
+        spec.loader.exec_module(ik_store)
+        files = ik_store.list_ik_solutions(h5)
+        if not files:
+            self._append_log(f"[ik] no saved IK in {ik_store.ik_dir_for(h5)} - run Check and Save IK")
+            return
+        self._ik_h5_model.set_value(str(files[0]))
+        self._append_log(f"[ik] latest: {files[0]}")
+
     def _on_browse_tilt_base(self):
         """Tilt 의 기준 궤적을 고른다 — Preview/Execute 의 CSV 칸은 건드리지 않는다."""
         start_dir = self._start_dir_for(self._tilt_base_csv_model, "trajectory")
@@ -5083,11 +5243,10 @@ class PipelineWindow:
         if self._mode == "sim":
             return self._sim_executor.start(csv, on_done=on_done)
 
-        # REAL 은 ROS2 trajectory controller 경로. 보내기 전에 inspection 컨트롤러를
-        # 활성화한다(헬퍼 주석 참고 — run-mode 전환이 이 스위치를 놓칠 수 있다).
+        # REAL 은 ROS2 trajectory controller 경로. 어느 컨트롤러가 활성인지는 스택의
+        # mode_gate 가 발행된 모드(real/inspection)를 보고 이미 맞춰 두었다.
         shell_cmd = (
             "source /opt/ros/jazzy/setup.bash && "
-            f"{self._ensure_inspection_controller_cmd()} && "
             f"exec {self._uv} run --no-sync scripts/core/trajectory/publish.py "
             f"--csv {csv!r} --target controller"
         )
@@ -5145,8 +5304,9 @@ class PipelineWindow:
         self._ik_runner.pump()
         self._pub_runner.pump()
         self._ctrl_runner.pump()
-        self._relay_runner.pump()
         self._studio_runner.pump()
+        self._mode_pub_runner.pump()
+        self._mode_pub_tick(dt)
         self._sim_executor.step(dt)
         # Live camera-range rays: re-cast so they follow the moving camera.
         # 촬영 중에는 멈춘다 — 다시 그려지는 선이 스캔 카메라 depth 에 찍힌다.
@@ -5340,6 +5500,9 @@ def main():
     # 남으면 다음 실행이 조용히 실패한다.
     if window._studio_runner.running:
         window._studio_runner.terminate()
+    # 발행이 멈추면 스택의 mode_gate 가 timeout 뒤 궤적 컨트롤러를 전부 내린다(fail-safe).
+    if window._mode_pub_runner.running:
+        window._mode_pub_runner.terminate()
     simulation_context.stop()
     simulation_app.close()
 

@@ -34,8 +34,8 @@
 그래서 계획을 재생하는 동안에는 **바가 트는 파일과 CSV path 칸이 다르다.** 숨기지 않는다 — Preview 바의 상태 줄이 지금 재생 중인 파일 이름을 적는다:
 
 ```
-t=2.14s / 6.31s  (wp 140/411)  playing: home_move_approach.csv    ← 바가 트는 것
-CSV path: .../trajectory/74/trajectory.csv                        ← Execute Scan 대상
+t=2.14s / 6.31s  (wp 140/411)  playing: move_to_start_20260916_143012.csv    ← 바가 트는 것
+CSV path: .../trajectory/74/scan_20260916_143012.csv              ← Execute Scan 대상
 ```
 
 `Load & Preview` 로 스캔을 다시 올리면 `playing:` 도 따라 바뀌므로 이 줄은 언제나 사실이다. 버튼 아래 한 줄은 지금 무엇이 실행 대기 중인지 따로 말한다(`planned: Move to Start - 412 wp, 6.31 s`).

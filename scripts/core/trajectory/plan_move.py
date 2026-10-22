@@ -25,7 +25,7 @@ Usage:
         --object-quat 0.70710678 0 0 0.70710678 \\
         --from-joints "1.5,-1.5,2.0,-0.5,1.5,0.0" \\
         --to-joints   "0.9,-1.2,1.7,-0.4,1.4,0.1" \\
-        --output data/sample/trajectory/74/home_move_return.csv
+        --output data/sample/trajectory/74/move_to_home_20260916_143012.csv
 """
 
 from __future__ import annotations
@@ -166,7 +166,8 @@ def main() -> int:
     d0 = float(np.max(np.abs(traj[0] - q_from)))
     d1 = float(np.max(np.abs(traj[-1] - q_to)))
     print(f"  endpoints: |traj[0]-from|={d0:.2e} rad, |traj[-1]-to|={d1:.2e} rad")
-    print(f"  waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s")
+    print(f"  waypoints={gate['n_waypoints']}, duration={gate['total_time']:.2f}s, "
+          f"joint vel/acc vs limit {gate['max_joint_vel_ratio']:.2f}/{gate['max_joint_acc_ratio']:.2f}")
     return 0
 
 

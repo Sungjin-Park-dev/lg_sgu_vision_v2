@@ -550,12 +550,12 @@ def _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
     return runs, skipped
 
 
-def _precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
-                          robot_cfg, world_scene):
-    """직선 joint 스캔이 충돌-free인 (a,b) 쌍을 한 번의 batch collision check로 미리 계산.
+def candidate_scan_pairs(selected, reconfig_threshold_rad, max_skip):
+    """스캔(보간)으로 이어질 수 있는 (a, b) 쌍: jump ≤ thr 이고 b-a ≤ max_skip+1.
 
-    스캔으로 이어질 수 있는 후보(=jump ≤ thr, b-a ≤ max_skip+1)만 검사한다. 큰 jump는 어차피
-    transit이 필요하므로 스캔 검사 불필요. 반환: 함수 scan_free(a,b)->bool (표에 없으면 True).
+    _build_runs 가 인접 edge 와 skip 재연결에 시험하는 쌍의 전체 집합이다. Cartesian 추적
+    (cartesian.track_cartesian_scans)과 충돌 표(_precompute_scan_free)가 같은 목록을 써야
+    "추적은 됐는데 표에 없다" 는 구멍이 없다. 큰 jump 는 어차피 transit 이라 스캔 후보가 아니다.
     """
     N = len(selected)
     pairs = []
@@ -563,21 +563,41 @@ def _precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
         for b in range(a + 1, min(a + max_skip + 2, N)):
             if float(np.max(np.abs(selected[b] - selected[a]))) <= reconfig_threshold_rad:
                 pairs.append((a, b))
+    return pairs
+
+
+def _precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
+                          robot_cfg, world_scene, scan_paths=None):
+    """스캔 경로가 충돌-free인 (a,b) 쌍을 한 번의 batch collision check로 미리 계산.
+
+    스캔으로 이어질 수 있는 후보(candidate_scan_pairs)만 검사한다. ``scan_paths`` 가 있으면
+    그 Cartesian 직선 경로를 검사하고(추적 실패 = None 은 이을 수 없음), 표에 없는 쌍만
+    예전 joint 직선으로 검사한다. 반환: 함수 scan_free(a,b)->bool (표에 없으면 True).
+    """
+    pairs = candidate_scan_pairs(selected, reconfig_threshold_rad, max_skip)
     if not pairs:
         return lambda a, b: True
 
-    dense_list, counts = [], []
+    free = {}
+    dense_list, counts, checked = [], [], []
     for (a, b) in pairs:
-        d = densify_for_collision_check(np.stack([selected[a], selected[b]]))
+        if scan_paths is not None and (a, b) in scan_paths:
+            dense = scan_paths[(a, b)]
+            if dense is None:                      # Cartesian 추적 실패 → 스캔으로 못 잇는다
+                free[(a, b)] = False
+                continue
+            d = densify_for_collision_check(np.asarray(dense, dtype=np.float64))
+        else:
+            d = densify_for_collision_check(np.stack([selected[a], selected[b]]))
         dense_list.append(d)
         counts.append(len(d))
-    isc, _ = batch_collision_check(np.concatenate(dense_list, axis=0), robot_cfg, world_scene)
-
-    free = {}
-    off = 0
-    for (a, b), n in zip(pairs, counts):
-        free[(a, b)] = not bool(isc[off:off + n].any())
-        off += n
+        checked.append((a, b))
+    if dense_list:
+        isc, _ = batch_collision_check(np.concatenate(dense_list, axis=0), robot_cfg, world_scene)
+        off = 0
+        for (a, b), n in zip(checked, counts):
+            free[(a, b)] = not bool(isc[off:off + n].any())
+            off += n
     return lambda a, b: free.get((a, b), True)
 
 
@@ -615,14 +635,16 @@ def find_colliding_interpolation_edges(selected, edge_indices, robot_cfg, world_
     return np.asarray(colliding, dtype=np.int64)
 
 
-def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad):
+def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad,
+                            scan_paths=None):
     """한 run을 'scan' / 'transit' dense sub-path 들로 분할한다.
 
     인접 viewpoint 간 전이를 두 종류로 구분한다:
         - transit edge (nxt==cur+1 이고 cur in transit_segments) → MotionGen 재배치 경로.
           별도 'transit' 세그먼트로 떼어낸다(joint 속도로 빠르게 지나갈 구간).
-        - 그 외(small jump / skip 재연결) → 직선 보간으로 잇는 실제 스캔 이동. 연속된
-          스캔 이동은 하나의 'scan' 세그먼트로 모은다(EE arc-length로 resample할 구간).
+        - 그 외(small jump / skip 재연결) → 실제 스캔 이동. ``scan_paths`` 에 그 쌍의 Cartesian
+          직선 경로가 있으면 그것을, 없으면 joint 직선 보간을 쓴다. 연속된 스캔 이동은 하나의
+          'scan' 세그먼트로 모은다(EE arc-length로 resample할 구간).
 
     각 세그먼트는 시작/끝 viewpoint config 를 모두 포함하므로, 인접 세그먼트는 경계
     config 를 공유한다(stitch_trajectory_pieces 가 중복 제거).
@@ -668,13 +690,20 @@ def _typed_segments_for_run(selected, transit_segments, run_idx, dense_step_rad)
             scan_buf = [selected[nxt:nxt + 1]]
             vp_buf = [np.ones(1, dtype=bool)]
         else:
-            # selected[cur]→selected[nxt] 직선 보간의 내부점(양 끝 제외)을 dense하게 채운다
-            q0, q1 = selected[cur], selected[nxt]
-            n_steps = max(1, int(np.ceil(float(np.max(np.abs(q1 - q0))) / dense_step_rad)))
-            if n_steps > 1:
-                alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
-                scan_buf.append(q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :])
-                vp_buf.append(np.zeros(len(alphas), dtype=bool))
+            tracked = None if scan_paths is None else scan_paths.get((cur, nxt))
+            if tracked is not None and len(tracked) > 2:
+                # Cartesian 직선 위의 IK 표본(양 끝 제외). 양 끝은 selected 그 자체다.
+                scan_buf.append(np.asarray(tracked, dtype=np.float64)[1:-1])
+                vp_buf.append(np.zeros(len(tracked) - 2, dtype=bool))
+            elif tracked is None:
+                # selected[cur]→selected[nxt] joint 직선 보간의 내부점(양 끝 제외)을 dense하게
+                # 채운다 — Cartesian 추적을 쓰지 않는 호출자(plan_move 등)의 경로.
+                q0, q1 = selected[cur], selected[nxt]
+                n_steps = max(1, int(np.ceil(float(np.max(np.abs(q1 - q0))) / dense_step_rad)))
+                if n_steps > 1:
+                    alphas = np.linspace(0.0, 1.0, n_steps + 1)[1:-1]
+                    scan_buf.append(q0[np.newaxis, :] + alphas[:, np.newaxis] * (q1 - q0)[np.newaxis, :])
+                    vp_buf.append(np.zeros(len(alphas), dtype=bool))
             scan_buf.append(selected[nxt:nxt + 1])
             vp_buf.append(np.ones(1, dtype=bool))
     _flush()
@@ -721,7 +750,8 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
                              mode="ee", spacing=0.01, dense_step_rad=0.02,
                              transit_spacing_rad=TRANSIT_RESAMPLE_SPACING_RAD,
                              reconfig_threshold_rad=np.deg2rad(RECONFIG_THRESHOLD_DEG),
-                             max_skip=TRANSIT_FAIL_SKIP_MAX, world_scene=None):
+                             max_skip=TRANSIT_FAIL_SKIP_MAX, world_scene=None,
+                             scan_paths=None):
     """DP 궤적 + transit을 합치고, 선택된 metric으로 uniform resample.
 
     transit 실패 reconfig 은 직선 보간하면 물체를 관통하므로 사용하지 않는다. 대신
@@ -739,6 +769,9 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
             transit은 검사가 아니므로 EE 기준이 아니라 joint 기준으로 sparse하게 재분할한다.
         reconfig_threshold_rad: 직선 보간 허용 임계값(이보다 크면 transit 필요)
         max_skip: transit 실패 시 run 내부에서 건너뛸 수 있는 최대 viewpoint 수
+        scan_paths: {(a, b): dense|None} — cartesian.track_cartesian_scans 의 결과. 주면 스캔
+            edge 는 그 Cartesian 직선 경로로 채우고(run 분할의 충돌 검사도 그 경로로), 추적에
+            실패한(None) 쌍은 스캔으로 잇지 않는다. None 이면 예전처럼 joint 직선 보간.
 
     Returns:
         resampled:  (M, 6) uniform-spaced trajectory (가장 긴 안전 run)
@@ -752,7 +785,7 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     # viewpoint 사이 직선 보간이 물체를 관통하면(via-home으로 진입은 됐어도) 스캔 자체가 불가 →
     # 그 구간을 끊어 정직하게 드롭(최종 batch 충돌검사 거부 대신 유효 궤적 저장).
     scan_free = (_precompute_scan_free(selected, reconfig_threshold_rad, max_skip,
-                                       robot_cfg, world_scene)
+                                       robot_cfg, world_scene, scan_paths=scan_paths)
                  if world_scene is not None else None)
     runs, _ = _build_runs(selected, transit_segments, reconfig_threshold_rad, max_skip,
                           scan_free=scan_free)
@@ -778,7 +811,8 @@ def interpolate_and_resample(selected, transit_segments, robot_cfg,
     # 스캔 / transit 세그먼트를 분리해 각각에 맞는 기준으로 resample 한다.
     #   scan    → EE arc-length(또는 joint, mode에 따라). 검사 spacing 그대로.
     #   transit → joint-space L∞ arc-length(sparse). EE 호 길이와 무관하게 재배치.
-    segments = _typed_segments_for_run(selected, transit_segments, kept, dense_step_rad)
+    segments = _typed_segments_for_run(selected, transit_segments, kept, dense_step_rad,
+                                       scan_paths=scan_paths)
     pieces, masks, kinds = [], [], []
     for kind, dense, dense_vp in segments:
         if kind == "transit":

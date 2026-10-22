@@ -3,6 +3,8 @@
 import numpy as np
 
 from common import config
+from common import joint_limits as joint_limits_module
+from common import speed_model
 
 ROBOT_CONFIG = config.DEFAULT_ROBOT_CONFIG
 NUM_IK_SEEDS = 100
@@ -75,27 +77,40 @@ RESAMPLE_MODE = "ee"
 DEFAULT_SPACING_M = 0.01
 
 # ── 실행 속도 노브 ────────────────────────────────────────────────────────────
-# 아래 6개(+ 코너 2개)가 CSV 의 time 열을 정하고, **그 열이 곧 실행 속도다** — Isaac 고스트
+# 아래 값들이 CSV 의 time 열을 정하고, **그 열이 곧 실행 속도다** — Isaac 고스트
 # 재생도 실로봇 publish 도 이 열을 그대로 따른다. 값은 생성 시점에 궤적에 구워지므로 바꾸면
 # 다시 생성해야 한다(CSV 를 나중에 다시 시간매김하는 경로는 없다).
+#
+# 구간의 종류가 어느 쌍이 시간을 정하는지 가른다(timing.py):
+#   보간 구간(viewpoint 사이 스캔, tilt 부채꼴)  : EE 선속도·각속도 — 카메라가 표면을 훑는 속도.
+#   플래닝 구간(transit, Plan to Start/HOME)     : 관절 속도·가속도 배율 — MoveIt 과 **같은 파일**
+#       (moveit/ur_config/joint_limits.yaml)의 관절별 한계에 **같은 의미**의 scaling factor(0–1)를
+#       곱한다. RViz MotionPlanning 패널의 Velocity/Acceleration Scaling 과 같은 수다.
+# 관절 가속도 한계는 로봇의 물리 한계라 구간 경계(플래닝→보간 이음새)와 출발·정지에도 걸린다.
+# 스캔 속도가 느려서 보간 구간 안에서 닿는 일은 없다.
 #
 # collision_gate_and_save 는 이 값들을 **모듈 속성으로 호출 시점에** 읽는다. 그래서
 # apply_timing_cli() 로 여기를 덮어쓰면 그대로 걸린다 — `from .settings import EE_SPEED_MM_S`
 # 처럼 값을 복사해 가면 override 가 조용히 무시되니 하지 말 것.
-EE_SPEED_MM_S = 10.0
-EE_ANGULAR_SPEED_DEG_S = 20.0
-MAX_JOINT_VEL_RAD_S = 0.3
-MIN_SEGMENT_DT_S = 0.05
+EE_SPEED_MM_S = speed_model.SCAN_BASE["ee_mm_s"]
+EE_ANGULAR_SPEED_DEG_S = speed_model.SCAN_BASE["ee_angular_deg_s"]
+JOINT_VELOCITY_SCALING, JOINT_ACCELERATION_SCALING = speed_model.transit_base()
+# 구간 최소 시간 — 수치 안전용 바닥이지 속도 노브가 아니다. transit 은 0.05 rad 간격으로
+# resample 되므로(TRANSIT_RESAMPLE_SPACING_RAD) 이 바닥이 곧 "관절 속도 ≤ 0.05/바닥" 이 된다.
+# 0.05 s 면 1 rad/s 에서 걸려 이동 배율 상단(손목 1.6 rad/s)을 몰래 깎았다 — 0.02 s 는 2.5 rad/s
+# 라 어떤 배율에서도 닿지 않는다(실측: transit ×2 가 27.9 → 14.0 s, 정확히 절반).
+MIN_SEGMENT_DT_S = 0.02
 
 # reconfig transit(재배치)은 검사 스캔이 아니라 단순 repositioning이다. 스캔과 똑같이 EE
-# arc-length로 resample하고 EE 선속도(50mm/s)로 시간 매기면, base를 크게 돌릴 때 팔 끝이
-# 자유공간에 그리는 긴 호(수 m)를 기어가느라 사이클의 대부분을 먹는다. 그래서 transit 구간은
-# (1) joint-space L∞로 sparse하게 resample하고, (2) joint 속도 한계로만 시간을 매긴다
-# (EE 선속도/각속도/corner slowdown 무시).
+# arc-length로 resample하고 EE 선속도로 시간 매기면, base를 크게 돌릴 때 팔 끝이 자유공간에
+# 그리는 긴 호(수 m)를 기어가느라 사이클의 대부분을 먹는다. 그래서 transit 구간은
+# (1) joint-space L∞로 sparse하게 resample하고, (2) 관절 속도·가속도 한계로만 시간을 매긴다.
 TRANSIT_RESAMPLE_SPACING_RAD = 0.05   # ~2.9°, transit resample 간격(가장 빨리 도는 joint 기준)
 
-CORNER_ANGLE_THRESHOLD_DEG = 30.0
-CORNER_MAX_SLOWDOWN = 2.5
+
+def joint_limits() -> joint_limits_module.JointLimits:
+    """MoveIt 과 공유하는 관절별 한계(로봇 100%). 배율은 위 JOINT_*_SCALING 을 곱해 쓴다."""
+    return joint_limits_module.load_joint_limits()
 
 
 # =============================================================================
@@ -105,20 +120,20 @@ CORNER_MAX_SLOWDOWN = 2.5
 # trajectory/tilt_motion.py). 플래그를 각자 정의하면 이름과 기본값이 조용히 어긋나므로
 # scene_config.add_cli_argument 와 같은 방식으로 한 곳에 둔다.
 #
-# (CLI 플래그, 이 모듈의 이름, 도움말)
+# (CLI 플래그, 이 모듈의 이름, 값 검사, 도움말)
 TIMING_KNOBS = (
-    ("--ee-speed-mm-s", "EE_SPEED_MM_S",
-     "스캔 구간 EE 선속도 [mm/s]. 0 이면 이 제한을 끈다"),
-    ("--ee-angular-speed-deg-s", "EE_ANGULAR_SPEED_DEG_S",
-     "스캔 구간 EE 각속도 [deg/s]. 0 이면 이 제한을 끈다"),
-    ("--max-joint-vel-rad-s", "MAX_JOINT_VEL_RAD_S",
-     "관절 속도 상한 [rad/s]. 스캔과 transit 양쪽에 걸린다 — transit 시간은 이 값만으로 정해진다"),
-    ("--min-segment-dt-s", "MIN_SEGMENT_DT_S",
+    ("--ee-speed-mm-s", "EE_SPEED_MM_S", "speed",
+     "보간(스캔) 구간 EE 선속도 [mm/s]. 0 이면 이 제한을 끈다"),
+    ("--ee-angular-speed-deg-s", "EE_ANGULAR_SPEED_DEG_S", "speed",
+     "보간(스캔) 구간 EE 각속도 [deg/s]. 0 이면 이 제한을 끈다"),
+    ("--joint-velocity-scaling", "JOINT_VELOCITY_SCALING", "scaling",
+     "플래닝(transit) 구간 관절 속도 배율 (0, 1]. joint_limits.yaml 의 관절별 한계에 곱한다 — "
+     "MoveIt 의 velocity scaling factor 와 같은 뜻"),
+    ("--joint-acceleration-scaling", "JOINT_ACCELERATION_SCALING", "scaling",
+     "관절 가속도 배율 (0, 1]. joint_limits.yaml 의 관절별 한계에 곱한다 — MoveIt 의 "
+     "acceleration scaling factor 와 같은 뜻. 출발·정지·꺾임·구간 경계에서 이 안으로 가감속한다"),
+    ("--min-segment-dt-s", "MIN_SEGMENT_DT_S", "speed",
      "segment 최소 소요시간 [s]. 짧은 구간이 순간적으로 빨라지는 것을 막는 바닥값"),
-    ("--corner-angle-threshold-deg", "CORNER_ANGLE_THRESHOLD_DEG",
-     "이 각도보다 급한 꺾임부터 감속을 시작한다 [deg]"),
-    ("--corner-max-slowdown", "CORNER_MAX_SLOWDOWN",
-     "가장 급한 꺾임에서의 감속 배수 (1.0 = 감속 없음)"),
 )
 
 
@@ -138,15 +153,32 @@ def _non_negative(text: str) -> float:
     return value
 
 
+def _scaling(text: str) -> float:
+    """argparse ``type=`` — scaling factor 는 (0, 1]. 0 은 나눗셈에 못 쓰고 1 초과는 로봇 한계 밖."""
+    import argparse
+
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"could not parse as a number ({exc})")
+    if not 0.0 < value <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be in (0, 1] (got {value})")
+    return value
+
+
+_KNOB_TYPES = {"speed": _non_negative, "scaling": _scaling}
+
+
 def add_timing_cli_arguments(parser) -> None:
     """속도 노브 플래그를 parser 에 단다 — CSV 를 내는 스크립트는 전부 이걸 쓴다."""
     group = parser.add_argument_group(
         "timing (실행 속도)",
         "CSV 의 time 열을 정한다 = 실행 속도. 생성 시점에 궤적에 구워지므로 "
-        "바꾸면 다시 생성해야 반영된다.")
-    for flag, name, help_text in TIMING_KNOBS:
-        group.add_argument(flag, type=_non_negative, default=None,
-                           help=f"{help_text} (기본 {globals()[name]})")
+        "바꾸면 다시 생성해야 반영된다. 관절 한계 파일: "
+        f"{joint_limits_module.JOINT_LIMITS_YAML}")
+    for flag, name, kind, help_text in TIMING_KNOBS:
+        group.add_argument(flag, type=_KNOB_TYPES[kind], default=None,
+                           help=f"{help_text} (기본 {globals()[name]:g})")
 
 
 def apply_timing_cli(args, *, verbose: bool = True) -> dict:
@@ -156,26 +188,36 @@ def apply_timing_cli(args, *, verbose: bool = True) -> dict:
     구운 궤적인지는 CSV 를 봐서는 복원할 수 없는 정보다.
     """
     values, changed = {}, []
-    for flag, name, _help in TIMING_KNOBS:
+    for flag, name, _kind, _help in TIMING_KNOBS:
         override = getattr(args, flag.lstrip("-").replace("-", "_"), None)
         if override is not None and float(override) != globals()[name]:
-            changed.append(f"{name} {globals()[name]} -> {float(override)}")
+            changed.append(f"{name} {globals()[name]:g} -> {float(override):g}")
         if override is not None:
             globals()[name] = float(override)
         values[name] = globals()[name]
     if verbose:
-        print(f"  Timing: EE {values['EE_SPEED_MM_S']:g} mm/s, "
-              f"{values['EE_ANGULAR_SPEED_DEG_S']:g} deg/s, joint "
-              f"{values['MAX_JOINT_VEL_RAD_S']:g} rad/s, min dt "
-              f"{values['MIN_SEGMENT_DT_S']:g} s, corner "
-              f">{values['CORNER_ANGLE_THRESHOLD_DEG']:g} deg x"
-              f"{values['CORNER_MAX_SLOWDOWN']:g}")
+        lim = joint_limits()
+        vmax = np.rad2deg(lim.max_velocity * values["JOINT_VELOCITY_SCALING"])
+        amax = lim.max_acceleration * values["JOINT_ACCELERATION_SCALING"]
+        print(f"  Timing: scan EE {values['EE_SPEED_MM_S']:g} mm/s, "
+              f"{values['EE_ANGULAR_SPEED_DEG_S']:g} deg/s; transit joint scaling vel "
+              f"{values['JOINT_VELOCITY_SCALING']:g} (= {vmax.min():.0f}-{vmax.max():.0f} deg/s), "
+              f"acc {values['JOINT_ACCELERATION_SCALING']:g} (= {amax.min():.2g}-{amax.max():.2g} "
+              f"rad/s2); min dt {values['MIN_SEGMENT_DT_S']:g} s")
         if changed:
             print("           overridden: " + "; ".join(changed))
     return values
 
 
 def timing_values() -> dict:
-    """지금 이 모듈에 걸려 있는 속도 노브 전부. CLI 를 안 쓰는 호출자용."""
-    return {name: globals()[name] for _flag, name, _help in TIMING_KNOBS}
+    """지금 이 모듈에 걸려 있는 속도 노브 전부 + 곱해지는 관절 한계. CLI 를 안 쓰는 호출자용.
 
+    관절 한계까지 함께 남기는 이유: 배율만 있으면 yaml 이 나중에 바뀌었을 때 그 궤적이 어떤
+    한계로 구워졌는지 되짚을 수 없다.
+    """
+    lim = joint_limits()
+    out = {name: globals()[name] for _flag, name, _kind, _help in TIMING_KNOBS}
+    out["JOINT_LIMITS"] = {"names": list(lim.names),
+                           "max_velocity_rad_s": lim.max_velocity.tolist(),
+                           "max_acceleration_rad_s2": lim.max_acceleration.tolist()}
+    return out

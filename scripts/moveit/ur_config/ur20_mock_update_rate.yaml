@@ -1,0 +1,6 @@
+# mock 하드웨어용 controller_manager 주기. 드라이버 기본(ur20_update_rate.yaml)은 실로봇의
+# RTDE 에 맞춘 500 Hz 인데, mock 은 그 주기를 맞출 이유가 없고 RT 권한 없는 컨테이너에서
+# 2 ms 루프는 머신이 바쁘면 계속 "Overrun detected" 를 찍는다. 실로봇은 드라이버 기본을 쓴다.
+controller_manager:
+  ros__parameters:
+    update_rate: 125  # Hz

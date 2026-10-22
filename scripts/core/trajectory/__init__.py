@@ -8,7 +8,9 @@ from .periodic import (
     periodic_joint_delta,
     unwrap_joint_path,
 )
+from .cartesian import colliding_scan_paths, track_cartesian_scans
 from .motion import (
+    candidate_scan_pairs,
     build_reconfig_motion_planner,
     densify_for_collision_check,
     find_colliding_interpolation_edges,
@@ -26,21 +28,22 @@ from .robot import (
     build_collision_world,
     compute_fk,
     resolve_robot_config,
+    robot_joint_names,
 )
 from .settings import (
     add_timing_cli_arguments,
     apply_timing_cli,
     timing_values,
     TIMING_KNOBS,
-    CORNER_ANGLE_THRESHOLD_DEG,
-    CORNER_MAX_SLOWDOWN,
+    TRANSIT_FAIL_SKIP_MAX,
     DEFAULT_SPACING_M,
     CANDIDATE_DEDUP_RAD,
     EE_ANGULAR_SPEED_DEG_S,
     EE_SPEED_MM_S,
     IK_BATCH_SIZE,
     IK_RANDOM_SEED,
-    MAX_JOINT_VEL_RAD_S,
+    JOINT_ACCELERATION_SCALING,
+    JOINT_VELOCITY_SCALING,
     MIN_SEGMENT_DT_S,
     NUM_IK_SEEDS,
     RECONFIG_THRESHOLD_DEG,

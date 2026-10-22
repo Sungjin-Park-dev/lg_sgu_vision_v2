@@ -13,9 +13,13 @@ from .problem import (
 # 주기성은 core.trajectory.periodic 이 소유한다 — 기존 import 경로 호환을 위해 재수출.
 from core.trajectory.periodic import periodic_joint_delta, unwrap_joint_path
 from .ik_store import (
-    augmentation_suffix,
     build_settings,
+    ik_dir_for,
     ik_solutions_path,
+    list_ik_solutions,
+    read_ik_settings,
+    settings_match,
+    POSE_KEYS,
     load_ik_solutions,
     save_ik_solutions,
 )
