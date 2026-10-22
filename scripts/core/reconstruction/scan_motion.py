@@ -108,10 +108,10 @@ def plan_scan_motion(plan: storage.ScanPlan, start: np.ndarray, out_dir: Path, *
     summary = {"duration_s": round(float(gate["total_time"]), 2),
                "n_waypoints": int(gate["n_waypoints"]), "routes": routes,
                "repaired_shots": repaired,
-               "max_joint_vel_rad_s": float(settings.MAX_JOINT_VEL_RAD_S)}
+               "joint_velocity_scaling": float(settings.JOINT_VELOCITY_SCALING)}
     log(f"[motion] {len(edges)} moves ({', '.join(f'{v} {k}' for k, v in routes.items())}), "
         f"{summary['n_waypoints']} waypoints, {summary['duration_s']:.1f} s at "
-        f"{np.degrees(settings.MAX_JOINT_VEL_RAD_S):.0f}°/s joint speed -> {out_csv.name}")
+        f"joint velocity scaling {settings.JOINT_VELOCITY_SCALING:g} -> {out_csv.name}")
     return summary, selected[1:-1].copy()
 
 
