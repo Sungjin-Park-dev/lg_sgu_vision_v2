@@ -151,7 +151,7 @@ def _solve_directions(spec, center, radius, standoff, dirs, ik_seeds, log):
     cam_T = np.stack([look_at(center + standoff * d, center, roll)
                       for d in dirs for roll in ROLLS_DEG])                    # (n*R, 4, 4)
     tool_T = cam_T @ np.linalg.inv(spec.tool_T_cam_matrix)
-    robot_cfg = PT.resolve_robot_config()
+    robot_cfg = PT.resolve_robot_config(config.DEFAULT_ROBOT_CONFIG)
     sols, ok = PT.solve_ik_multi_seed(
         robot_cfg, collision_world(center, radius), tool_T[:, :3, 3],
         rot_to_quat_batch(tool_T[:, :3, :3]), num_seeds=ik_seeds, batch_size=16)
@@ -216,27 +216,21 @@ def _circular_runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return runs
 
 
-def wrap_mask(robot_cfg) -> np.ndarray:
-    """2π 동치를 쓸 수 있는 관절 (n_joints,) bool — 범위가 두 바퀴 이상인 관절(로봇 URDF 에서).
-
-    UR 은 팔꿈치(±π)만 빼고 ±2π 까지 돈다 → [T, T, F, T, T, T].
-    """
-    from core import trajectory as PT
-
-    return PT.joint_limits_and_periods(robot_cfg)[2] > 0.0
+# 2π 동치를 쓸 수 있는 관절 — UR20 은 팔꿈치(±π)만 빼고 ±2π 까지 돈다.
+WRAP_JOINTS = np.array([True, True, False, True, True, True])
 
 
-def _wrap_variants(q: np.ndarray, wrap: np.ndarray) -> np.ndarray:
-    """[-π, π] 해 (N,J) → 관절 한계(±2π) 안의 2π 동치 전부 (N·2^k, J). 도는 관절마다 v 와 v∓2π."""
+def _wrap_variants(q: np.ndarray) -> np.ndarray:
+    """[-π, π] 해 (N,6) → 관절 한계(±2π) 안의 2π 동치 전부 (N·2^5, 6). 도는 관절마다 v 와 v∓2π."""
     out = q
-    for j in np.flatnonzero(wrap):
+    for j in np.flatnonzero(WRAP_JOINTS):
         alt = out.copy()
         alt[:, j] -= 2.0 * math.pi * np.sign(alt[:, j])
         out = np.concatenate([out, alt])
     return out
 
 
-def _dp_solutions(seq, start, cam_T, sols, usable, wrap):
+def _dp_solutions(seq, start, cam_T, sols, usable):
     """방향 순서 seq 를 따라 장마다 IK 해 하나씩 → 시작 자세부터의 관절 이동 합(L∞) 최소.
 
     반환 (비용 rad, [(후보 k, q)] seq 순). 방향마다 roll 4가지 × 시드 해(1e-3 rad 로 중복 제거)의
@@ -253,8 +247,8 @@ def _dp_solutions(seq, start, cam_T, sols, usable, wrap):
                 qs.append(sols[k, sidx])
         qs = np.asarray(qs)
         _, uniq = np.unique(np.round(qs, 3), axis=0, return_index=True)
-        n_var = 2 ** int(wrap.sum())
-        cands.append((np.tile(np.asarray(ks)[uniq], n_var), _wrap_variants(qs[uniq], wrap)))
+        n_var = 2 ** int(WRAP_JOINTS.sum())
+        cands.append((np.tile(np.asarray(ks)[uniq], n_var), _wrap_variants(qs[uniq])))
     cost = np.abs(cands[0][1] - start).max(axis=1)
     back = []
     for (_, q_prev), (_, q_cur) in zip(cands[:-1], cands[1:]):
@@ -286,7 +280,6 @@ def _plan_zigzag(spec, center, radius, standoff, ik_seeds, n_rings, spacing_deg,
     robot_cfg, cam_T, sols, usable, n_dirs_ik = _solve_directions(
         spec, center, radius, standoff, dirs, ik_seeds, log)
     reach = usable.reshape(len(dirs), -1).any(axis=1)
-    wrap = wrap_mask(robot_cfg)
 
     # 고리마다 찍을 방향(방위 순) — 쓰는 방향(정·역)은 아래 DP 가 고른다.
     rings, rings_meta = [], []
@@ -324,7 +317,7 @@ def _plan_zigzag(spec, center, radius, standoff, ik_seeds, n_rings, spacing_deg,
     best = None
     for flips in itertools.product((False, True), repeat=len(rings)):
         seq = head + [i for ring, f in zip(rings, flips) for i in (ring[::-1] if f else ring)]
-        cost, picks = _dp_solutions(seq, start, cam_T, sols, usable, wrap)
+        cost, picks = _dp_solutions(seq, start, cam_T, sols, usable)
         if best is None or cost < best[0]:
             best = (cost, seq, picks)
     _, seq, picks = best

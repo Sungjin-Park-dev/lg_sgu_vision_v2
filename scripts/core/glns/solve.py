@@ -305,7 +305,7 @@ def main() -> int:
     print(f"[3/6] Resolving collision-aware IK candidates (seed={args.ik_seed})...")
     world_poses = PT.build_camera_poses(positions, normals, source["wd_m"])
     world = PT.build_collision_world(args.object)
-    robot_cfg = PT.resolve_robot_config()
+    robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     joint_lower, joint_upper, joint_periods = _joint_limits_and_periods(robot_cfg)
     periodic_names = [
         name for name, period in zip(
@@ -616,8 +616,7 @@ def main() -> int:
         # storage.write_result_hdf5 가 dict 를 자동으로 json.dumps 하므로 저장 계층은 그대로다.
         "scene_name": config.ACTIVE_SCENE,
         "scene": config.scene_snapshot(),
-        "robot": config.ROBOT["name"],
-        "robot_config": config.ROBOT["curobo_config"],
+        "robot_config": PT.ROBOT_CONFIG,
         "num_ik_seeds": args.num_seeds,
         "ik_batch_size": args.ik_batch_size,
         "ik_seed": args.ik_seed,

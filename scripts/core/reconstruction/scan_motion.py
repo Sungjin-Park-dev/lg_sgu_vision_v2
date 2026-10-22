@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from core.reconstruction import storage
-from core.reconstruction.planning import _wrap_variants, collision_world, wrap_mask
+from core.reconstruction.planning import WRAP_JOINTS, _wrap_variants, collision_world
 
 # 플래너 warmup 버퍼는 배치 슬롯당 ~375MB — Isaac 이 같은 GPU 를 쓰는 동안 돈다(패널의 계획
 # 서브프로세스). 경계가 12~14개라 4 면 3~4번에 나눠 푼다.
@@ -56,7 +56,7 @@ def plan_scan_motion(plan: storage.ScanPlan, start: np.ndarray, out_dir: Path, *
     start = np.asarray(start, dtype=np.float64)
     selected = np.vstack([start[None], plan.q, start[None]])          # (N+2, 6)
     edges = np.arange(len(selected) - 1, dtype=np.int64)
-    robot_cfg = PT.resolve_robot_config()
+    robot_cfg = PT.resolve_robot_config(config.DEFAULT_ROBOT_CONFIG)
     world = collision_world(plan.roi_center, plan.roi_radius)
 
     planner = PT.build_reconfig_motion_planner(robot_cfg, world, batch_size=batch_size)
@@ -131,9 +131,8 @@ def _repair(selected, segments, e, robot_cfg, world, planner, log):
     prev_q, next_q = selected[node - 1], selected[node + 1]
     cur = selected[node]
     base = (cur + np.pi) % (2.0 * np.pi) - np.pi               # [-π, π] 로 되돌려 동치 전부를 만든다
-    wrap = wrap_mask(robot_cfg)
-    base = np.where(wrap, base, cur)
-    var = _wrap_variants(base[None], wrap)
+    base = np.where(WRAP_JOINTS, base, cur)
+    var = _wrap_variants(base[None])
     var = var[np.max(np.abs(var - cur), axis=1) > 1e-6]          # 지금 값은 이미 실패했다
     cost = np.abs(var - prev_q).max(axis=1) + np.abs(var - next_q).max(axis=1)
     var = var[np.argsort(cost)]

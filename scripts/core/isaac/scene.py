@@ -58,13 +58,13 @@ from common import scene_config as _scene_config  # noqa: E402
 
 ROBOT_DIR = PROJECT_ROOT / "workcell" / "robot"
 ENV_DIR   = PROJECT_ROOT / "workcell" / "environment"
+# DEFAULT_USD = ROBOT_DIR / "ur20" / "ur20.usd"
+DEFAULT_USD = ROBOT_DIR / "ur20_with_camera.usd"  # usd의 원점이 달라서 공중에 떠있음
 ENV_USD     = ENV_DIR / "environment.usd"
 MOUNT_USD   = ROBOT_DIR / "ur10_mount.usd"
 TABLE_USD   = ENV_DIR / "thor_table.usd"
 
-# 로봇 prim — 이름은 로봇과 무관하다(어느 로봇이든 여기 하나). USD 는 씬이 고른 로봇 프로필의
-# usd 다(robot_usd_path).
-STAGE_PATH = "/World/Robot"
+STAGE_PATH = "/World/UR20"
 MOUNT_PATH = "/World/Mount"
 TABLE_PATH = "/World/Table"
 ENV_PATH   = "/World/Environment"
@@ -93,8 +93,8 @@ RENDER_PRODUCT_NODE = "RP"
 def _is_under_root(path: str, root: str) -> bool:
     """Prim path 가 root 서브트리에 속하는지 — prefix 오탐 없이 정확히 판정.
 
-    단순 ``startswith`` 는 형제 경로를 잘못 포함한다: ``/World/Robot_preview`` 는
-    ``/World/Robot`` 로 시작하지만 실제 로봇의 하위가 아니다. root 자체이거나
+    단순 ``startswith`` 는 형제 경로를 잘못 포함한다: ``/World/UR20_preview`` 는
+    ``/World/UR20`` 로 시작하지만 실제 로봇의 하위가 아니다. root 자체이거나
     ``root + "/"`` 로 시작해야만 서브트리로 본다.
     """
     return path == root or path.startswith(root + "/")
@@ -109,16 +109,10 @@ MOUNT_XY_SCALE = 2.0
 TABLE_USD_BBOX_CENTER_X = 0.270
 TABLE_USD_BBOX_CENTER_Y = -0.002
 
-def robot_usd_path() -> Path:
-    """씬이 고른 로봇의 Isaac USD — 호출 시점에 읽는다(--scene 적용 **뒤**에 부를 것)."""
-    return _config.robot_asset("usd")
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--usd-path", type=Path, default=None,
-                        help="Robot USD path (default: the scene's robot profile usd, "
-                             "e.g. workcell/robot/ur20_with_camera.usd)")
+    parser.add_argument("--usd-path", type=Path, default=DEFAULT_USD,
+                        help=f"Robot USD path (default: {DEFAULT_USD.relative_to(PROJECT_ROOT)})")
     parser.add_argument("--object", type=str, default=None,
                         help="Object name to load workcell (e.g. 'sample')")
     _scene_config.add_cli_argument(parser)
@@ -167,15 +161,9 @@ def start_sim(headless: bool = False, enable_ros_bridge: bool = True):
     return simulation_app
 
 
-def load_workcell(usd_path: Path | None = None) -> None:
-    """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다.
-
-    usd_path 를 안 주면 씬이 고른 로봇의 USD(robot_usd_path).
-    """
+def load_workcell(usd_path: Path) -> None:
+    """Place environment + mount + table + robot + 씬 장애물을 스테이지에 올린다."""
     from isaacsim.core.utils import prims
-
-    if usd_path is None:
-        usd_path = robot_usd_path()
 
     # 환경(실험실 방)은 시각 전용이고, pose 는 씬 YAML 의 environment 블록이 갖는다.
     # 예전에는 table.rotation 을 "셀 전체의 회전"으로 재해석해 방을 같이 돌렸는데,
@@ -435,7 +423,7 @@ def setup_inspection_camera(
     the asset is being migrated.
 
     ``root_path`` 로 어느 로봇을 대상으로 할지 정한다 — 실제 로봇(``STAGE_PATH``,
-    기본)이나 preview ghost(``/World/Robot_preview``). 두 로봇의 prim 이름이 같으므로
+    기본)이나 preview ghost(``/World/UR20_preview``). 두 로봇의 prim 이름이 같으므로
     (둘 다 ``camera_optical_frame``) 정확한 서브트리 스코프가 필수다. ``camera_name``
     으로 두 카메라를 구분한다(실제=InspectionCamera, ghost=InspectionCameraPreview).
     """
@@ -699,17 +687,15 @@ def build_sim_robot_graph(articulation_root: str) -> str:
 def main():
     args = parse_args()
 
-    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽고,
-    # 로봇(USD)도 씬이 고른다.
-    _scene_config.apply_cli(args, _config)
-    if args.usd_path is None:
-        args.usd_path = robot_usd_path()
     if not args.usd_path.exists():
         sys.exit(
             f"Robot USD not found: {args.usd_path}\n"
-            f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD there "
-            f"(robot profile: {_config.ROBOT['path']})"
+            f"Import the URDF via Isaac Sim's URDF Importer GUI and save the USD\n"
+            f"to workcell/robot/ur20_with_camera.usd"
         )
+
+    # 씬을 먼저 반영한다 — load_workcell 의 테이블 스케일과 장애물 스폰이 이 값을 읽는다.
+    _scene_config.apply_cli(args, _config)
 
     simulation_app = start_sim(headless=False)
 

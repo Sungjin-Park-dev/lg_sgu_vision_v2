@@ -49,10 +49,9 @@ YAML 의 그 상자를 고치고, **`position[2]` 도 같이 내려 상면이 z=
 
 | 항목 | 기본값 |
 |---|---|
-| 로봇 | 씬 YAML 의 `robot:` (기본 `ur20`) → `workcell/robot/profiles/{robot}.yaml` |
-| robot config | 프로필의 `curobo_config` (UR20: `ur20_with_camera.yml`) → `config.ROBOT` |
-| joint 순서 | cuRobo yml `cspace.joint_names` (UR: shoulder pan, shoulder lift, elbow, wrist 1, wrist 2, wrist 3) → `config.ROBOT_JOINT_NAMES` |
-| 시작 자세 | 프로필의 `start_state_deg` → `config.ROBOT_START_STATE` |
+| robot config | `ur20_with_camera.yml` |
+| joint 순서 | shoulder pan, shoulder lift, elbow, wrist 1, wrist 2, wrist 3 |
+| 시작 자세 | `ROBOT_START_STATE` |
 | collision margin | 0 m |
 
 ## 씬 (장애물·물체 배치)

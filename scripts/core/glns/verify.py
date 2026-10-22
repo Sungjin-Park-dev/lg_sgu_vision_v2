@@ -352,22 +352,13 @@ def main() -> int:
     config.TARGET_OBJECT["rotation"] = object_quat
 
     print(f"Result:   {args.result}")
-    print(f"Robot:    {config.ROBOT['name']} ({config.ROBOT['curobo_config']})")
     print(f"Object:   {object_name}  pos={object_position.tolist()}  quat(wxyz)={object_quat.tolist()}")
     print(f"WD:       {wd_m * 1000:.0f} mm   reconfig threshold: {reconfig_deg:.0f} deg"
           f"   roll_augmented: {roll_augmented}")
     print(f"Output:   {out_dir}")
     print()
 
-    # 해(관절값)는 그 로봇에서만 의미가 있다. 스냅샷을 따르면 자동으로 맞고, --scene override 나
-    # robot 키 이전 h5 에서만 어긋날 수 있다 — 조용히 다른 로봇으로 검증하지 않는다.
-    solved_robot = _decode(meta.get("robot", config.DEFAULT_ROBOT))
-    solved_cfg = _decode(meta.get("robot_config", config.ROBOT["curobo_config"]))
-    if solved_robot != config.ROBOT["name"] or solved_cfg != config.ROBOT["curobo_config"]:
-        raise SystemExit(
-            f"  ERROR: this solution was solved for robot '{solved_robot}' ({solved_cfg}) but the "
-            f"active scene uses '{config.ROBOT['name']}' ({config.ROBOT['curobo_config']})")
-    robot_cfg = PT.resolve_robot_config()
+    robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     world_config = PT.build_collision_world(object_name)
     home_q = np.asarray(config.ROBOT_START_STATE, dtype=np.float64)
 

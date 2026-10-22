@@ -29,8 +29,6 @@
 # robot_mount 는 로봇에 딸린 받침이라 셀과 같이 돌지 않는다(원점 + 정사각형).
 version: 1
 name: sim_default
-# 이 셀의 로봇 — workcell/robot/profiles/{robot}.yaml (없으면 ur20)
-robot: ur20
 
 # 물체 기본 pose. object_placements 에 없는 물체는 이 값을 쓴다.
 # rotation 은 보통 identity — 물체 방향은 config 가 아니라 **메시에 베이크**한다

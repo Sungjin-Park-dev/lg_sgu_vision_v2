@@ -22,8 +22,6 @@ from pathlib import Path
 
 import numpy as np
 
-from common.robot_profile import DEFAULT_ROBOT
-
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SCENES_ROOT = PROJECT_ROOT / "workcell" / "scenes"
 
@@ -255,16 +253,9 @@ def parse_scene(data: dict, source: str) -> dict:
     for key, raw in (data.get("object_placements") or {}).items():
         placements[key] = _parse_placement(raw, key)
 
-    # 이 셀에서 쓰는 로봇 — workcell/robot/profiles/{robot}.yaml. robot 키가 생기기 전의 씬·
-    # h5 스냅샷은 전부 UR20 이었으므로 없으면 ur20 이다. 프로필 존재는 apply_to 가 로드하며 본다.
-    robot = data.get("robot") or DEFAULT_ROBOT
-    if not isinstance(robot, str):
-        raise ValueError(f"{source}: robot must be a profile name (got {robot!r})")
-
     return {
         "version": SCHEMA_VERSION,
         "name": data.get("name") or source,
-        "robot": robot,
         "target_object": target,
         "environment": environment,
         "obstacles": obstacles,
@@ -298,7 +289,6 @@ def snapshot(scene: dict) -> dict:
     return {
         "version": SCHEMA_VERSION,
         "name": scene["name"],
-        "robot": scene["robot"],
         "target_object": _plain(scene["target_object"]),
         "environment": _plain(scene["environment"]),
         "obstacles": [_plain(o) for o in scene["obstacles"]],
@@ -357,9 +347,6 @@ def apply_to(cfg, scene: dict) -> None:
     assert cfg.TABLE is cfg.OBSTACLES[0], "TABLE 별칭이 OBSTACLES 와 분리됐다"
     support = next(w for w in cfg.WALLS if w["name"] == "support")
     assert any(o is support for o in cfg.OBSTACLES), "support 별칭이 OBSTACLES 와 분리됐다"
-
-    # 로봇은 씬이 고른다 — 씬을 바꾸면(스냅샷 재현 포함) 로봇도 따라 바뀐다.
-    cfg.apply_robot(scene["robot"])
 
     cfg.ACTIVE_SCENE = scene["name"]
 

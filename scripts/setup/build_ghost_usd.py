@@ -10,23 +10,22 @@ are marked `jointEnabled=False`.
 This is a one-shot file builder — re-run it if the source USD changes.
 
 Usage:
-    uv run scripts/setup/build_ghost_usd.py               # --robot ur20
-    uv run scripts/setup/build_ghost_usd.py --robot ur5e
-        # 로봇 프로필(workcell/robot/profiles/<robot>.yaml)의 usd -> ghost_usd
-        # (--source / --output 으로 직접 지정할 수도 있다)
+    uv run scripts/setup/build_ghost_usd.py
+        # uses defaults: workcell/robot/ur20_with_camera.usd
+        #             -> workcell/robot/ur20_with_camera_ghost.usd
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+DEFAULT_SOURCE = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera.usd"
+DEFAULT_OUTPUT = PROJECT_ROOT / "workcell" / "robot" / "ur20_with_camera_ghost.usd"
 
 PHYSICS_NAME_PARTS = ("Physics", "Physx")
 GHOST_TINT = (0.2, 0.8, 0.9)
@@ -202,19 +201,10 @@ def absolute_asset_paths(layer: Sdf.Layer) -> list[str]:
 
 
 def main():
-    from common import robot_profile
-
     p = argparse.ArgumentParser()
-    p.add_argument("--robot", default=robot_profile.DEFAULT_ROBOT,
-                   help="robot profile (workcell/robot/profiles/<name>.yaml): usd -> ghost_usd")
-    p.add_argument("--source", type=Path, default=None, help="override the profile's usd")
-    p.add_argument("--output", type=Path, default=None, help="override the profile's ghost_usd")
+    p.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = p.parse_args()
-    if args.source is None or args.output is None:
-        # ghost_usd 는 이 스크립트가 만드는 것이라 아직 없을 수 있다 — 파일 검사 없이 이름만 읽는다.
-        profile = robot_profile.load_profile(args.robot, check_files=False)
-        args.source = args.source or robot_profile.asset_path(profile, "usd")
-        args.output = args.output or robot_profile.asset_path(profile, "ghost_usd")
 
     if not args.source.exists():
         raise FileNotFoundError(f"Source USD missing: {args.source}")

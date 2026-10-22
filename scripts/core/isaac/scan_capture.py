@@ -46,7 +46,10 @@ from core.isaac import scene as urscene  # noqa: E402
 from core.reconstruction import storage  # noqa: E402
 from core.reconstruction.sensor import ScanCameraSpec  # noqa: E402
 
-JOINT_NAMES = _config.ROBOT_JOINT_NAMES      # 씬이 고른 로봇 — config 가 제자리에서 갱신
+JOINT_NAMES = [
+    "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+    "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+]
 SCAN_CAMERA_NAME = "ScanCamera"
 # USD 카메라의 aperture 는 아무 값이어도 된다 — focal 과의 비만 내부 파라미터를 정한다.
 H_APERTURE_MM = 20.955
@@ -155,11 +158,6 @@ class CaptureSession:
         self._rot_err_deg: list[float] = []
         self._t0 = None
         # 궤적 재생 — (joints (M,6), times (M,), shot_rows (N,)) 또는 None(순간이동)
-        planned_robot = plan.meta.get("robot", _config.DEFAULT_ROBOT)
-        if planned_robot != _config.ROBOT["name"]:
-            # 관절값은 그 로봇에서만 같은 카메라 자세다 — 다른 로봇이면 엉뚱한 곳을 찍는다.
-            raise ValueError(f"this scan plan was made for robot '{planned_robot}', but the "
-                             f"active scene uses '{_config.ROBOT['name']}' — re-plan it")
         self.motion = storage.load_motion(self.out_dir) if motion else None
         if self.motion is not None and not self._motion_matches():
             self.log("[capture] ⚠️  trajectory.csv does not match the plan's poses — teleporting instead")
@@ -426,7 +424,7 @@ def main():
     from isaacsim.core.api import SimulationContext
 
     sim = SimulationContext(stage_units_in_meters=1.0)
-    urscene.load_workcell()                    # 씬이 고른 로봇의 USD
+    urscene.load_workcell(urscene.DEFAULT_USD)
     app.update()
     urscene.load_target_object(args.object)
     if plan.object_pose is not None:

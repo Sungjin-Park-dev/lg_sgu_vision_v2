@@ -29,31 +29,29 @@ def _tick(label, t0):
 # =========================================================================
 # compute_fk·batch_collision_check 는 매 호출 cuRobo 객체를 새로 빌드했다. 한 run 내
 # robot_cfg·world_scene 는 불변(main 에서 1개씩)이라 결과는 빌드 횟수와 무관 → id 캐시로
-# 1회만 빌드해 반복 빌드비를 없앤다(궤적 보존, plan_cspace/IK 결과 불변). 캐시 값에 키가 된
-# robot_cfg·world_scene **객체 자체**를 같이 담아 둔다 — cuRobo 객체는 dict 를 붙잡지 않아서,
-# 없으면 버려진 dict 의 id 를 다른 로봇의 dict 가 물려받아 엉뚱한 Kinematics 가 나올 수 있다.
+# 1회만 빌드해 반복 빌드비를 없앤다(궤적 보존, plan_cspace/IK 결과 불변). 캐시가 객체 참조를
+# 들고 있어 id 재사용 위험 없음.
 
-_KIN_CACHE = {}      # id(robot_cfg) -> (robot_cfg, Kinematics)
-_CC_CACHE = {}       # (id(robot_cfg), id(world_scene)) -> (robot_cfg, world_scene, checker)
+_KIN_CACHE = {}      # id(robot_cfg) -> Kinematics
+_CC_CACHE = {}       # (id(robot_cfg), id(world_scene)) -> RobotCollisionChecker
 _REUSE_HITS = {"kin": 0, "cc": 0}   # 캐시 히트(=절약된 빌드) 수
 
 
 def _get_kinematics(robot_cfg):
-    hit = _KIN_CACHE.get(id(robot_cfg))
-    if hit is None:
+    kin = _KIN_CACHE.get(id(robot_cfg))
+    if kin is None:
         _t = time.time()
         kin = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_cfg))
-        _KIN_CACHE[id(robot_cfg)] = (robot_cfg, kin)
+        _KIN_CACHE[id(robot_cfg)] = kin
         _tick("kin_build(1x)", _t)
-        return kin
-    _REUSE_HITS["kin"] += 1
-    return hit[1]
+    else:
+        _REUSE_HITS["kin"] += 1
+    return kin
 
 
 def _get_collision_checker(robot_cfg, world_scene):
     key = (id(robot_cfg), id(world_scene))
-    hit = _CC_CACHE.get(key)
-    checker = None if hit is None else hit[2]
+    checker = _CC_CACHE.get(key)
     if checker is None:
         _t = time.time()
         cfg = RobotCollisionCheckerCfg.load_from_config(
@@ -65,23 +63,18 @@ def _get_collision_checker(robot_cfg, world_scene):
             self_collision_activation_distance=0.0,
         )
         checker = RobotCollisionChecker(cfg)
-        _CC_CACHE[key] = (robot_cfg, world_scene, checker)
+        _CC_CACHE[key] = checker
         _tick("cc_build(1x)", _t)
     else:
         _REUSE_HITS["cc"] += 1
     return checker
-def resolve_robot_config(robot_filename: str | None = None):
+def resolve_robot_config(robot_filename: str):
     """Robot YAML 을 dict 로 로드하고 urdf_path/asset_root_path 를 절대경로로 패치.
 
-    robot_filename 을 안 주면 **지금 씬이 고른 로봇**(config.ROBOT["curobo_config"])이다 —
-    호출 시점에 읽으므로 --scene / h5 스냅샷이 바꾼 로봇이 그대로 반영된다.
     탐색 순서: 프로젝트 workcell/robot/ → cuRobo content/configs/robot/.
     """
     import yaml
     from curobo.content import get_robot_configs_path
-
-    if robot_filename is None:
-        robot_filename = config.ROBOT["curobo_config"]
 
     candidates = [
         config.PROJECT_ROOT / "workcell" / "robot" / robot_filename,
@@ -283,30 +276,3 @@ def batch_collision_check(trajectory, robot_cfg, world_scene):
     n_collisions = int(is_collision.sum())
 
     return is_collision, n_collisions
-
-
-def joint_limits_and_periods(robot_cfg) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """활성 관절의 한계(rad)와 주기 — 범위가 두 바퀴 이상인 관절만 2π 주기로 본다.
-
-    resolve_robot_config 결과의 URDF 에서 읽는다(로봇마다 다르다 — 예: UR 은 팔꿈치만 ±π).
-    """
-    import xml.etree.ElementTree as ET
-
-    kin = robot_cfg["robot_cfg"]["kinematics"]
-    names = list(kin["cspace"]["joint_names"])
-    limit_clip = float(kin["cspace"].get("position_limit_clip", 0.0))
-    root = ET.parse(kin["urdf_path"]).getroot()
-    joints = {node.attrib.get("name"): node for node in root.findall("joint")}
-    lower, upper, periods = [], [], []
-    for name in names:
-        node = joints.get(name)
-        limit = None if node is None else node.find("limit")
-        if limit is None or "lower" not in limit.attrib or "upper" not in limit.attrib:
-            raise ValueError(f"URDF joint limits missing for {name}")
-        lo, hi = float(limit.attrib["lower"]), float(limit.attrib["upper"])
-        lower.append(lo + limit_clip)
-        upper.append(hi - limit_clip)
-        # A ±π joint cannot cross its endpoint even though its pose is angularly
-        # equivalent. Require a full extra revolution of available range.
-        periods.append(2.0 * np.pi if hi - lo >= 4.0 * np.pi - 1e-6 else 0.0)
-    return np.asarray(lower), np.asarray(upper), np.asarray(periods)

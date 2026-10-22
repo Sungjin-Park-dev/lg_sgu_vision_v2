@@ -113,7 +113,7 @@ def main() -> int:
     # 충돌 게이트가 시간을 매기기 전에만 반영되면 된다. 여기가 그 앞이다.
     PT.apply_timing_cli(args)
 
-    robot_cfg = PT.resolve_robot_config()
+    robot_cfg = PT.resolve_robot_config(PT.ROBOT_CONFIG)
     world_config = PT.build_collision_world(args.object)
 
     # 엣지 1개짜리 batch — plan_seams_batched(core/glns/joining.py)의 1-pair 형태다.

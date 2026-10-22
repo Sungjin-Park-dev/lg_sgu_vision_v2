@@ -814,14 +814,6 @@ class TrajectoryStudio:
         # 해가 풀린 셀을 그대로 되살린다 — 안 하면 다른 씬으로 띄운 studio 가 그 해를
         # 엉뚱한 장애물 배치 위에 그린다. 순서 주의: 씬 로드가 TARGET_OBJECT 를 되돌린다.
         snap = _decode_attr(metadata["scene"]) if "scene" in metadata else None
-        # 로봇이 다른 결과는 열지 않는다 — IK 백엔드·로봇 렌더러가 시작 때 로봇으로 만들어져 있어
-        # 다른 로봇의 관절값을 이 로봇으로 그리게 된다. 그 씬으로 studio 를 다시 띄워야 한다.
-        snap_robot = (snap or {}).get("robot", config.DEFAULT_ROBOT)
-        if snap_robot != config.ROBOT["name"]:
-            self.status.content = (
-                f"이 결과는 로봇 `{snap_robot}` 으로 풀렸다 — 지금 studio 는 `{config.ROBOT['name']}`. "
-                f"`--scene {_decode_attr(metadata.get('scene_name'))}` 로 다시 띄워서 연다.")
-            return
         if snap is not None and _decode_attr(metadata.get("scene_name")) != config.ACTIVE_SCENE:
             config.load_scene_snapshot(snap)
         config.TARGET_OBJECT["position"] = object_position

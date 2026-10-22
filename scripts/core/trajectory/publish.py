@@ -16,15 +16,10 @@
 
 import argparse
 import csv
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from common import config, scene_config  # noqa: E402
 
 try:
     import rclpy
@@ -43,8 +38,14 @@ except ModuleNotFoundError as exc:
     class Node:  # type: ignore[no-redef]
         pass
 
-# 씬이 고른 로봇의 관절 이름(컨트롤러에 보내는 순서) — --scene 적용 뒤에도 같은 list 객체다.
-JOINT_NAMES = config.ROBOT_JOINT_NAMES
+JOINT_NAMES = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
 
 # Inspection publishes to joint_trajectory_controller (kept separate from
 # scaled_joint_trajectory_controller, which MoveIt uses) so the two are gated
@@ -317,11 +318,9 @@ def main():
     parser.add_argument("--joint-target", type=str, default=None,
                         help="CSV 대신 단일 joint 목표(rad 6개, 쉼표/공백 구분)로 바로 이동. "
                              "현재자세→목표를 속도제한 보간 (planning 없음).")
-    scene_config.add_cli_argument(parser)
     parser.add_argument("--target", choices=["controller", "isaac"], default="controller",
                         help="controller=실로봇 ros2_control, isaac=Isaac에 직접 스트리밍(sim)")
     args = parser.parse_args()
-    scene_config.apply_cli(args, config)      # 로봇(관절 이름)은 씬이 고른다
 
     if ROS_IMPORT_ERROR is not None:
         parser.error(

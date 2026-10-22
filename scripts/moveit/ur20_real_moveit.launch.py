@@ -51,9 +51,10 @@ UR_URDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.urdf.xacro')
 # 벤더 SRDF + 카메라 자기충돌 예외. 벤더 것만 쓰면 플랜지에 붙은 카메라가
 # wrist_3_link 와 닿아 있는 것을 자기충돌로 잡아 계획이 거부된다.
 SRDF_XACRO = os.path.join(MOVEIT_DIR, 'ur_config', 'ur_camera.srdf.xacro')
-# 로봇 자산(URDF·xrdf·ur_type)은 씬이 고른 로봇 프로필에서 온다(moveit_assets.robot_assets).
-# xrdf 는 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 것이고, launch 가
-# 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
+# 카메라 스피어(camera_link)와 tool_frames=camera_optical_frame 를 가진 xrdf.
+# launch 가 여기서 월드충돌용 집합을 파생시킨다(prepare_xrdf).
+CAMERA_XRDF = moveit_assets.SOURCE_XRDF
+KINEMATICS_URDF = '/tmp/ur20_camera_kinematics_real.urdf'
 # cuMotion 없이 장애물을 넣는 노드 (use_cumotion:=false 에서 쓴다).
 SCENE_PUB_SCRIPT = os.path.join(MOVEIT_DIR, 'publish_planning_scene.py')
 
@@ -76,18 +77,14 @@ CUMOTION_DISPLAY_ADAPTER = 'default_planning_response_adapters/DisplayMotionPath
 
 def launch_setup(context: LaunchContext, *args, **kwargs):
     del args, kwargs
-    scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
-    robot = moveit_assets.robot_assets(scene_name)       # 씬 → 로봇 프로필
-    # 빈 값이면 프로필 것을 쓴다 — 명시하면 그 값(실험용 override). ur_type 은 실기 드라이버에도 간다.
-    ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type'))) or robot['ur_type']
-    xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path'))) or robot['xrdf']
+    ur_type = str(context.perform_substitution(LaunchConfiguration('ur_type')))
+    xrdf_path = str(context.perform_substitution(LaunchConfiguration('xrdf_path')))
     # base_link_inertia 스피어를 **월드충돌에서만** 뺀 파생 xrdf (자기충돌은 유지).
     # 그대로 쓰면 그 스피어가 robot_mount 상면을 상시 ~16mm 파고들어 cuMotion 이
     # 모든 시작 자세를 world collision 으로 거부한다 — prepare_xrdf 주석 참고.
-    xrdf_path = moveit_assets.prepare_xrdf(f"/tmp/{robot['name']}_camera_real.xrdf", xrdf_path)
+    xrdf_path = moveit_assets.prepare_xrdf('/tmp/ur20_camera_real.xrdf', xrdf_path)
+    scene_name = str(context.perform_substitution(LaunchConfiguration('scene')))
     scene_file = moveit_assets.build_collision_scene(scene_name, '/tmp/lg_cell_real.scene')
-    kinematics_urdf = moveit_assets.prepare_kinematics_urdf(
-        f"/tmp/{robot['name']}_camera_kinematics_real.urdf", robot['urdf'])
     use_cumotion = str(context.perform_substitution(
         LaunchConfiguration('use_cumotion'))).lower() not in ('false', '0')
 
@@ -107,7 +104,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     moveit_config = (
         MoveItConfigsBuilder(ur_type, package_name='ur_moveit_config')
         .robot_description(file_path=UR_URDF_XACRO,
-                           mappings={'kinematics_urdf': kinematics_urdf})
+                           mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF)})
         .robot_description_semantic(file_path=SRDF_XACRO, mappings={'name': 'ur'})
         .robot_description_kinematics(file_path='config/kinematics.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
@@ -153,10 +150,11 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
     )
 
     # 3) cuMotion action server (needs the urdf as a file).
-    urdf_path = f"/tmp/collated_{robot['name']}_real_urdf.urdf"
+    urdf_path = '/tmp/collated_ur20_real_urdf.urdf'
     with open(urdf_path, 'w') as f:
         f.write(xacro.process_file(
-            UR_URDF_XACRO, mappings={'kinematics_urdf': kinematics_urdf}).toxml())
+            UR_URDF_XACRO,
+            mappings={'kinematics_urdf': moveit_assets.prepare_kinematics_urdf(KINEMATICS_URDF)}).toxml())
     cumotion = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('isaac_ros_cumotion'),
@@ -205,8 +203,7 @@ def launch_setup(context: LaunchContext, *args, **kwargs):
 
 def generate_launch_description():
     launch_args = [
-        DeclareLaunchArgument('ur_type', default_value='',
-                              description='UR robot type (빈 값 = 씬이 고른 로봇 프로필의 ur_type)'),
+        DeclareLaunchArgument('ur_type', default_value='ur20'),
         DeclareLaunchArgument('robot_ip', default_value='0.0.0.0',
                               description='Robot IP (ignored for mock_hardware).'),
         DeclareLaunchArgument('use_mock_hardware', default_value='true',
@@ -216,8 +213,7 @@ def generate_launch_description():
             description='워크셀 씬 이름(workcell/scenes/<name>.yaml). '
                         '빈 문자열이면 장애물 없이 계획한다.',
         ),
-        DeclareLaunchArgument('xrdf_path', default_value='',
-                              description='cuMotion XRDF (빈 값 = 씬이 고른 로봇 프로필의 xrdf)'),
+        DeclareLaunchArgument('xrdf_path', default_value=CAMERA_XRDF),
         DeclareLaunchArgument(
             'use_cumotion', default_value='true',
             description='false = cuMotion 없이 OMPL 로만 계획한다. cuMotion 은 CUDA 13 '

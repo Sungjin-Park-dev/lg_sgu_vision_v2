@@ -149,7 +149,7 @@ class IKBackend:
     """object 마다 collision world + 영속 IK 솔버를 들고 IK 대표해/충돌을 푼다."""
 
     def __init__(self, object_name: str):
-        self.robot_cfg = PT.resolve_robot_config()
+        self.robot_cfg = PT.resolve_robot_config(config.DEFAULT_ROBOT_CONFIG)
         self.urdf_path = self.robot_cfg["robot_cfg"]["kinematics"]["urdf_path"]
         self._world_ctr = 0
         self.set_object(object_name)
