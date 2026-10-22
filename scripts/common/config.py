@@ -206,6 +206,8 @@ def scene_snapshot() -> dict:
 # 추적). 표에 없는 물체(curved_structure/sample 등 충분히 큰 물체)는 기존대로 mesh 를 그대로 쓴다.
 OBJECT_COLLISION_SHAPE = {
     "cylinder_sample": "box",  # Ø46×81mm — mesh 충돌 오판 회피용 bbox proxy
+    "tomato": "box",           # 82×82×65mm 실물 복원(바닥 열림) — mesh 로는 IK 0/17920
+    "box": "box",              # 28×72×86mm 실물 복원(스페클, 바닥 열림) — 최소 치수 5cm 미만
 }
 
 # 물체별 기본 타깃 머티리얼 RGB ("R,G,B"). 지정 시 그 재질 면만 샘플링한다.

@@ -1,0 +1,31 @@
+{
+ "source_run": "data/box/scan/20261020_162223_799126",
+ "source": "recon.ply (voxel 2, ICP \ub054, \uc2a4\ud398\ud074 + depth 5\uc7a5 \uc911\uc559\uac12)",
+ "board_T_object": [
+  [
+   1.0,
+   0.0,
+   0.0,
+   -0.004253006689250469
+  ],
+  [
+   0.0,
+   1.0,
+   0.0,
+   0.0017322172597050677
+  ],
+  [
+   0.0,
+   0.0,
+   1.0,
+   0.041
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "note": "\ubcf4\ub4dc \uc791\uc5c5 \uc88c\ud45c\uc758 \ubcf5\uc6d0 \uba54\uc2dc\ub97c \uc717\uba74 \uc911\uc2ec\u00b7\ubc1b\uce68\ub300 \uc717\uba74(z 0.041) \uc6d0\uc810\uc73c\ub85c \ud3c9\ud589\uc774\ub3d9, \ubc1b\uce68\ub300 \uc717\uba74+2 mm \uc544\ub798\uc640 \uc791\uc740 \uc870\uac01 \uc81c\uac70"
+}
