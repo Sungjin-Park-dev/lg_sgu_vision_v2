@@ -48,7 +48,8 @@ class LiveSource:
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
-        from rclpy.executors import SingleThreadedExecutor
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+        from rclpy.executors import MultiThreadedExecutor
         from rclpy.signals import SignalHandlerOptions
         from sensor_msgs.msg import Image, CameraInfo
         from cv_bridge import CvBridge
@@ -84,7 +85,10 @@ class LiveSource:
         ]
         self.device_client = self.node.create_client(DeviceInfo, topics["device_info"])
         self.timer = self.node.create_timer(1.0, self._device_info)
-        self.executor = SingleThreadedExecutor()
+        # 앱의 촬영 서비스(/piper_scan/capture)는 이 그룹에서 돈다 — 영상 콜백(기본 그룹)과 다른 스레드라 촬영 중에도
+        # 새 프레임이 들어온다(촬영이 depth 여러 장을 기다린다). 단일 스레드면 서비스가 끝날 때까지 영상이 멈춘다.
+        self.service_group = MutuallyExclusiveCallbackGroup()
+        self.executor = MultiThreadedExecutor(num_threads=2)
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self._spin, daemon=True)
         self.thread.start()

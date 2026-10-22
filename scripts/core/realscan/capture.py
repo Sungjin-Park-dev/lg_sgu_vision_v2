@@ -52,6 +52,33 @@ def depth_meters(array, encoding):
     return d
 
 
+def median_depth(frames):
+    """멈춘 카메라의 depth 여러 장 → 픽셀별 중앙값 한 장(CameraFrame, 가운데 장의 시각).
+
+    D405 같은 수동 스테레오는 장마다 잡음이 다르게 들어간다 — 픽셀마다 값이 흔들리고, 한두 장에서만
+    튀거나 비는 픽셀이 있다. 과반 장에 값이 있는 픽셀만 그 값들의 중앙값으로 채우고 나머지는 무효(inf)로
+    둔다(한 장에만 튄 값으로 구멍을 메우지 않는다). 매 장 똑같이 틀리는 오차(무늬 없는 면 등)는 못 고친다.
+    """
+    frames = list(frames)
+    if not frames:
+        raise ValueError("depth 프레임이 없습니다")
+    model = frames[0].model
+    if any(f.model is not model and f.model.record() != model.record() for f in frames):
+        raise ValueError("depth 여러 장 사이에 카메라 설정이 변경되었습니다")
+    if len(frames) == 1:
+        return frames[0]
+    stack = np.stack([np.where(np.isfinite(f.pixels), f.pixels, np.nan) for f in frames]).astype(np.float32)
+    valid = np.isfinite(stack).sum(axis=0)
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)       # 전부 NaN 인 픽셀 — 아래에서 inf 로
+            d = np.nanmedian(stack, axis=0)
+    d[valid < len(frames) // 2 + 1] = np.inf
+    stamps = sorted(f.stamp for f in frames)
+    return CameraFrame(stamps[len(stamps) // 2], d.astype(np.float32), model)
+
+
 def atomic_json(path, value):
     atomic_bytes(Path(path), (json.dumps(value, ensure_ascii=False, indent=2,
                                         allow_nan=False) + "\n").encode())

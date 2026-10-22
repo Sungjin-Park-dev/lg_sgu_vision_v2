@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from core.realscan.calibration import CharucoBoard, check_board_depth, solve_hand_eye, validate_holdout  # noqa: E402
 from core.realscan.capture import (  # noqa: E402
-    CameraFrame, CameraModel, JointHistory, ScanSession, atomic_bytes, atomic_json, depth_meters, rigid,
+    CameraFrame, CameraModel, JointHistory, ScanSession, atomic_bytes, atomic_json, depth_meters, median_depth, rigid,
     transform,
 )
 from core.realscan.piper import PassivePiper, PiperFK  # noqa: E402
@@ -338,8 +338,22 @@ class ScanChecks(unittest.TestCase):
                 ui._camera_visibility()
                 with urlopen(f"http://127.0.0.1:{port}", timeout=5) as response:
                     self.assertEqual(response.status, 200)
+                # 자세마다 depth 를 설정 장수(depth_frames)만큼 받아 중앙값 — 그 사이 팔이 움직이면 저장 안 함
+                self.assertEqual(cfg["depth_frames"], 5)
+                original_sample, calls = ui.source.sample, []
+                def drifting(kind, near=None):
+                    frame, q, dt = original_sample(kind, near)
+                    calls.append(kind)
+                    return frame, q + (.01 if len(calls) > 1 else 0.), dt
+                with patch.object(ui.source, "sample", side_effect=drifting):
+                    with self.assertRaisesRegex(ValueError, "팔이 움직였습니다"):
+                        ui.capture()
+                self.assertEqual(len(ui.session.records), 0)
                 for _ in range(8):
                     ui.capture()
+                records = json.loads((ui.session.directory / "capture.json").read_text())["frames"]
+                self.assertTrue(all(r["depth_frames"] == 5 for r in records))
+                self.assertIn("depth 5장 중앙값", ui.capture_status.content)
                 ui._start_reconstruction()
                 self.assertTrue(ui.capture_button.disabled)
                 deadline = time.monotonic() + 30
@@ -408,6 +422,33 @@ class ScanChecks(unittest.TestCase):
         self.assertAlmostEqual(float(depth_meters(float_depth, "32FC1")[0, -1]), .2)
         with self.assertRaises(ValueError):
             depth_meters(image, "rgb8")
+
+    def test_median_depth_rejects_noise_fliers_and_lone_values(self):
+        model = CameraModel(4, 3, np.array([[100., 0, 2], [0, 100., 1.5], [0, 0, 1]]), np.zeros(5), "d", "none")
+        rng = np.random.default_rng(0)
+        frames = []
+        for k in range(5):
+            d = (.2 + rng.normal(0, .001, (3, 4))).astype(np.float32)
+            if k == 2:
+                d[0, 0] = .25                       # 한 장에만 튄 값
+            if k < 2:
+                d[0, 1] = np.inf                    # 두 장에서 빈 픽셀 → 나머지 세 장으로 채움
+            if k < 3:
+                d[0, 2] = np.inf                    # 세 장에서 빈 픽셀 → 과반이 없으니 무효
+            if k > 0:
+                d[0, 3] = np.inf                    # 한 장에만 값 → 무효(한 장의 튄 값으로 메우지 않음)
+            frames.append(CameraFrame(10. + k * .07, d, model))
+        out = median_depth(frames)
+        self.assertAlmostEqual(out.stamp, 10.14)    # 가운데 장의 시각
+        self.assertLess(abs(out.pixels[0, 0] - .2), .003)
+        self.assertTrue(np.isfinite(out.pixels[0, 1]))
+        self.assertTrue(np.isinf(out.pixels[0, 2]) and np.isinf(out.pixels[0, 3]))
+        rest = out.pixels[1:]
+        self.assertLess(np.std(rest - .2), np.std(frames[0].pixels[1:] - .2))
+        self.assertIs(median_depth(frames[:1]), frames[0])
+        other = CameraModel(4, 3, np.eye(3) * 50, np.zeros(5), "d", "none")
+        with self.assertRaisesRegex(ValueError, "카메라 설정"):
+            median_depth([frames[0], CameraFrame(11., frames[1].pixels, other)])
 
     def test_stability_time_and_incomplete_feedback(self):
         hist = JointHistory()
@@ -552,6 +593,19 @@ class ScanChecks(unittest.TestCase):
         self.assertAlmostEqual(float(sp.box_distance([[0.1, 0, 0]], [0, 0, 0], [0.1, 0.1, 0.1])[0]), 0.05)
         ob = sp.obstacle_for_tour(base_T_world, [(centre, [0.05, 0.05, 0.05])], margin=0.01)
         np.testing.assert_allclose(ob, [0.27, 0, 0.068, 0.07, 0.07, 0.07], atol=1e-9)
+        # 회전판: 방향을 직접 주고, 판을 90° 씩 돌린 4 경우 중 가장 나쁜 값으로 본다
+        np.testing.assert_allclose(sp.view_directions([(0, 0)], base_T_world, centre)[0], [-1, 0, 0], atol=1e-9)
+        top = sp.view_directions([(85, 0)], base_T_world, centre)       # 방위 0 = 물체에서 로봇 쪽
+        long_box = [0.12, 0.04, 0.05]
+        one = plan(long_box, directions=top, distances=[0.20])
+        four = plan(long_box, directions=top, distances=[0.20], turns=4)
+        self.assertTrue(four["ok"], four)
+        self.assertAlmostEqual(four["elev_deg"], 85, delta=0.01)
+        self.assertEqual(len(four["corners_by_turn"]), 4)
+        self.assertEqual(four["corners"], min(four["corners_by_turn"]))
+        self.assertLessEqual(four["finger_clear_m"], one["finger_clear_m"])
+        ob = sp.obstacle_for_tour(base_T_world, [(centre, long_box)], margin=0, turns=4)
+        np.testing.assert_allclose(ob[3:5], [0.12, 0.12], atol=1e-9)    # 돌린 긴 물체까지 감싼다
 
     def test_fk_measured_values_not_clamped(self):
         candidates = [ROOT / "workcell/robot/piper/piper_description.urdf",

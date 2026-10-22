@@ -23,7 +23,7 @@ from core.realscan.calibration import (  # noqa: E402
     CalibrationQualityError, CharucoBoard, board_centre_frame, board_size, board_spread, calibration_limits,
     check_board_depth, mean_board_pose, solve_hand_eye, validate_holdout,
 )
-from core.realscan.capture import ScanSession, atomic_bytes, atomic_json, transform  # noqa: E402
+from core.realscan.capture import ScanSession, atomic_bytes, atomic_json, median_depth, transform  # noqa: E402
 from core.realscan.piper import PiperFK  # noqa: E402
 from core.realscan.sources import CalibrationSimSource, DemoSource, LiveSource, UrLiveSource  # noqa: E402
 from core.realscan.ur import UrFK  # noqa: E402
@@ -58,6 +58,9 @@ def read_config(path):
     cfg["calibration_validation"] = calibration_limits(**cfg.get("calibration_validation",
         {"max_translation_mm": 5., "max_rotation_deg": 1.}))
     cfg["urdf"] = str(ROOT / cfg["urdf"])          # 상대경로는 리포 기준 (절대경로는 그대로)
+    cfg.setdefault("depth_frames", 1)
+    if not (isinstance(cfg["depth_frames"], int) and 1 <= cfg["depth_frames"] <= 15):
+        raise ValueError("depth_frames 는 1–15 정수여야 합니다")
     cfg.setdefault("robot", "piper")
     cfg.setdefault("label", "PiPER")
     if cfg["robot"] not in ("piper", "ur5e"):
@@ -293,7 +296,8 @@ class ScanUI:
         if getattr(args, "allow_robot_control", False) and hasattr(source, "node"):
             from std_srvs.srv import Trigger
             # pose_tour --capture 가 도착·정지 후 부른다 — 촬영 버튼과 같다(이 앱은 여전히 로봇 명령이 없다)
-            self.capture_service = source.node.create_service(Trigger, CAPTURE_SERVICE, self._remote_capture)
+            self.capture_service = source.node.create_service(Trigger, CAPTURE_SERVICE, self._remote_capture,
+                                                              callback_group=source.service_group)
         self._controls(False)
 
     def _remote_capture(self, _request, response):
@@ -313,7 +317,7 @@ class ScanUI:
             response.message = f"{len(self.session.records)}장 저장" + (
                 f" · 코너 {r['board_corners']} · 재투영 {r['board_reprojection_px']:.2f}px · "
                 f"팔로 계산한 위치와 차이 {r['robot_vs_board_mm']:.1f} mm" if r.get("camera_pose") == "board"
-                else " · 카메라 위치: 팔 FK")
+                else " · 카메라 위치: 팔 FK") + (f" · depth {r['depth_frames']}장 중앙값" if r.get("depth_frames", 1) > 1 else "")
         return response
 
     def _action(self, action):
@@ -404,7 +408,8 @@ class ScanUI:
         spec = self.scan_board.spec
         board_T, rms, annotated = self.scan_board.detect(color)
         self.last_annotated, self.annotated_until = annotated, time.monotonic() + 2.0
-        depth, _, _, _ = self._paired_depth(color, color_q, identity)
+        depth, q, _, _ = self._paired_depth(color, color_q, identity)
+        depth, _, _ = self._depth_stack(depth, q)
         report, _, _ = check_board_depth(depth, board_T, identity["color_T_depth"], board_size=board_size(spec),
                                          ignore_nearer_m=BOARD_OCCLUDER_M, **self._depth_params())
         if not report["passed"]:
@@ -713,6 +718,32 @@ class ScanUI:
             raise ValueError("RGB·depth 기록 사이에 팔이 움직였습니다")
         return depth, q, dt, frame_dt
 
+    def _depth_stack(self, first, q0):
+        """멈춘 자세에서 depth 를 설정 depth_frames 장까지 더 받아 픽셀별 중앙값 한 장으로 → (frame, 장 수, 걸린 s).
+
+        first: 이미 받은(RGB 와 짝지은) depth, q0: 그때 관절값. 더 받는 장마다 정지 판정(sample)을 다시 하고,
+        관절이 q0 에서 step_rad 넘게 움직였으면 거절한다 — 같은 장면을 여러 번 본 것이어야 중앙값이 뜻이 있다.
+        """
+        n = max(1, int(self.cfg.get("depth_frames", 1)))
+        frames, last_error = [first], None
+        deadline = time.monotonic() + 1.0 + 0.3 * n            # 15 fps 면 5장에 ~0.3 s
+        while len(frames) < n:
+            if time.monotonic() > deadline:
+                raise ValueError(f"depth {n}장을 제때 받지 못했습니다({len(frames)}장)"
+                                 + (f": {last_error}" if last_error else " — 카메라 프레임 속도를 확인하세요"))
+            time.sleep(0.01)
+            try:
+                frame, q, _ = self.source.sample("depth")
+            except ValueError as exc:            # CAN 피드백 프레임이 잠깐 어긋나는 등 — 마감까지 다시 받는다
+                last_error = exc
+                continue
+            if frame.stamp <= frames[-1].stamp:
+                continue
+            if np.max(np.abs(np.asarray(q) - np.asarray(q0))) > self.cfg["capture_guard"]["step_rad"]:
+                raise ValueError("depth 여러 장을 받는 사이 팔이 움직였습니다 — 정지한 뒤 다시 찍으세요")
+            frames.append(frame)
+        return median_depth(frames), n, float(frames[-1].stamp - frames[0].stamp)
+
     def _depth_params(self):
         return {**self.cfg.get("depth_validation", {}),
                 "min_range_m": self.cfg["min_range_m"], "max_range_m": self.cfg["max_range_m"]}
@@ -817,7 +848,8 @@ class ScanUI:
             self.session.meta["camera_pose"] = "board"
         else:
             frame, q, dt = self.source.sample("depth")
-            T, detail = self._camera_pose(q), {"sync_error_s": dt}
+            frame, n, span = self._depth_stack(frame, q)
+            T, detail = self._camera_pose(q), {"sync_error_s": dt, "depth_frames": n, "depth_span_s": span}
             self.session.meta.pop("camera_pose", None)
         index = self.session.save(frame, q, T, self.calibration, self.roi.value, self.radius.value,
                                   boxes, names, {**detail, "device": self.source.device})
@@ -826,6 +858,8 @@ class ScanUI:
                    f"팔로 계산한 위치와 차이 {detail['robot_vs_board_mm']:.1f} mm / "
                    f"{detail['robot_vs_board_deg']:.2f}° (팔·손목 보정·클램프 오차)\n" if track else
                    "카메라 위치: **팔 FK** (보드 추적 꺼짐)\n")
+        if detail.get("depth_frames", 1) > 1:
+            tracked += f"depth {detail['depth_frames']}장 중앙값 ({detail['depth_span_s']:.2f}s)\n"
         self.capture_status.content = (f"**{index + 1}장 저장** — 권장 8–12개 시점\n{tracked}"
                                        f"`{self.session.directory}`")
         self._draw_saved(self.session.directory)
@@ -851,12 +885,14 @@ class ScanUI:
             raise ValueError(f"보드 추적: {exc} — 보드가 더 보이는 자세에서 다시 찍으세요 (저장 안 함)")
         self.last_annotated, self.annotated_until = annotated, time.monotonic() + 2.0
         depth, q, dt, frame_dt = self._paired_depth(color, color_q, identity)
+        depth, n, span = self._depth_stack(depth, q)
         world_T_board = np.linalg.inv(board_centre_frame(spec))
         T = world_T_board @ np.linalg.inv(color_T_board) @ transform(identity["color_T_depth"])
         robot_T = self._camera_pose(q)
         delta = np.linalg.inv(robot_T) @ T
         return depth, q, T, {
             "camera_pose": "board", "sync_error_s": dt, "color_depth_sync_s": frame_dt,
+            "depth_frames": n, "depth_span_s": span,
             "board_corners": self.scan_board.corners, "board_reprojection_px": rms,
             "robot_world_T_cam": robot_T.tolist(),
             "robot_vs_board_mm": float(np.linalg.norm(T[:3, 3] - robot_T[:3, 3]) * 1000),

@@ -443,8 +443,8 @@ def main():
             if args.capture:
                 tour.spin_until(lambda: False, args.wait)          # 손목·카메라 흔들림이 가라앉게
                 ok, message = tour.capture()
-                for _ in range(CAPTURE_TRIES - 1):                  # 정지 판정이 늦은 경우만 다시
-                    if ok or not ("정지" in message or "움직" in message):
+                for _ in range(CAPTURE_TRIES - 1):                  # 정지 판정이 늦거나 CAN 피드백이 잠깐 끊긴 경우만 다시
+                    if ok or not ("정지" in message or "움직" in message or "피드백" in message):
                         break
                     tour.spin_until(lambda: False, 2.0)
                     ok, message = tour.capture()

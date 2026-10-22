@@ -176,6 +176,7 @@ PiPER 는 팔 FK 오차(보정 퍼짐 하한 ~5 mm)와 손목 클램프 흔들�
 - 한 run 은 한 방식이다 — 찍기 시작하면 켜고 끌 수 없다. 작업 좌표가 보드가 아니면 꺼진다.
 - `plan.json`·`capture.json` 에 `camera_pose: board` 와 작업 좌표를 잡은 보드 규격(`board`)이, 각 장 기록에 `board_corners`·`board_reprojection_px`·`robot_world_T_cam`·`robot_vs_board_mm/deg` 가 남는다. 프레임 `world_T_cam` 은 보드로 잰 값이고 복원은 그대로 이것을 쓴다(`recon.json` 의 `camera_pose`). 보드 추적 run 에서는 ICP 없이 먼저 복원해 본다.
 - 손목 보정은 여전히 필요하다 — 카메라 식별·미리보기·ROI 놓기·비교용 팔 자세에 쓴다.
+- **depth 여러 장 중앙값**: 촬영 한 장은 팔이 멈춘 채 받은 depth `depth_frames`(설정, 기본 5)장의 픽셀별 중앙값이다 — 과반 장에 값이 있는 픽셀만 채운다. 장마다 다른 잡음·튀는 점·한두 장의 구멍이 줄고(box 윗면 유효 depth 86 → 99%), 15 fps 에서 한 장에 ~0.3 s 더 걸린다. 그 사이 관절이 움직이면 저장하지 않는다. 매 장 똑같이 틀리는 오차(무늬 없는 흰 면)는 못 고친다 — 그런 면은 무광 무작위 점(스페클)을 칠한다(흰 box 옆면 채움 11–24% → 94–97%). 기록: `capture.json` 의 `depth_frames`·`depth_span_s`. 작업 좌표 설정의 보드 depth 검사도 같은 중앙값을 쓴다(보정 검증은 한 장 그대로).
 - **자동 순회 촬영**: 드라이버·MoveIt 을 켜고 앱을 `--allow-robot-control` 로 실행하면 앱이 촬영 서비스 `/piper_scan/capture`(std_srvs/Trigger, 버튼과 같은 촬영)를 연다. `pose_tour.py --poses <자세.yaml> --execute --yes --capture [--wait 1.5]` 는 자세마다 이동 → 정지 확인 → `--wait` 초 → 촬영을 반복하고, 실패한 자세(코너 부족 등)는 기록만 하고 다음으로 간다. 비상정지는 손에 둔다 — 이동 중 Ctrl+C 는 /emergency_stop(5.6 복구 필요)이다.
 - **자세 만들기**: `scan_poses.py` 가 다녀 본 run(또는 자세 YAML)의 시점 방향을 유지한 채 물체 중심에서 16–22 cm 로 당긴 자세를 만든다 — 관절 한계·손목 뻗음 30 cm·팔 모양 변화 60° 이내, 벌린 그리퍼 손가락이 물체·받침대·보드에서 2.5 cm 이상(팔 FK 오차 여유), 보이는 보드 코너(계산 26개 ≈ 실제 15개). 작업 좌표 위치는 `board_check.py --scan-board --save-frame <json>`(읽기 전용)으로 잰다 — 팔 FK 오차가 가장 작은 위에서 내려다보는 자세에서 잰다(옆 자세는 ~1.5 cm 섞임). 끝에 pose_tour `--obstacle` 값을 같이 출력한다.
 

@@ -20,6 +20,9 @@ scan_board:
   marker_m: 0.018
   dictionary: DICT_4X4_50
   layout: opencv_4.6_even_row_legacy
+# 촬영 한 장 = 멈춘 채 받은 depth 이만큼의 픽셀별 중앙값(과반 장에 값이 있는 픽셀만). 잡음·튀는 점·
+# 한두 장의 구멍이 준다. 1 이면 한 장 그대로(예전 동작). 15 fps 에서 5장 ≈ 0.3 s 더 걸린다.
+depth_frames: 5
 capture_guard:
   stable_s: 0.5
   step_rad: 0.002
